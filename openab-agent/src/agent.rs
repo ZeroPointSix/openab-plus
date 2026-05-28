@@ -236,7 +236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simple_prompt_returns_text_response() {
+    async fn test_simple_prompt_returns_text_response() {
         let mock = MockLlmProvider::new(vec![vec![
             LlmEvent::Text("Hello!".to_string()),
             LlmEvent::Stop,
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_callback_receives_all_text_chunks() {
+    async fn test_streaming_callback_receives_all_text_chunks() {
         let mock = MockLlmProvider::new(vec![vec![
             LlmEvent::Text("Hello ".to_string()),
             LlmEvent::Text("world!".to_string()),
@@ -273,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Integration test: executes real file tools
-    async fn tool_call_executes_then_returns_text() {
+    async fn test_tool_call_executes_then_returns_text() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("test.txt"), "file content here").unwrap();
 
@@ -296,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Integration test: executes real file tools
-    async fn tool_error_marked_as_is_error() {
+    async fn test_tool_error_marked_as_is_error() {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let mock = MockLlmProvider::new(vec![
@@ -327,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore] // Integration test: executes real file tools
-    async fn multiple_tool_rounds_execute_sequentially() {
+    async fn test_multiple_tool_rounds_execute_sequentially() {
         let tmp = tempfile::TempDir::new().unwrap();
 
         let mock = MockLlmProvider::new(vec![

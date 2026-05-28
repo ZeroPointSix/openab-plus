@@ -255,7 +255,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialize_returns_streaming_capability() {
+    fn test_initialize_returns_streaming_capability() {
         let server = AcpServer::new();
         let resp_str = server.handle_initialize(1);
         let resp: Value = serde_json::from_str(&resp_str).unwrap();
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn session_new_with_valid_key_returns_session_id() {
+    fn test_session_new_with_valid_key_returns_session_id() {
         unsafe { std::env::set_var("ANTHROPIC_API_KEY", "test-key") };
         let mut server = AcpServer::new();
         let resp_str = server.handle_session_new(2);
