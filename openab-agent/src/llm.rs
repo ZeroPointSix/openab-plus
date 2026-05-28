@@ -513,7 +513,12 @@ impl LlmProvider for OpenAiProvider {
                 // If we collected output_items, parse them (includes function_calls)
                 if !output_items.is_empty() {
                     let response = json!({"output": output_items});
-                    return parse_openai_response(&response);
+                    let mut events = Vec::new();
+                    if !current_text.is_empty() {
+                        events.push(LlmEvent::Text(current_text));
+                    }
+                    events.extend(parse_openai_response(&response)?);
+                    return Ok(events);
                 }
 
                 // Fallback: text-only response

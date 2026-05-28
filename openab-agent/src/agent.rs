@@ -129,8 +129,10 @@ impl Agent {
                 content: assistant_content,
             });
 
-            if tool_calls.is_empty() {
-                // No tool calls — we're done, use whatever text was produced
+            if tool_calls.is_empty() || !text_parts.is_empty() {
+                // If no tool calls, or if LLM returned text alongside tool calls,
+                // stop the loop. Text+tool_call combo means the model considers
+                // the text as the final user-facing answer.
                 final_text = text_parts.join("");
                 break;
             }

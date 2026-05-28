@@ -194,6 +194,9 @@ impl AcpServer {
 
         // Real streaming: write each text chunk to stdout immediately as it
         // arrives from the LLM, so the harness can update Discord in real time.
+        // TODO: consolidate stdout handles if we add concurrent sessions —
+        // this Arc<Mutex<stdout>> and the outer loop's stdout are separate handles
+        // on the same fd, safe for single-session but may interleave otherwise.
         let sid = session_id.to_string();
         let stdout = Arc::new(Mutex::new(io::stdout()));
 
