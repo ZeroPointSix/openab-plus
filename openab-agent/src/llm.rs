@@ -199,7 +199,7 @@ impl LlmProvider for AnthropicProvider {
                 let byte_stream = resp.bytes_stream();
                 let stream_reader = StreamReader::new(
                     byte_stream
-                        .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+                        .map(|r| r.map_err(|e| std::io::Error::other(e))),
                 );
                 let mut lines = tokio::io::BufReader::new(stream_reader).lines();
 
@@ -462,7 +462,7 @@ impl LlmProvider for OpenAiProvider {
                 let byte_stream = resp.bytes_stream();
                 let stream_reader = StreamReader::new(
                     byte_stream
-                        .map(|r| r.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))),
+                        .map(|r| r.map_err(|e| std::io::Error::other(e))),
                 );
                 let mut lines = tokio::io::BufReader::new(stream_reader).lines();
 
