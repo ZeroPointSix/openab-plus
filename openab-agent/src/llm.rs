@@ -198,7 +198,7 @@ impl LlmProvider for AnthropicProvider {
                 // Parse SSE stream
                 let byte_stream = resp.bytes_stream();
                 let stream_reader =
-                    StreamReader::new(byte_stream.map(|r| r.map_err(|e| std::io::Error::other(e))));
+                    StreamReader::new(byte_stream.map(|r| r.map_err(std::io::Error::other)));
                 let mut lines = tokio::io::BufReader::new(stream_reader).lines();
 
                 let mut events = Vec::new();
@@ -459,7 +459,7 @@ impl LlmProvider for OpenAiProvider {
                 // Stream SSE line-by-line
                 let byte_stream = resp.bytes_stream();
                 let stream_reader =
-                    StreamReader::new(byte_stream.map(|r| r.map_err(|e| std::io::Error::other(e))));
+                    StreamReader::new(byte_stream.map(|r| r.map_err(std::io::Error::other)));
                 let mut lines = tokio::io::BufReader::new(stream_reader).lines();
 
                 let mut output_items: Vec<Value> = Vec::new();
