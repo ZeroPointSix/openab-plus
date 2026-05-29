@@ -275,7 +275,9 @@ impl TeamsAdapter {
         }
 
         // B2: Validate channel endorsements — key must endorse the activity's channelId
-        let channel_id = activity.channel_id.as_deref()
+        let channel_id = activity
+            .channel_id
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("activity missing channelId"))?;
         if key.endorsements.is_empty() {
             anyhow::bail!("JWK has no endorsements — cannot verify channelId={channel_id}");
@@ -301,9 +303,13 @@ impl TeamsAdapter {
         let token_data = decode::<serde_json::Value>(token, &decoding_key, &validation)?;
 
         // B1: Validate serviceUrl claim matches activity's serviceUrl
-        let activity_service_url = activity.service_url.as_deref()
+        let activity_service_url = activity
+            .service_url
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("activity missing serviceUrl"))?;
-        let token_service_url = token_data.claims.get("serviceurl")
+        let token_service_url = token_data
+            .claims
+            .get("serviceurl")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("JWT missing serviceurl claim"))?;
         if token_service_url != activity_service_url {
@@ -417,6 +423,12 @@ fn ensure_trailing_slash(url: &str) -> String {
 
 // --- Webhook handler ---
 
+/// Max webhook body size: 256 KB. Real Teams activities are a few KB; the
+/// activity is parsed *before* JWT auth (Bot Framework requires serviceUrl /
+/// channelId from the body to validate the token), so this caps the
+/// unauthenticated parse attack surface. Mirrors the feishu adapter's limit.
+const WEBHOOK_BODY_LIMIT: usize = 256 * 1024;
+
 pub async fn webhook(
     State(state): State<Arc<crate::AppState>>,
     headers: HeaderMap,
@@ -427,6 +439,12 @@ pub async fn webhook(
         None => return StatusCode::NOT_FOUND,
     };
 
+    // Defense-in-depth: bound the pre-auth body size (axum's default limit is 2 MB).
+    if body.len() > WEBHOOK_BODY_LIMIT {
+        warn!(size = body.len(), "teams webhook body too large");
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+
     // Extract auth header early (before parsing activity)
     let auth_header = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
         Some(h) => h.to_string(),
@@ -436,7 +454,16 @@ pub async fn webhook(
         }
     };
 
-    // Parse activity first (needed for JWT serviceUrl + endorsements validation)
+    // Parse activity first (needed for JWT serviceUrl + endorsements validation).
+    //
+    // SECURITY NOTE (OX untrusted-deserialization finding — false positive):
+    // `Activity` is a strict, derive-only DTO (String / Option<_> / nested
+    // structs) with no custom Deserialize, no side-effectful Drop, and no enum
+    // variant dispatch. serde_json's data model cannot instantiate arbitrary
+    // types (unlike bincode/serde_yaml/rmp-serde), so object-injection / RCE
+    // does not apply. The recommended "strict DTO + validate after" pattern is
+    // already in place: JWT, activity-type, and tenant-allowlist checks below.
+    // DoS is bounded by serde_json's recursion limit (128) and the body cap above.
     let activity: Activity = match serde_json::from_str(&body) {
         Ok(a) => a,
         Err(e) => {
@@ -627,6 +654,25 @@ mod tests {
         }
     }
 
+    fn make_test_state() -> Arc<crate::AppState> {
+        let (event_tx, _rx) = tokio::sync::broadcast::channel(16);
+
+        Arc::new(crate::AppState {
+            telegram_bot_token: None,
+            telegram_secret_token: None,
+            line_channel_secret: None,
+            line_access_token: None,
+            teams: Some(TeamsAdapter::new(make_config(vec![]))),
+            teams_service_urls: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            feishu: None,
+            google_chat: None,
+            wecom: None,
+            ws_token: None,
+            event_tx,
+            reply_token_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        })
+    }
+
     fn make_activity_with_tenant(tenant_id: Option<&str>) -> Activity {
         Activity {
             activity_type: "message".into(),
@@ -642,6 +688,32 @@ mod tests {
             }),
             channel_data: None,
         }
+    }
+
+    // --- webhook body limit ---
+
+    #[tokio::test]
+    async fn webhook_rejects_oversized_body_before_auth() {
+        let status = webhook(
+            State(make_test_state()),
+            HeaderMap::new(),
+            "x".repeat(WEBHOOK_BODY_LIMIT + 1),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn webhook_allows_body_at_limit_to_reach_auth() {
+        let status = webhook(
+            State(make_test_state()),
+            HeaderMap::new(),
+            "x".repeat(WEBHOOK_BODY_LIMIT),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[test]
@@ -743,7 +815,9 @@ mod tests {
     async fn jwt_rejects_garbage_token() {
         let adapter = TeamsAdapter::new(make_config(vec![]));
         let activity = make_activity_with_tenant(Some("t1"));
-        let result = adapter.validate_jwt("Bearer not.a.valid.jwt", &activity).await;
+        let result = adapter
+            .validate_jwt("Bearer not.a.valid.jwt", &activity)
+            .await;
         assert!(result.is_err());
     }
 
