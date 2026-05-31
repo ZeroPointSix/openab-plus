@@ -517,128 +517,21 @@ mod tests {
         assert_eq!(map.len(), 1);
     }
 
-    // --- Persisted map lifecycle tests ---
-    // These verify the state-transition invariants that get_or_create, reset,
-    // eviction, cleanup_idle, and shutdown must maintain on the persisted map.
-
     #[test]
-    fn lifecycle_get_or_create_persists_session_id() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let mut suspended: HashMap<String, String> = HashMap::new();
-        let thread = "t1".to_string();
-        let sid = "sid-1".to_string();
+    fn persisted_mapping_can_include_active_and_suspended_sessions() {
+        let persisted = HashMap::from([
+            ("active-thread".to_string(), "session-active".to_string()),
+            ("suspended-thread".to_string(), "session-suspended".to_string()),
+        ]);
 
-        // Simulate get_or_create success (cancel_session_id is non-empty):
-        suspended.remove(&thread);
-        persisted.insert(thread.clone(), sid.clone());
+        let serialized = serde_json::to_string_pretty(&persisted).expect("serialize persisted mapping");
+        let roundtrip: HashMap<String, String> =
+            serde_json::from_str(&serialized).expect("deserialize persisted mapping");
 
-        assert_eq!(persisted.get(&thread), Some(&sid));
-        assert!(!suspended.contains_key(&thread));
-    }
-
-    #[test]
-    fn lifecycle_get_or_create_removes_persisted_when_empty_session_id() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let mut suspended: HashMap<String, String> = HashMap::new();
-        let thread = "t1".to_string();
-
-        // Pre-existing mapping from a previous session:
-        persisted.insert(thread.clone(), "old-sid".to_string());
-
-        // Simulate get_or_create where cancel_session_id is empty:
-        persisted.remove(&thread);
-        suspended.remove(&thread);
-
-        assert!(!persisted.contains_key(&thread));
-    }
-
-    #[test]
-    fn lifecycle_reset_clears_all_state() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let mut suspended: HashMap<String, String> = HashMap::new();
-        let thread = "t1".to_string();
-        let sid = "sid-1".to_string();
-
-        // Setup: session is active and persisted
-        persisted.insert(thread.clone(), sid.clone());
-        suspended.insert(thread.clone(), sid.clone());
-
-        // Simulate reset_session:
-        suspended.remove(&thread);
-        persisted.remove(&thread);
-
-        assert!(!persisted.contains_key(&thread));
-        assert!(!suspended.contains_key(&thread));
-    }
-
-    #[test]
-    fn lifecycle_eviction_preserves_persisted_with_session_id() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let mut suspended: HashMap<String, String> = HashMap::new();
-        let evicted = "t-old".to_string();
-        let sid = "sid-old".to_string();
-
-        // Setup: active session already in persisted
-        persisted.insert(evicted.clone(), sid.clone());
-
-        // Simulate eviction (session_id present):
-        persisted.insert(evicted.clone(), sid.clone());
-        suspended.insert(evicted.clone(), sid.clone());
-
-        assert_eq!(persisted.get(&evicted), Some(&sid));
-        assert_eq!(suspended.get(&evicted), Some(&sid));
-    }
-
-    #[test]
-    fn lifecycle_eviction_removes_persisted_without_session_id() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let evicted = "t-old".to_string();
-
-        // Setup: active session with no session_id (edge case)
-        persisted.insert(evicted.clone(), "stale".to_string());
-
-        // Simulate eviction (no session_id — None branch):
-        persisted.remove(&evicted);
-
-        assert!(!persisted.contains_key(&evicted));
-    }
-
-    #[test]
-    fn lifecycle_cleanup_idle_moves_to_suspended_and_persisted() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let mut suspended: HashMap<String, String> = HashMap::new();
-        let thread = "t1".to_string();
-        let sid = "sid-1".to_string();
-
-        // Setup: active session in persisted
-        persisted.insert(thread.clone(), sid.clone());
-
-        // Simulate cleanup_idle (session_id present):
-        persisted.insert(thread.clone(), sid.clone());
-        suspended.insert(thread.clone(), sid.clone());
-
-        assert_eq!(persisted.get(&thread), Some(&sid));
-        assert_eq!(suspended.get(&thread), Some(&sid));
-    }
-
-    #[test]
-    fn lifecycle_shutdown_persists_all_active_sessions() {
-        let mut persisted: HashMap<String, String> = HashMap::new();
-        let mut suspended: HashMap<String, String> = HashMap::new();
-
-        // Simulate shutdown — collect all active session_ids and persist:
-        let active_sessions = vec![
-            ("t1".to_string(), "sid-1".to_string()),
-            ("t2".to_string(), "sid-2".to_string()),
-        ];
-        for (key, sid) in active_sessions {
-            persisted.insert(key.clone(), sid.clone());
-            suspended.insert(key, sid);
-        }
-
-        assert_eq!(persisted.len(), 2);
-        assert_eq!(persisted.get("t1"), Some(&"sid-1".to_string()));
-        assert_eq!(persisted.get("t2"), Some(&"sid-2".to_string()));
-        assert_eq!(suspended.len(), 2);
+        assert_eq!(roundtrip.get("active-thread"), Some(&"session-active".to_string()));
+        assert_eq!(
+            roundtrip.get("suspended-thread"),
+            Some(&"session-suspended".to_string())
+        );
     }
 }
