@@ -348,10 +348,8 @@ pub async fn handle_reply(
                 Ok(body) if body["ok"].as_bool() != Some(true) => {
                     let desc = body["description"].as_str().unwrap_or("unknown");
                     let code = body["error_code"].as_u64().unwrap_or(0);
-                    // Retry as plain text only for 400 Bad Request (parse/entity errors).
-                    // Other failures (429 rate limit, 403 forbidden) should not retry.
-                    if code == 400 {
-                        warn!(desc = %desc, "telegram Markdown send rejected (400), retrying as plain text");
+                    if should_retry_plain_text_fallback(code, desc) {
+                        warn!(code, desc = %desc, "telegram Markdown parse failed, retrying as plain text");
                         true
                     } else {
                         error!(code, desc = %desc, "telegram send failed");
@@ -360,8 +358,8 @@ pub async fn handle_reply(
                 }
                 Ok(_) => false,
                 Err(e) => {
-                    warn!("telegram response not valid JSON, retrying as plain text: {e}");
-                    true
+                    warn!("telegram response not valid JSON: {e}");
+                    false
                 }
             }
         }
@@ -397,6 +395,15 @@ pub async fn handle_reply(
             Err(e) => error!("telegram plain text send error: {e}"),
         }
     }
+}
+
+fn should_retry_plain_text_fallback(code: u64, description: &str) -> bool {
+    if code != 400 {
+        return false;
+    }
+
+    let description = description.to_ascii_lowercase();
+    description.contains("parse") || description.contains("entities")
 }
 
 /// Download media from Telegram via getFile → store to filesystem (colocate mode).
@@ -536,4 +543,41 @@ async fn download_telegram_document(
         size: bytes.len() as u64,
         path: Some(path),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_retry_plain_text_fallback;
+
+    #[test]
+    fn retries_markdown_parse_errors() {
+        assert!(should_retry_plain_text_fallback(
+            400,
+            "Bad Request: can't parse entities: Can't find end of the entity"
+        ));
+    }
+
+    #[test]
+    fn retries_entity_errors() {
+        assert!(should_retry_plain_text_fallback(
+            400,
+            "Bad Request: unsupported start tag in entities"
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_unrelated_bad_requests() {
+        assert!(!should_retry_plain_text_fallback(
+            400,
+            "Bad Request: message text is empty"
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_non_bad_request_errors() {
+        assert!(!should_retry_plain_text_fallback(
+            429,
+            "Too Many Requests: retry after 10"
+        ));
+    }
 }
