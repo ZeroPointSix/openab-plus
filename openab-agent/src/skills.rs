@@ -104,15 +104,21 @@ pub fn format_skills_prompt(skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\n## Available Skills\n\nThe following skills are available. Use the `read` tool to load the full SKILL.md when you need a skill's instructions.\n\n");
+    let mut out = String::from(concat!(
+        "\n\n## Skills\n\n",
+        "Before replying, scan the skills below. If one clearly matches the user's task, ",
+        "use the `read` tool to load the full SKILL.md at the listed location and follow its instructions.\n\n",
+        "<available_skills>\n",
+    ));
     for skill in skills {
         out.push_str(&format!(
-            "- **{}** ({}): {}\n",
+            "  <skill>\n    <name>{}</name>\n    <description>{}</description>\n    <location>{}</location>\n  </skill>\n",
             skill.name,
+            skill.description,
             skill.path.join("SKILL.md").display(),
-            skill.description
         ));
     }
+    out.push_str("</available_skills>\n");
     out
 }
 
@@ -210,15 +216,18 @@ mod tests {
     }
 
     #[test]
-    fn format_skills_prompt_includes_path() {
+    fn format_skills_prompt_uses_xml_format() {
         let skills = vec![Skill {
             name: "test".to_string(),
             description: "A test skill".to_string(),
             path: PathBuf::from("/home/agent/.openab/skills/test"),
         }];
         let prompt = format_skills_prompt(&skills);
-        assert!(prompt.contains("test"));
-        assert!(prompt.contains("A test skill"));
-        assert!(prompt.contains("SKILL.md"));
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<name>test</name>"));
+        assert!(prompt.contains("<description>A test skill</description>"));
+        assert!(prompt.contains("<location>/home/agent/.openab/skills/test/SKILL.md</location>"));
+        assert!(prompt.contains("</available_skills>"));
+        assert!(prompt.contains("Before replying, scan the skills below"));
     }
 }
