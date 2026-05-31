@@ -106,7 +106,7 @@ pub fn format_skills_prompt(skills: &[Skill]) -> String {
     }
     let mut out = String::from(concat!(
         "\n\n## Skills\n\n",
-        "Before replying, scan the skills below. If one clearly matches the user's task, ",
+        "Before replying, scan the skills below. If one matches or may be relevant to the user's task, ",
         "use the `read` tool to load the full SKILL.md at the listed location and follow its instructions.\n\n",
         "<available_skills>\n",
     ));
