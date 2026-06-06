@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 use tracing::{error, info, warn};
 
 /// Timeout for waiting on gateway reply acknowledgement.
@@ -30,6 +30,12 @@ struct GatewayEvent {
     #[allow(dead_code)]
     mentions: Vec<String>,
     message_id: String,
+}
+
+#[derive(Serialize)]
+struct GatewayAuth {
+    schema: String,
+    token: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -544,7 +550,6 @@ pub async fn run_gateway_adapter(
 ) -> Result<()> {
     let platform: &'static str = Box::leak(params.platform.into_boxed_str());
 
-    // Append auth token as query param if configured
     let gateway_url = params.url;
     let bot_username = params.bot_username;
     let allow_all_channels = params.allow_all_channels;
@@ -554,16 +559,7 @@ pub async fn run_gateway_adapter(
     let streaming = params.streaming;
     let stt_config = params.stt;
 
-    let connect_url = match &params.token {
-        Some(token) => {
-            let sep = if gateway_url.contains('?') { "&" } else { "?" };
-            format!("{gateway_url}{sep}token={token}")
-        }
-        None => {
-            warn!("gateway.token not set — WebSocket connection is NOT authenticated");
-            gateway_url.clone()
-        }
-    };
+    let connect_request = gateway_url.clone().into_client_request()?;
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF: u64 = 30;
 
@@ -576,7 +572,7 @@ pub async fn run_gateway_adapter(
 
         info!(url = %gateway_url, "connecting to custom gateway");
 
-        let ws_stream = match tokio_tungstenite::connect_async(&connect_url).await {
+        let ws_stream = match tokio_tungstenite::connect_async(connect_request.clone()).await {
             Ok((stream, _)) => {
                 backoff_secs = 1; // reset on success
                 info!("connected to gateway");
@@ -595,6 +591,19 @@ pub async fn run_gateway_adapter(
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
         let ws_tx: SharedWsTx = Arc::new(Mutex::new(ws_tx));
+        if let Some(token) = &params.token {
+            let auth = GatewayAuth {
+                schema: "openab.gateway.auth.v1".into(),
+                token: token.clone(),
+            };
+            ws_tx
+                .lock()
+                .await
+                .send(Message::Text(serde_json::to_string(&auth)?))
+                .await?;
+        } else {
+            warn!("gateway.token not set — WebSocket connection is NOT authenticated");
+        }
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let adapter: Arc<dyn ChatAdapter> = Arc::new(GatewayAdapter::new(
             ws_tx.clone(),

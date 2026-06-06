@@ -7,6 +7,11 @@ Google Chat ──POST──▶ Gateway (:8080) ◀──WebSocket── OAB Pod
                                           (OAB connects out)
 ```
 
+For a hardened OpenShell deployment with Kiro, gateway first-frame WebSocket
+auth, and Google Drive/Sheets/Docs access through provider-rewritten short-lived
+tokens, see
+[Google Chat + OpenShell + Kiro Reference Architecture](./refarch/google-chat-openshell-kiro.md).
+
 ## Prerequisites
 
 - **A Google Workspace (Business or Enterprise) account** — required by Google to configure the Chat API. Regular `@gmail.com` consumer accounts cannot create Google Chat apps. Workspace Individual or Business Starter is the cheapest qualifying tier. See [Configure the Google Chat API](https://developers.google.com/workspace/chat/configure-chat-api).

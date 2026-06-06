@@ -143,20 +143,25 @@ pub struct GoogleChatSpace {
 
 const GOOGLE_CHAT_ISSUER: &str = "https://accounts.google.com";
 const GOOGLE_CHAT_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
-const GOOGLE_CHAT_SIGNER_EMAIL: &str = "chat@system.gserviceaccount.com";
+const GOOGLE_CHAT_LEGACY_SIGNER_EMAIL: &str = "chat@system.gserviceaccount.com";
+const GOOGLE_CHAT_SIGNER_EMAIL_SUFFIX: &str = "@gcp-sa-gsuiteaddons.iam.gserviceaccount.com";
 const JWKS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Verify the JWT's `email` claim belongs to Google Chat.
-/// HTTP endpoint URL webhooks are signed by `chat@system.gserviceaccount.com`.
+/// Google Chat HTTP endpoint URL webhooks are signed by a Google-managed
+/// Workspace add-ons service account. Older deployments used
+/// `chat@system.gserviceaccount.com`.
 /// Without this check, any Google-issued ID token would be accepted.
 fn verify_email_claim(claims: &serde_json::Value) -> Result<(), String> {
     let email = claims
         .get("email")
         .and_then(|v| v.as_str())
         .ok_or("missing email claim")?;
-    if email != GOOGLE_CHAT_SIGNER_EMAIL {
+    if email != GOOGLE_CHAT_LEGACY_SIGNER_EMAIL
+        && !email.ends_with(GOOGLE_CHAT_SIGNER_EMAIL_SUFFIX)
+    {
         return Err(format!(
-            "email claim mismatch: expected {GOOGLE_CHAT_SIGNER_EMAIL}, got {email}"
+            "email claim mismatch: expected {GOOGLE_CHAT_LEGACY_SIGNER_EMAIL} or *{GOOGLE_CHAT_SIGNER_EMAIL_SUFFIX}, got {email}"
         ));
     }
     Ok(())
