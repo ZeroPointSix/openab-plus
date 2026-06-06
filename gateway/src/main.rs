@@ -36,7 +36,15 @@ pub const REPLY_TOKEN_CACHE_MAX: usize = 10_000;
 /// Maximum number of post-ack LINE webhook payloads processed concurrently.
 /// Keeps image download/decode work bounded during bursts without giving up the
 /// fast 200 OK response path.
-pub const LINE_WEBHOOK_CONCURRENCY_MAX: usize = 8;
+/// Override at runtime with `LINE_WEBHOOK_CONCURRENCY` env var.
+pub const LINE_WEBHOOK_CONCURRENCY_DEFAULT: usize = 8;
+
+pub fn line_webhook_concurrency() -> usize {
+    std::env::var("LINE_WEBHOOK_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(LINE_WEBHOOK_CONCURRENCY_DEFAULT)
+}
 
 // --- App state (shared across all adapters) ---
 
@@ -388,7 +396,7 @@ async fn main() -> Result<()> {
         ws_token,
         event_tx,
         reply_token_cache,
-        line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
+        line_webhook_semaphore: Arc::new(Semaphore::new(line_webhook_concurrency())),
         client,
     });
 

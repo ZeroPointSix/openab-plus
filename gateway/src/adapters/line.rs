@@ -83,7 +83,8 @@ pub async fn webhook(
         mac.update(&body);
         let expected =
             base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-        if signature != expected {
+        use subtle::ConstantTimeEq;
+        if signature.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
             warn!("LINE webhook rejected: invalid signature");
             return axum::http::StatusCode::UNAUTHORIZED;
         }
@@ -106,6 +107,9 @@ pub async fn webhook(
         .await
     {
         Ok(permit) => permit,
+        // Defensive: acquire_owned only fails if the semaphore is closed, and
+        // nothing in this codebase closes it. Kept as a safeguard against future
+        // shutdown-signal integration.
         Err(_) => {
             warn!("LINE webhook worker semaphore closed unexpectedly");
             return axum::http::StatusCode::SERVICE_UNAVAILABLE;
@@ -438,7 +442,8 @@ pub async fn dispatch_line_reply(
                 let body = r.text().await.unwrap_or_default();
                 let body_lower = body.to_lowercase();
                 let token_unusable = status.as_u16() == 400
-                    && ((body_lower.contains("invalid") && body_lower.contains("reply token"))
+                    && body_lower.contains("reply token")
+                    && (body_lower.contains("invalid")
                         || body_lower.contains("expired"));
                 if token_unusable {
                     warn!(status = %status, body = %body, "LINE reply token unusable, falling back to Push");
@@ -615,7 +620,7 @@ mod tests {
             ws_token: None,
             event_tx,
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            line_webhook_semaphore: Arc::new(Semaphore::new(crate::LINE_WEBHOOK_CONCURRENCY_MAX)),
+            line_webhook_semaphore: Arc::new(Semaphore::new(crate::line_webhook_concurrency())),
             client: reqwest::Client::new(),
         });
 
@@ -652,5 +657,43 @@ mod tests {
             .expect("reply token should be cached");
         assert_eq!(token, "reply123");
         assert!(cached_at.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn webhook_rejects_invalid_signature() {
+        let (event_tx, _) = broadcast::channel::<String>(8);
+        let state = Arc::new(crate::AppState {
+            telegram_bot_token: None,
+            telegram_secret_token: None,
+            line_channel_secret: Some("test_secret".into()),
+            line_access_token: None,
+            teams: None,
+            teams_service_urls: Mutex::new(HashMap::new()),
+            feishu: None,
+            google_chat: None,
+            wecom: None,
+            ws_token: None,
+            event_tx,
+            reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            line_webhook_semaphore: Arc::new(Semaphore::new(crate::line_webhook_concurrency())),
+            client: reqwest::Client::new(),
+        });
+
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "events": [{
+                    "type": "message",
+                    "source": {"type": "user", "userId": "U123"},
+                    "message": {"id": "msg1", "type": "text", "text": "hi"}
+                }]
+            })
+            .to_string(),
+        );
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-line-signature", "invalid_signature".parse().unwrap());
+
+        let status = webhook(State(state), headers, body).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
     }
 }
