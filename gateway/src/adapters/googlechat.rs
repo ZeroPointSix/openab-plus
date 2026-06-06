@@ -148,9 +148,10 @@ const GOOGLE_CHAT_SIGNER_EMAIL_SUFFIX: &str = "@gcp-sa-gsuiteaddons.iam.gservice
 const JWKS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Verify the JWT's `email` claim belongs to Google Chat.
-/// Google Chat HTTP endpoint URL webhooks are signed by a Google-managed
-/// Workspace add-ons service account. Older deployments used
-/// `chat@system.gserviceaccount.com`.
+/// Google Chat HTTP endpoint URL webhooks are signed by Google-managed service
+/// accounts. Google documents `chat@system.gserviceaccount.com`; Workspace
+/// add-ons deployments have also been observed using
+/// `service-<PROJECT_NUMBER>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`.
 /// Without this check, any Google-issued ID token would be accepted.
 fn verify_email_claim(claims: &serde_json::Value) -> Result<(), String> {
     let email = claims
@@ -1666,6 +1667,14 @@ mod tests {
     #[test]
     fn email_claim_accepts_chat_system_account() {
         let claims = serde_json::json!({"email": "chat@system.gserviceaccount.com"});
+        assert!(verify_email_claim(&claims).is_ok());
+    }
+
+    #[test]
+    fn email_claim_accepts_workspace_addons_service_agent() {
+        let claims = serde_json::json!({
+            "email": "service-123456@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
+        });
         assert!(verify_email_claim(&claims).is_ok());
     }
 

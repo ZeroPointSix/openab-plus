@@ -75,6 +75,24 @@ struct GatewayAuth {
     token: String,
 }
 
+fn legacy_ws_auth_token<'a>(
+    query: &'a HashMap<String, String>,
+    headers: &'a HeaderMap,
+) -> Option<&'a str> {
+    query.get("token").map(|s| s.as_str()).or_else(|| {
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+    })
+}
+
+fn valid_gateway_auth_frame(text: &str, expected: &str) -> bool {
+    serde_json::from_str::<GatewayAuth>(text)
+        .map(|auth| auth.schema == "openab.gateway.auth.v1" && auth.token == expected)
+        .unwrap_or(false)
+}
+
 async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -83,12 +101,7 @@ async fn ws_handler(
 ) -> axum::response::Response {
     let mut preauthenticated = false;
     if let Some(ref expected) = state.ws_token {
-        let provided = query.get("token").map(|s| s.as_str()).or_else(|| {
-            headers
-                .get(axum::http::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
-        });
+        let provided = legacy_ws_auth_token(&query, &headers);
         if let Some(provided) = provided {
             if provided != expected.as_str() {
                 warn!("WebSocket rejected: invalid token");
@@ -112,11 +125,7 @@ async fn handle_oab_connection(
             let auth_result =
                 tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
             let valid = match auth_result {
-                Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<GatewayAuth>(&text)
-                    .map(|auth| {
-                        auth.schema == "openab.gateway.auth.v1" && auth.token == *expected
-                    })
-                    .unwrap_or(false),
+                Ok(Some(Ok(Message::Text(text)))) => valid_gateway_auth_frame(&text, expected),
                 _ => false,
             };
             if !valid {
@@ -531,6 +540,81 @@ mod tests {
 
     fn make_cache() -> ReplyTokenCache {
         Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn legacy_ws_auth_token_prefers_query_token() {
+        let mut query = HashMap::new();
+        query.insert("token".to_string(), "query-secret".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer header-secret"),
+        );
+
+        assert_eq!(legacy_ws_auth_token(&query, &headers), Some("query-secret"));
+    }
+
+    #[test]
+    fn legacy_ws_auth_token_accepts_bearer_header() {
+        let query = HashMap::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer header-secret"),
+        );
+
+        assert_eq!(legacy_ws_auth_token(&query, &headers), Some("header-secret"));
+    }
+
+    #[test]
+    fn legacy_ws_auth_token_rejects_non_bearer_header() {
+        let query = HashMap::new();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Basic abc"),
+        );
+
+        assert_eq!(legacy_ws_auth_token(&query, &headers), None);
+    }
+
+    #[test]
+    fn gateway_auth_frame_accepts_expected_schema_and_token() {
+        let text = serde_json::json!({
+            "schema": "openab.gateway.auth.v1",
+            "token": "expected",
+        })
+        .to_string();
+
+        assert!(valid_gateway_auth_frame(&text, "expected"));
+    }
+
+    #[test]
+    fn gateway_auth_frame_rejects_wrong_token() {
+        let text = serde_json::json!({
+            "schema": "openab.gateway.auth.v1",
+            "token": "wrong",
+        })
+        .to_string();
+
+        assert!(!valid_gateway_auth_frame(&text, "expected"));
+    }
+
+    #[test]
+    fn gateway_auth_frame_rejects_wrong_schema() {
+        let text = serde_json::json!({
+            "schema": "openab.gateway.reply.v1",
+            "token": "expected",
+        })
+        .to_string();
+
+        assert!(!valid_gateway_auth_frame(&text, "expected"));
+    }
+
+    #[test]
+    fn gateway_auth_frame_rejects_malformed_json() {
+        assert!(!valid_gateway_auth_frame("not json", "expected"));
     }
 
     /// Cache hit: uses Reply API with correct replyToken, bearer token, and message body.

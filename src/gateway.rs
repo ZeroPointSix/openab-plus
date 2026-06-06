@@ -201,7 +201,12 @@ impl GatewayAdapter {
             return Err(e.into());
         }
         let msg_id = if let (Some(rx), Some(ref id)) = (pending_rx, &req_id) {
-            match tokio::time::timeout(std::time::Duration::from_secs(GATEWAY_REPLY_TIMEOUT_SECS), rx).await {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(GATEWAY_REPLY_TIMEOUT_SECS),
+                rx,
+            )
+            .await
+            {
                 Ok(Ok(resp)) if resp.success => resp.message_id.unwrap_or_else(|| "gw_sent".into()),
                 Ok(Ok(_resp)) => {
                     tracing::warn!(request_id = %id, "gateway replied with failure");
@@ -401,7 +406,8 @@ impl ChatAdapter for GatewayAdapter {
         content: &str,
         reply_to_message_id: &str,
     ) -> Result<MessageRef> {
-        self.send_gateway_reply(channel, content, Some(reply_to_message_id)).await
+        self.send_gateway_reply(channel, content, Some(reply_to_message_id))
+            .await
     }
 
     async fn create_thread(
@@ -542,6 +548,13 @@ pub struct GatewayParams {
     pub stt: crate::config::SttConfig,
 }
 
+fn legacy_gateway_auth_url(gateway_url: &str, token: Option<&str>) -> Option<String> {
+    token.map(|token| {
+        let sep = if gateway_url.contains('?') { "&" } else { "?" };
+        format!("{gateway_url}{sep}token={token}")
+    })
+}
+
 pub async fn run_gateway_adapter(
     params: GatewayParams,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
@@ -560,6 +573,7 @@ pub async fn run_gateway_adapter(
     let stt_config = params.stt;
 
     let connect_request = gateway_url.clone().into_client_request()?;
+    let legacy_connect_url = legacy_gateway_auth_url(&gateway_url, params.token.as_deref());
     let mut backoff_secs = 1u64;
     const MAX_BACKOFF: u64 = 30;
 
@@ -572,37 +586,70 @@ pub async fn run_gateway_adapter(
 
         info!(url = %gateway_url, "connecting to custom gateway");
 
-        let ws_stream = match tokio_tungstenite::connect_async(connect_request.clone()).await {
+        let (ws_stream, send_first_frame_auth) = match tokio_tungstenite::connect_async(
+            connect_request.clone(),
+        )
+        .await
+        {
             Ok((stream, _)) => {
                 backoff_secs = 1; // reset on success
                 info!("connected to gateway");
-                stream
+                (stream, true)
             }
             Err(e) => {
-                error!(err = %e, backoff = backoff_secs, "gateway connection failed, retrying");
-                tokio::select! {
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
-                    _ = shutdown_rx.changed() => { return Ok(()); }
+                if let Some(ref legacy_url) = legacy_connect_url {
+                    warn!(
+                        err = %e,
+                        "gateway first-frame auth connection failed; retrying legacy query-token auth"
+                    );
+                    match tokio_tungstenite::connect_async(legacy_url.as_str()).await {
+                        Ok((stream, _)) => {
+                            backoff_secs = 1; // reset on success
+                            info!("connected to gateway with legacy query-token auth");
+                            (stream, false)
+                        }
+                        Err(legacy_err) => {
+                            error!(
+                                err = %legacy_err,
+                                backoff = backoff_secs,
+                                "gateway connection failed, retrying"
+                            );
+                            tokio::select! {
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+                                _ = shutdown_rx.changed() => { return Ok(()); }
+                            }
+                            backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                            continue;
+                        }
+                    }
+                } else {
+                    error!(err = %e, backoff = backoff_secs, "gateway connection failed, retrying");
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+                        _ = shutdown_rx.changed() => { return Ok(()); }
+                    }
+                    backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
+                    continue;
                 }
-                backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
-                continue;
             }
         };
 
         let (ws_tx, mut ws_rx) = ws_stream.split();
         let ws_tx: SharedWsTx = Arc::new(Mutex::new(ws_tx));
-        if let Some(token) = &params.token {
-            let auth = GatewayAuth {
-                schema: "openab.gateway.auth.v1".into(),
-                token: token.clone(),
-            };
-            ws_tx
-                .lock()
-                .await
-                .send(Message::Text(serde_json::to_string(&auth)?))
-                .await?;
-        } else {
-            warn!("gateway.token not set — WebSocket connection is NOT authenticated");
+        if send_first_frame_auth {
+            if let Some(token) = &params.token {
+                let auth = GatewayAuth {
+                    schema: "openab.gateway.auth.v1".into(),
+                    token: token.clone(),
+                };
+                ws_tx
+                    .lock()
+                    .await
+                    .send(Message::Text(serde_json::to_string(&auth)?))
+                    .await?;
+            } else {
+                warn!("gateway.token not set — WebSocket connection is NOT authenticated");
+            }
         }
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let adapter: Arc<dyn ChatAdapter> = Arc::new(GatewayAdapter::new(
@@ -914,4 +961,30 @@ pub async fn run_gateway_adapter(
         }
         backoff_secs = (backoff_secs * 2).min(MAX_BACKOFF);
     } // outer reconnect loop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::legacy_gateway_auth_url;
+
+    #[test]
+    fn legacy_gateway_auth_url_absent_without_token() {
+        assert_eq!(legacy_gateway_auth_url("ws://gateway/ws", None), None);
+    }
+
+    #[test]
+    fn legacy_gateway_auth_url_adds_query_token() {
+        assert_eq!(
+            legacy_gateway_auth_url("ws://gateway/ws", Some("secret")),
+            Some("ws://gateway/ws?token=secret".to_string())
+        );
+    }
+
+    #[test]
+    fn legacy_gateway_auth_url_preserves_existing_query() {
+        assert_eq!(
+            legacy_gateway_auth_url("ws://gateway/ws?platform=googlechat", Some("secret")),
+            Some("ws://gateway/ws?platform=googlechat&token=secret".to_string())
+        );
+    }
 }
