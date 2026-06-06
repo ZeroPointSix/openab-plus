@@ -6,6 +6,7 @@ pub mod store;
 use anyhow::Result;
 use axum::{
     extract::State,
+    http::HeaderMap,
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -68,23 +69,65 @@ pub struct AppState {
 
 // --- WebSocket handler (OAB connects here) ---
 
+#[derive(serde::Deserialize)]
+struct GatewayAuth {
+    schema: String,
+    token: String,
+}
+
 async fn ws_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     query: axum::extract::Query<HashMap<String, String>>,
     ws: axum::extract::WebSocketUpgrade,
 ) -> axum::response::Response {
+    let mut preauthenticated = false;
     if let Some(ref expected) = state.ws_token {
-        let provided = query.get("token").map(|s| s.as_str());
-        if provided != Some(expected.as_str()) {
-            warn!("WebSocket rejected: invalid or missing token");
-            return axum::http::StatusCode::UNAUTHORIZED.into_response();
+        let provided = query.get("token").map(|s| s.as_str()).or_else(|| {
+            headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+        });
+        if let Some(provided) = provided {
+            if provided != expected.as_str() {
+                warn!("WebSocket rejected: invalid token");
+                return axum::http::StatusCode::UNAUTHORIZED.into_response();
+            }
+            preauthenticated = true;
         }
     }
-    ws.on_upgrade(move |socket| handle_oab_connection(state, socket))
+    ws.on_upgrade(move |socket| handle_oab_connection(state, socket, preauthenticated))
 }
 
-async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::WebSocket) {
+async fn handle_oab_connection(
+    state: Arc<AppState>,
+    mut socket: axum::extract::ws::WebSocket,
+    preauthenticated: bool,
+) {
     use axum::extract::ws::Message;
+
+    if !preauthenticated {
+        if let Some(ref expected) = state.ws_token {
+            let auth_result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await;
+            let valid = match auth_result {
+                Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<GatewayAuth>(&text)
+                    .map(|auth| {
+                        auth.schema == "openab.gateway.auth.v1" && auth.token == *expected
+                    })
+                    .unwrap_or(false),
+                _ => false,
+            };
+            if !valid {
+                warn!("WebSocket rejected: missing or invalid auth frame");
+                let _ = socket.close().await;
+                return;
+            }
+        } else {
+            warn!("GATEWAY_WS_TOKEN not set — accepted unauthenticated WebSocket");
+        }
+    }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
     let mut event_rx = state.event_tx.subscribe();

@@ -2,6 +2,10 @@
 
 Run OAB inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox for isolated, policy-enforced execution.
 
+For webhook platforms such as Google Chat, where a Custom Gateway receives
+inbound HTTPS webhooks and OAB connects outbound over WebSocket, see
+[Google Chat + OpenShell + Kiro Reference Architecture](./refarch/google-chat-openshell-kiro.md).
+
 ## Architecture
 
 ```
@@ -20,7 +24,7 @@ Run OAB inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbo
 │  │  Docker Container (sandbox: "oab")                            │  │
 │  │                                                               │  │
 │  │  /home/sandbox/                                               │  │
-│  │  └── config.toml         ← bot token + agent config           │  │
+│  │  └── config.toml         ← provider placeholders + config     │  │
 │  │                                                               │  │
 │  │  openab run ──stdio JSON-RPC──► openab-agent                  │  │
 │  │       │                              │                        │  │
@@ -111,10 +115,14 @@ Open the printed URL in your browser, approve, then paste the `localhost:1455/au
 
 ### 5. Create config and run
 
+Provider credentials appear in the sandbox as OpenShell resolver placeholders.
+Do not copy raw long-lived secrets into `config.toml` when a provider placeholder
+can be used instead.
+
 ```bash
 sandbox$ cat > config.toml <<'EOF'
 [discord]
-bot_token = "your-bot-token"
+bot_token = "provider-OPENSHELL-RESOLVE-ENV-DISCORD_BOT_TOKEN"
 allow_all_channels = true
 
 [agent]
@@ -132,6 +140,31 @@ EOF
 
 sandbox$ openab run --config config.toml
 ```
+
+## Provider Credential Handling
+
+OpenShell provider credentials are safer than ordinary container `.env` values
+because the sandbox receives placeholder strings, not raw secret material. The
+OpenShell policy proxy can rewrite those placeholders at approved egress
+boundaries.
+
+For ordinary HTTP APIs, use the placeholder in headers, query parameters, or
+paths according to OpenShell policy. For example:
+
+```bash
+curl -H "Authorization: Bearer provider-OPENSHELL-RESOLVE-ENV-API_TOKEN" \
+  https://api.example.com/v1/resource
+```
+
+For Custom Gateway WebSocket authentication, prefer
+`openab.gateway.auth.v1` first-frame auth instead of putting the token in the
+WebSocket URL. See
+[ADR: OpenShell-Compatible Gateway WebSocket Authentication](./adr/openshell-websocket-auth.md).
+
+Avoid mounting long-lived service-account JSON files into the sandbox. For
+Google Drive, Sheets, and Docs access, use a host-side token refresher that
+stores a short-lived `GOOGLE_ACCESS_TOKEN` in the OpenShell provider, then call
+Google APIs from the sandbox with the provider placeholder.
 
 ## Network Policy
 
