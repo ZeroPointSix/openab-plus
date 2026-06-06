@@ -320,6 +320,7 @@ pub async fn download_line_image(
             api_base, message_id
         ))
         .bearer_auth(access_token)
+        .timeout(std::time::Duration::from_secs(30))
         .send()
         .await
     {
@@ -345,18 +346,30 @@ pub async fn download_line_image(
     }
 
     let mut body = Vec::new();
-    loop {
-        let chunk = match resp.chunk().await {
-            Ok(Some(chunk)) => chunk,
-            Ok(None) => break,
-            Err(e) => {
-                warn!(message_id, error = %e, "LINE image download failed while reading body");
+    let read_result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let chunk = match resp.chunk().await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(message_id, error = %e, "LINE image download failed while reading body");
+                    return None;
+                }
+            };
+            body.extend_from_slice(&chunk);
+            if body.len() as u64 > IMAGE_MAX_DOWNLOAD {
+                warn!(message_id, size = body.len(), "LINE image exceeds limit");
                 return None;
             }
-        };
-        body.extend_from_slice(&chunk);
-        if body.len() as u64 > IMAGE_MAX_DOWNLOAD {
-            warn!(message_id, size = body.len(), "LINE image exceeds limit");
+        }
+        Some(())
+    })
+    .await;
+    match read_result {
+        Ok(Some(())) => {}
+        Ok(None) => return None,
+        Err(_) => {
+            warn!(message_id, "LINE image download timed out reading body");
             return None;
         }
     }
