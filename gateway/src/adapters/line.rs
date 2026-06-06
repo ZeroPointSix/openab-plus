@@ -100,23 +100,15 @@ pub async fn webhook(
 
     let webhook_received_at = std::time::Instant::now();
     let background_state = state.clone();
-    let permit = match background_state
-        .line_webhook_semaphore
-        .clone()
-        .acquire_owned()
-        .await
-    {
-        Ok(permit) => permit,
-        // Defensive: acquire_owned only fails if the semaphore is closed, and
-        // nothing in this codebase closes it. Kept as a safeguard against future
-        // shutdown-signal integration.
-        Err(_) => {
-            warn!("LINE webhook worker semaphore closed unexpectedly");
-            return axum::http::StatusCode::SERVICE_UNAVAILABLE;
-        }
-    };
+    let semaphore = background_state.line_webhook_semaphore.clone();
     tokio::spawn(async move {
-        let _permit = permit;
+        let _permit = match semaphore.acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                warn!("LINE webhook worker semaphore closed unexpectedly");
+                return;
+            }
+        };
         process_line_webhook_events(background_state, webhook_body, webhook_received_at).await;
     });
 
