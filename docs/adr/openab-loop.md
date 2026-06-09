@@ -120,7 +120,17 @@ GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
 → all must have conclusion: "success"
 ```
 
-**Note:** The branch protection API requires admin access. If unavailable, fall back to: wait until all check-runs on `head_sha` reach a terminal state, and none have `conclusion: "failure"`.
+**Required checks — source of truth (in priority order):**
+
+1. **Explicit config** (most reliable): list check names in `config.toml`
+   ```toml
+   [loop.ci]
+   required_checks = ["build", "test", "clippy", "fmt"]
+   ```
+2. **Branch protection API** (auto-discover): `GET /repos/{owner}/{repo}/branches/{base}/protection/required_status_checks`
+3. **Fallback** (if neither available): wait until all check-runs on `head_sha` reach a terminal state, and none have `conclusion: "failure"`
+
+The controller tries each source in order. If `required_checks` is set in config, it is authoritative and the API is not consulted.
 
 ### Coder Agent Behavior on Dispatch
 
@@ -135,6 +145,7 @@ GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
 ### Safety Boundaries (Hard Stop Conditions)
 
 - `iteration >= max_iterations` (default: 3)
+- `token_used >= token_budget` (default: 50000 tokens)
 - Safety policy violation (see machine-enforceable rules below)
 - Same finding unresolved for 2 consecutive iterations (matched by finding fingerprint)
 - Tests fail after fix
@@ -142,6 +153,17 @@ GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
 - Human explicitly intervenes ("stop" / "I'll handle it")
 
 Human override has the highest priority at all times.
+
+#### Token Budget Enforcement
+
+| Rule | Detail |
+|------|--------|
+| Who reports | Each agent reports `tokens_consumed` in its verdict/completion message |
+| When checked | Controller checks budget **before** each dispatch (not after) |
+| Accumulation | `token_used += agent_response.tokens_consumed` after each step |
+| Hard stop | If `token_used + estimated_next_step > token_budget` → escalate |
+| Estimation | `estimated_next_step` = max of previous step costs in this loop (conservative) |
+| Override | Human can raise budget mid-loop via "budget 100000" command |
 
 ### Finding Fingerprint (Cross-Iteration Dedup)
 
@@ -184,12 +206,16 @@ patterns = [
   "helm/**",
   "terraform/**",
   "**/auth/**",
+  "**/auth*",         # catches src/auth.rs, lib/auth.ts, etc.
   "**/secrets/**",
+  "**/credential*",
   "**/*.pem",
   "**/*.key",
   ".env*",
 ]
 ```
+
+Pattern matching uses glob semantics. Both directory-based (`**/auth/**`) and filename-based (`**/auth*`) patterns are needed to cover cases like `src/auth.rs` that live outside a dedicated `auth/` directory.
 
 **Category escalation rules:**
 
