@@ -10,6 +10,7 @@ mod error_display;
 mod format;
 mod gateway;
 mod hooks;
+#[allow(dead_code, unused_imports, unused_variables)]
 mod loop_controller;
 mod markdown;
 mod media;

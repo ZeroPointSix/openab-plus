@@ -269,7 +269,7 @@ impl LoopController {
             return None;
         }
         let end = content.find("-->")?;
-        let json_str = &content[MARKER.len()..end].trim();
+        let json_str = content[MARKER.len()..end].trim();
         let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
 
         Some(LoopEvent::CompletionReport {
