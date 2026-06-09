@@ -22,6 +22,130 @@ What we lack is the **automatic iteration mechanism** — the wiring that lets a
 
 We will implement a **closed-loop PR review flow** as the first OpenAB Loop, using the existing communication infrastructure (Discord mentions + GitHub webhooks) without modifying the OAB core.
 
+### Loop Lifecycle
+
+A Loop is a generic, reusable abstraction. Regardless of what work it coordinates (PR review, deployment, testing), every Loop instance shares the same lifecycle, methods, and state transitions.
+
+#### Lifecycle Diagram
+
+```
+                         ┌─────────────────────────────────────────────┐
+                         │              LOOP LIFECYCLE                  │
+                         └─────────────────────────────────────────────┘
+
+  create()                    start()                                    stop()
+     │                          │                                          │
+     ▼                          ▼                                          ▼
+ ┌────────┐  start()  ┌─────────────────┐  stop()/budget/safety  ┌────────────┐
+ │ CREATED │─────────→│    RUNNING       │─────────────────────→│    DONE     │
+ └────────┘           │                  │                       └────────────┘
+                      │  ┌────────────┐  │                              ▲
+                      │  │  consume() │  │  escalate()           ┌──────┴─────┐
+                      │  │     ↓      │  │──────────────────────→│ ESCALATED  │
+                      │  │ validate() │  │                       │ (paused)   │
+                      │  │     ↓      │  │  resume()             └──────┬─────┘
+                      │  │ dispatch() │  │←─────────────────────────────┘
+                      │  └────────────┘  │
+                      │                  │  pause()       resume()
+                      │                  │───→ PAUSED ────→│
+                      └─────────────────┘                  │
+                               ▲                           │
+                               └───────────────────────────┘
+```
+
+#### Internal Processing Loop (per event)
+
+```
+    Event arrives (webhook, message, timer)
+         │
+         ▼
+    ┌──────────┐     duplicate?
+    │ consume()│────────────────→ discard (no-op)
+    └────┬─────┘     stale sha?
+         │
+         ▼
+    ┌────────────┐    budget exceeded?
+    │ validate() │    safety violation? ───→ escalate()
+    └─────┬──────┘    max iterations?
+          │
+          ▼ (all checks pass)
+    ┌────────────┐
+    │ dispatch() │───→ worker (reviewer / coder / any agent)
+    └────────────┘
+```
+
+#### Loop Interface (Generic)
+
+```typescript
+interface Loop {
+  // --- Lifecycle ---
+  start(): void;                        // CREATED → RUNNING
+  pause(): void;                        // RUNNING → PAUSED (human intervenes)
+  resume(): void;                       // PAUSED | ESCALATED → RUNNING
+  stop(reason: string): void;           // any → DONE
+
+  // --- Core methods (the consume → validate → dispatch pipeline) ---
+  consume(event: Event): void;          // Ingest event, dedup, trigger state transition
+  validate(task: Task): ValidationResult;  // Pre-dispatch gate (budget, safety, staleness)
+  dispatch(worker: Worker, task: Task): void;  // Send work to a processor
+
+  // --- Escalation ---
+  escalate(reason: string): void;       // → ESCALATED, notify human
+
+  // --- State ---
+  getState(): LoopState;                // Current state snapshot
+  getHistory(): StepRecord[];           // Full audit trail
+}
+```
+
+#### Loop States
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│   CREATED ──→ RUNNING ──→ DONE                                       │
+│                 │  ▲                                                  │
+│                 │  │ resume()                                         │
+│                 ▼  │                                                  │
+│               PAUSED                                                 │
+│                                                                      │
+│              RUNNING ──→ ESCALATED ──→ DONE (if human says stop)      │
+│                              │                                       │
+│                              └──→ RUNNING (if human says resume)      │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Within `RUNNING`, the Loop maintains an **inner state machine** specific to the work type. For PR review loops:
+
+```
+RUNNING.inner:  REVIEWING ←──→ FIXING ──→ APPROVED
+```
+
+#### Method Responsibilities
+
+| Method | Responsibility | Failure mode |
+|--------|---------------|--------------|
+| `consume(event)` | Dedup, order, update `head_sha`, trigger state transition | Stale/duplicate → discard silently |
+| `validate(task)` | Check ALL pre-conditions before dispatch | Any check fails → return `{ ok: false, reason }` |
+| `dispatch(worker, task)` | Send structured payload to worker, start step timer | Worker unreachable → retry once, then escalate |
+| `escalate(reason)` | Pause loop, notify human with context | — |
+| `stop(reason)` | Record final state, clean up timers, emit completion event | — |
+
+#### Validate Checks (in order)
+
+1. **Dedup** — Has this `(dispatch_id, head_sha)` been processed before?
+2. **Staleness** — Is `head_sha` still the PR head? (API check)
+3. **Iteration budget** — `iteration < max_iterations`?
+4. **Token budget** — `token_used + estimated_next > token_budget`?
+5. **Timeout** — Has the total loop time exceeded hard cap?
+6. **Safety policy** — Category/risk + path denylist check on task content
+7. **Fingerprint repeat** — Same finding unresolved for 2+ iterations?
+
+All must pass. First failure short-circuits and returns the reason.
+
+---
+
 ### Loop Design
 
 ```
