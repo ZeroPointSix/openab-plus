@@ -786,47 +786,244 @@ A Loop is a **bounded, stateful coordination unit** managing one work item (e.g.
                                                             └────────┘
 ```
 
-### Loop Instance — Properties
+### Loop Interface Specification
 
 ```typescript
-interface LoopConfig {
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+type State = "IDLE" | "REVIEWING" | "FIXING" | "APPROVED" | "ESCALATED" | "DONE";
+type Duration = string;  // e.g. "10m", "15m", "60m"
+type Timestamp = string; // ISO 8601
+type Sha = string;       // git commit SHA
+type Uuid = string;      // dispatch correlation ID
+
+type EventType =
+  | "pr_opened"        // new PR detected
+  | "synchronize"      // new commits pushed to PR
+  | "verdict"          // reviewer posted a verdict
+  | "fix_complete"     // coder says done (optional, inferred from synchronize)
+  | "ci_passed"        // all required checks green
+  | "ci_failed"        // required check failed
+  | "timeout"          // step timer expired (internal)
+  | "human_override";  // human intervened
+
+type Verdict = "LGTM" | "CHANGES_REQUESTED" | "INCOMPLETE";
+
+type Severity = "🔴" | "🟡" | "🟢";
+type Category = "logic" | "performance" | "style" | "security" | "auth" | "infra" | "config";
+type RiskLevel = "low" | "medium" | "high" | "critical";
+
+// ─── Data Structures ────────────────────────────────────────────────────────
+
+interface LoopEvent {
+  type: EventType;
   pr: number;
-  repo: string;
-  max_iterations: number;       // hard cap (default: 3)
-  token_budget: number;         // max tokens across all steps (default: 50000)
-  timeout: {
-    review: Duration;           // per review step (default: 10m)
-    fix: Duration;              // per fix step (default: 15m)
-    total: Duration;            // entire loop (default: 60m)
-  };
-  safety_policy: SafetyPolicy;  // path denylist + category escalation rules
+  head_sha: Sha;
+  dispatch_id: Uuid;          // correlates request ↔ response
+  in_reply_to?: Uuid;         // which dispatch this responds to
+  timestamp: Timestamp;
+  payload: VerdictPayload | SynchronizePayload | HumanPayload | {};
 }
 
+interface VerdictPayload {
+  verdict: Verdict;
+  findings: Finding[];
+  tokens_consumed: number;
+}
+
+interface SynchronizePayload {
+  old_sha: Sha;
+  new_sha: Sha;
+}
+
+interface HumanPayload {
+  command: "stop" | "resume" | "budget" | "skip";
+  value?: string;             // e.g. new budget amount
+}
+
+interface Finding {
+  id: number;                 // sequential within one dispatch
+  severity: Severity;
+  category: Category;
+  risk_level: RiskLevel;
+  file: string;
+  line: number;
+  issue: string;
+  suggestion: string;
+  fingerprint: string;        // sha256(file + ":" + normalized_issue)[:8]
+}
+
+interface StepRecord {
+  step: "review" | "fix";
+  dispatch_id: Uuid;
+  head_sha: Sha;
+  result: Verdict | "pushed" | "failed" | "timeout";
+  tokens_consumed: number;
+  timestamp: Timestamp;
+}
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+
+interface LoopConfig {
+  pr: number;
+  repo: string;                // "owner/repo"
+  base_branch: string;         // target branch of the PR
+  max_iterations: number;      // hard cap on review→fix cycles (default: 3)
+  token_budget: number;        // total token limit across all steps (default: 50000)
+  timeout: {
+    review: Duration;          // max time for a single review step (default: "10m")
+    fix: Duration;             // max time for a single fix step (default: "15m")
+    total: Duration;           // max time for entire loop (default: "60m")
+  };
+  retry: {
+    max_per_step: number;      // retries before escalation (default: 1)
+  };
+  safety_policy: SafetyPolicy;
+  event_source: "webhook" | "polling";
+  poll_interval?: Duration;    // only when event_source = "polling"
+}
+
+interface SafetyPolicy {
+  path_denylist: string[];      // glob patterns — files Coder must NOT touch
+  path_keywords: string[];      // substring match on file path
+  escalation_rules: EscalationRule[];
+}
+
+interface EscalationRule {
+  category: Category | "*";
+  risk_level: RiskLevel | "*";
+  action: "allow" | "escalate";
+}
+
+// ─── State ──────────────────────────────────────────────────────────────────
+
 interface LoopState {
-  state: "IDLE" | "REVIEWING" | "FIXING" | "APPROVED" | "ESCALATED" | "DONE";
+  state: State;
   iteration: number;
-  head_sha: string;
+  head_sha: Sha;
   token_used: number;
   started_at: Timestamp;
   current_step_started: Timestamp;
-  last_dispatch_id: string;
+  last_dispatch_id: Uuid;
+  retries_this_step: number;
   history: StepRecord[];
+  fingerprint_tracker: Map<string, number[]>;  // fingerprint → [iterations seen]
+}
+
+// ─── Loop Interface (the controller for one work item) ──────────────────────
+
+interface Loop {
+  // --- Properties (read-only from outside) ---
+  readonly config: LoopConfig;
+  readonly state: LoopState;
+
+  // --- Lifecycle ---
+
+  /** Initialize and dispatch first reviewer. IDLE → REVIEWING. */
+  start(): void;
+
+  /** Terminate the loop from any state. → DONE. */
+  stop(reason: string): void;
+
+  /** Resume from ESCALATED after human resolves the issue. */
+  resume(instruction?: string): void;
+
+  // --- Event Ingestion ---
+
+  /**
+   * Receive an external event.
+   * - Deduplicates by (pr, head_sha, dispatch_id).
+   * - Validates SHA freshness (stale SHA → discard).
+   * - Enqueues for processing.
+   * Returns: true if accepted, false if deduplicated/stale.
+   */
+  consume(event: LoopEvent): boolean;
+
+  // --- Core Logic (called internally after consume) ---
+
+  /**
+   * State transition function.
+   * Evaluates current state × event → determines next state + side effects.
+   * This is the heart of the state machine.
+   */
+  transition(event: LoopEvent): void;
+
+  /**
+   * Pre-dispatch safety gate. Called before every dispatch to Coder.
+   * Checks:
+   *   - iteration < max_iterations
+   *   - token_used + estimate < token_budget
+   *   - no findings violate safety_policy (category/risk escalation)
+   *   - no findings touch path_denylist
+   *   - no fingerprint repeated for 2+ consecutive iterations
+   * Returns: { allowed: true } or { allowed: false, reason: string }
+   */
+  validate(findings: Finding[]): ValidationResult;
+
+  /**
+   * Dispatch work to an agent.
+   * - Generates a new dispatch_id (UUID v4).
+   * - Sends structured payload to target via configured channel (Discord mention).
+   * - Records dispatch in state (last_dispatch_id, current_step_started).
+   * - Starts the step timer.
+   */
+  dispatch(target: DispatchTarget, payload: DispatchPayload): Uuid;
+
+  /**
+   * Escalate to human. Freezes the loop.
+   * - Sets state → ESCALATED.
+   * - Sends notification with reason + loop summary.
+   * - Only resume() or stop() can move out of this state.
+   */
+  escalate(reason: string): void;
+
+  /**
+   * Periodic heartbeat. Called by external scheduler (cron / poll loop).
+   * Checks:
+   *   - Has current step exceeded its timeout?
+   *   - (In polling mode) Are there new GitHub events to fetch?
+   * If timeout → retry or escalate based on retry policy.
+   */
+  tick(): void;
+}
+
+// ─── Supporting Types ───────────────────────────────────────────────────────
+
+interface ValidationResult {
+  allowed: boolean;
+  reason?: string;  // only present when allowed = false
+}
+
+interface DispatchTarget {
+  agent_id: string;           // Discord UID of the target agent
+  role: "reviewer" | "coder";
+}
+
+interface DispatchPayload {
+  action: "review" | "fix";
+  pr: number;
+  repo: string;
+  branch: string;
+  head_sha: Sha;
+  iteration: number;
+  max_iterations: number;
+  findings?: Finding[];       // only for action = "fix"
 }
 ```
 
-### Loop Instance — Methods
+### Methods Summary
 
-| Method | Responsibility | Mutates State? |
-|--------|---------------|----------------|
-| `start()` | Initialize state, dispatch first reviewer | Yes → REVIEWING |
-| `consume(event)` | Receive event, deduplicate, enqueue | No (queues only) |
-| `transition(event)` | Evaluate state × event → decide next state | Yes |
-| `validate(findings)` | Pre-dispatch safety check (budget, policy, iteration cap) | No (read-only) |
-| `dispatch(target, payload)` | Send work to a worker agent (via Discord mention) | Yes (records dispatch_id) |
-| `escalate(reason)` | Hard stop, notify human, freeze loop | Yes → ESCALATED |
-| `tick()` | Periodic check: timeout expired? poll for new events? | Maybe (triggers transition if timeout) |
-| `stop(reason)` | Terminate loop (human or merged) | Yes → DONE |
-| `resume()` | Recover from ESCALATED after human intervention | Yes → previous state |
+| Method | Input | Output | Mutates State? | Side Effects |
+|--------|-------|--------|----------------|--------------|
+| `start()` | — | void | Yes → REVIEWING | Dispatches reviewer, starts timer |
+| `stop(reason)` | string | void | Yes → DONE | Logs termination |
+| `resume(instruction?)` | string? | void | Yes → prev state | Re-dispatches last step |
+| `consume(event)` | LoopEvent | boolean | No | Enqueues event |
+| `transition(event)` | LoopEvent | void | Yes | May call validate/dispatch/escalate |
+| `validate(findings)` | Finding[] | ValidationResult | No | Pure check |
+| `dispatch(target, payload)` | target, payload | Uuid | Yes | Sends message, starts timer |
+| `escalate(reason)` | string | void | Yes → ESCALATED | Notifies human |
+| `tick()` | — | void | Maybe | Checks timeout, polls events |
 
 ### Method Flow Diagram
 
