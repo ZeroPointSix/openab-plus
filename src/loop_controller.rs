@@ -706,7 +706,16 @@ impl LoopController {
             }
             NextAction::TransitionCodingDone(_) | NextAction::TransitionToReviewing => {
                 if let Some(d) = &def {
-                    self.dispatch_reviewer(&key, d).await;
+                    let inst = &self.active_loops[&key];
+                    let sha = inst.head_sha.clone().unwrap_or_default();
+                    if !sha.is_empty()
+                        && !self.check_ci_status(&inst.work_item.repo, &sha).await
+                    {
+                        self.escalate(&key, "CI checks failed — blocking review dispatch")
+                            .await;
+                    } else {
+                        self.dispatch_reviewer(&key, d).await;
+                    }
                 }
             }
             NextAction::TransitionToFixing => {
@@ -820,6 +829,13 @@ impl LoopController {
             for keyword in &def.safety.path_keywords {
                 if file.contains(keyword.as_str()) {
                     warn!(key, file, keyword = keyword.as_str(), "safety policy: path keyword match");
+                    return false;
+                }
+            }
+            // Check path denylist (glob patterns)
+            for pattern in &def.safety.path_denylist {
+                if glob_match::glob_match(pattern, file) {
+                    warn!(key, file, pattern = pattern.as_str(), "safety policy: path denylist match");
                     return false;
                 }
             }
