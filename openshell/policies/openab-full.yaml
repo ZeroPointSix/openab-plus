@@ -25,13 +25,18 @@ network_policies:
       - { host: auth0.openai.com, port: 443 }
     binaries:
       - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
 
   anthropic:
     name: anthropic
     endpoints:
       - { host: api.anthropic.com, port: 443 }
+      - { host: claude.ai, port: 443 }
+      - { host: platform.claude.com, port: 443 }
+      - { host: downloads.claude.ai, port: 443 }
     binaries:
       - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
 
   github:
     name: github
@@ -42,6 +47,7 @@ network_policies:
       - { host: raw.githubusercontent.com, port: 443 }
     binaries:
       - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
       - { path: /usr/bin/gh }
       - { path: /usr/bin/git }
 
@@ -53,6 +59,7 @@ network_policies:
       - { host: accounts.google.com, port: 443 }
     binaries:
       - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
 
   groq:
     name: groq
@@ -60,6 +67,7 @@ network_policies:
       - { host: api.groq.com, port: 443 }
     binaries:
       - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
 
   packages:
     name: packages
@@ -69,6 +77,7 @@ network_policies:
       - { host: registry.npmjs.org, port: 443 }
       - { host: ghcr.io, port: 443 }
     binaries:
+      - { path: /usr/local/bin/node }
       - { path: /usr/bin/pip }
       - { path: /usr/local/bin/uv }
       - { path: /usr/bin/npm }
