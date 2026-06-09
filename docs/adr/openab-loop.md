@@ -1380,6 +1380,179 @@ Trigger detected (command / label / template match)
   loop.start() → state: REVIEWING → dispatch(reviewer)
 ```
 
+## Loop Variants
+
+The Loop abstraction is generic. The PR Review Loop is one instantiation; other work types reuse the same Controller, interface, and safety boundaries with different state machines.
+
+### Generic Loop Model
+
+```typescript
+interface LoopVariant {
+  name: string;                       // "pr-review" | "issue-implement" | ...
+  states: string[];                   // ordered states for this variant
+  initial_state: string;              // first active state after start()
+  transitions: TransitionRule[];      // state × event → next state
+  discovery: DiscoveryConfig;         // how to find new work items
+  roles: RoleBinding[];               // which agents fill which roles
+}
+
+interface TransitionRule {
+  from: string;
+  event: EventType;
+  to: string;
+  guard?: string;                     // condition that must be true
+  action?: string;                    // side effect (dispatch, escalate, etc.)
+}
+
+interface RoleBinding {
+  role: string;                       // "reviewer" | "coder" | "planner" | ...
+  agent_id: string;                   // Discord UID
+  instruction_template: string;       // what to tell this agent
+}
+```
+
+### Variant 1: PR Review Loop (existing)
+
+```
+States: IDLE → REVIEWING ↔ FIXING → APPROVED → DONE
+Trigger: PR opened / labeled
+Roles: reviewer, coder
+```
+
+### Variant 2: Issue Implementation Loop
+
+An issue is the starting point. Controller dispatches a Coder to implement, then enters the review loop.
+
+**Extended state machine:**
+
+```
+  IDLE → CODING → REVIEWING ↔ FIXING → APPROVED → DONE
+           │          ▲
+           │          │ Coder reports PR created
+           └──────────┘
+```
+
+**States:**
+
+| State | Waiting for | Dispatch to |
+|-------|-------------|-------------|
+| CODING | Coder to open a PR | Coder |
+| REVIEWING | Reviewer verdict | Reviewer |
+| FIXING | Coder to push fix | Coder |
+| APPROVED | Human to merge | — |
+
+**Issue Loop config:**
+
+```toml
+[[loop.templates]]
+name = "issue-implement"
+variant = "issue"
+
+[loop.templates.trigger]
+labels = ["auto-implement"]
+repos = ["openabdev/openab"]
+exclude_labels = ["wontfix", "duplicate"]
+
+[loop.templates.roles]
+coder = "1490365068863606784"       # 超渡
+reviewer = "1493128125402320996"    # 普渡
+
+[loop.templates.instructions.coder_implement]
+template = """
+Implement issue #{issue_number}: {issue_title}
+
+{issue_body}
+
+Rules:
+1. Create a feature branch from main.
+2. Implement the solution.
+3. Run tests.
+4. Open a PR referencing this issue (Fixes #{issue_number}).
+5. Report back with the PR URL.
+
+Reply in thread: {thread_id}
+"""
+```
+
+**Issue Loop flow:**
+
+```
+Issue #123 gets label "auto-implement"
+        │
+        ▼
+  Controller discovers issue (scan or webhook)
+  createLoop({ type: "issue", issue: 123 })
+  state: CODING
+  dispatch(coder, { action: "implement", issue: 123 })
+        │
+        ▼
+  Coder works...
+  opens PR #42 (body contains "Fixes #123")
+  posts CompletionReport:
+    {
+      dispatch_id: "abc",
+      status: "completed",
+      action: "implement",
+      pr_created: 42,
+      head_sha: "def456",
+      branch: "feat/issue-123"
+    }
+        │
+        ▼
+  Controller receives report:
+    1. Verify PR exists: GET /repos/{repo}/pulls/42 → 200 ✓
+    2. Verify PR references issue #123 ✓
+    3. state: CODING → REVIEWING
+    4. dispatch(reviewer, { pr: 42, head_sha: "def456" })
+        │
+        ▼
+  (enters normal review loop: REVIEWING ↔ FIXING)
+        │
+        ▼
+  LGTM → APPROVED → human merges → issue auto-closed → DONE
+```
+
+**Two event sources for CODING → REVIEWING transition:**
+
+| Source | Signal | Priority |
+|--------|--------|----------|
+| Coder CompletionReport | Explicit: `{ pr_created: 42 }` | Primary (trusted) |
+| GitHub `pull_request.opened` | Implicit: new PR references issue | Fallback (if Coder didn't report) |
+
+**Resolution logic:**
+
+```typescript
+// Primary path: Coder reports back
+on CompletionReport { pr_created } → verify PR exists → transition to REVIEWING
+
+// Fallback path: Coder opened PR but didn't report (crash/timeout)
+on tick() timeout for CODING step:
+  → scan: GET /repos/{repo}/pulls?state=open&head={expected_branch_pattern}
+  → if PR found AND references issue:
+      → implicit completion → transition to REVIEWING
+  → if no PR found:
+      → escalate("Coder timeout, no PR found")
+```
+
+**Issue discovery (polling):**
+
+```
+GET /repos/{repo}/issues?state=open&labels=auto-implement&sort=created&direction=desc
+→ for each issue not in active_loops:
+    → createLoop({ type: "issue", issue: number })
+```
+
+### Variant Comparison
+
+| | PR Review Loop | Issue Implementation Loop |
+|---|---|---|
+| Trigger | PR exists | Issue exists |
+| First step | Review | Code |
+| States | REVIEWING ↔ FIXING | CODING → REVIEWING ↔ FIXING |
+| Coder opens PR? | No (PR already exists) | Yes |
+| Controller verifies | SHA match | PR exists + references issue |
+| Event sources | GitHub PR + Discord | GitHub Issue + PR + Discord |
+
 ## Loop Lifecycle
 
 A Loop is a **bounded, stateful coordination unit** managing one work item (e.g., one PR) through repeated agent cycles until completion or escalation.
