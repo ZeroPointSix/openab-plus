@@ -928,7 +928,76 @@ Controller needs to poll **two sources**: GitHub (PR state) and Discord (agent r
 
 #### Source 1: GitHub (PR state changes)
 
-Already covered above — poll or webhook for new commits, CI status, labels.
+Controller polls GitHub on each `tick()` based on current loop state:
+
+```typescript
+class GitHubPoller {
+  private etag_cache: Map<string, string>;  // endpoint → last ETag
+
+  /**
+   * Called each tick for every active loop.
+   * Checks only what's relevant to the current state.
+   */
+  async poll(loop: LoopState): Promise<LoopEvent[]> {
+    const events: LoopEvent[] = [];
+
+    switch (loop.state) {
+      case "FIXING":
+        // Waiting for coder push — check if head SHA changed
+        const pr_data = await this.get(`/repos/${loop.repo}/pulls/${loop.pr}`);
+        if (pr_data && pr_data.head.sha !== loop.head_sha) {
+          events.push({
+            type: "synchronize",
+            pr: loop.pr,
+            head_sha: pr_data.head.sha,
+            payload: { old_sha: loop.head_sha, new_sha: pr_data.head.sha },
+          });
+        }
+        break;
+
+      case "REVIEWING":
+        // Waiting for verdict — also monitor CI status
+        const checks = await this.get(`/repos/${loop.repo}/commits/${loop.head_sha}/check-runs`);
+        if (checks) {
+          const required = this.getRequiredChecks(loop);
+          const relevant = checks.check_runs.filter(c => required.includes(c.name));
+          const all_done = relevant.every(c => c.status === "completed");
+          if (all_done) {
+            const all_pass = relevant.every(c => c.conclusion === "success");
+            events.push({ type: all_pass ? "ci_passed" : "ci_failed", pr: loop.pr, head_sha: loop.head_sha });
+          }
+        }
+        break;
+    }
+
+    return events;
+  }
+
+  /** Conditional GET with ETag — 304 = no API quota consumed. */
+  private async get(url: string): Promise<any | null> {
+    const headers: Record<string, string> = {};
+    const etag = this.etag_cache.get(url);
+    if (etag) headers["If-None-Match"] = etag;
+
+    const resp = await fetch(url, { headers });
+    if (resp.status === 304) return null;
+
+    if (resp.headers.has("ETag")) {
+      this.etag_cache.set(url, resp.headers.get("ETag")!);
+    }
+    return resp.json();
+  }
+}
+```
+
+**API calls per loop per tick:**
+
+| Loop State | Calls | Endpoint |
+|------------|-------|----------|
+| FIXING | 1 | `GET /pulls/{pr}` (check head SHA) |
+| REVIEWING | 1 | `GET /commits/{sha}/check-runs` |
+| APPROVED | 0 | — |
+| ESCALATED | 0 | — |
 
 #### Source 2: Discord (Agent CompletionReports)
 
