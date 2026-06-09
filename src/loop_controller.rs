@@ -228,6 +228,18 @@ pub enum LoopEvent {
 
 // ─── Loop Controller ────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone)]
+pub struct CompletionData {
+    pub thread_id: String,
+    pub dispatch_id: String,
+    pub status: String,
+    pub pr_created: Option<u64>,
+    pub head_sha: Option<String>,
+    pub tokens_consumed: u64,
+    pub verdict: Option<String>,
+    pub findings: Option<String>,
+}
+
 pub struct LoopController {
     definitions: Vec<LoopDefinition>,
     active_loops: HashMap<String, LoopInstance>, // key: "{loop_name}--{number}"
@@ -305,16 +317,16 @@ impl LoopController {
                 findings,
                 ..
             } => {
-                self.handle_completion(
-                    &thread_id,
-                    &dispatch_id,
-                    &status,
+                self.handle_completion(CompletionData {
+                    thread_id,
+                    dispatch_id,
+                    status,
                     pr_created,
                     head_sha,
                     tokens_consumed,
                     verdict,
                     findings,
-                )
+                })
                 .await;
             }
             LoopEvent::Synchronize { pr_number, new_sha } => {
@@ -541,15 +553,21 @@ impl LoopController {
 
     async fn handle_completion(
         &mut self,
-        thread_id: &str,
-        dispatch_id: &str,
-        status: &str,
-        pr_created: Option<u64>,
-        head_sha: Option<String>,
-        tokens_consumed: u64,
-        verdict: Option<String>,
-        _findings: Option<String>,
+        report: CompletionData,
     ) {
+        let CompletionData {
+            thread_id,
+            dispatch_id,
+            status,
+            pr_created,
+            head_sha,
+            tokens_consumed,
+            verdict,
+            ..
+        } = report;
+        let thread_id = &thread_id;
+        let dispatch_id = &dispatch_id;
+        let status = &status;
         // Find the loop instance by thread_id
         let key = match self.find_loop_by_thread(thread_id) {
             Some(k) => k,
