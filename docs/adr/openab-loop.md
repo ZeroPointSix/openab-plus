@@ -896,6 +896,115 @@ Discord Message arrives
 - Both consumers see the same Discord events; each filters for its own concern
 - If Loop Controller crashes, OAB core is unaffected
 
+## Loop Creation — How to Define and Trigger a Loop
+
+A Loop can be created through three mechanisms, listed by priority:
+
+### 1. Discord Command (ad-hoc, human-initiated)
+
+A human mentions the controller agent with a `loop` command:
+
+```
+@超渡 loop start https://github.com/openabdev/openab/pull/42
+@超渡 loop start PR#42
+@超渡 loop start PR#42 --max-iterations 5 --reviewer @普渡 --coder @擺渡
+```
+
+Controller parses the command → resolves PR metadata from GitHub API → creates Loop instance → opens a dedicated Discord thread → dispatches first reviewer.
+
+**Command grammar:**
+
+```
+loop start <pr_url | PR#number> [options]
+loop stop <pr_url | PR#number> [reason]
+loop status [pr_url | PR#number]     // show active loops or specific loop state
+
+Options:
+  --reviewer <agent_id>         // override default reviewer
+  --coder <agent_id>            // override default coder
+  --max-iterations <n>          // override default cap
+  --token-budget <n>            // override default budget
+```
+
+### 2. GitHub Label (event-driven, automatic)
+
+Adding a configured label to a PR triggers loop creation automatically:
+
+```
+PR gets label "auto-review" → GitHub webhook/poll → Controller detects → new Loop()
+```
+
+The label acts as the opt-in signal. Removing the label mid-loop triggers `loop.stop("label removed")`.
+
+### 3. config.toml (persistent rules, zero-touch)
+
+Define loop templates in `config.toml`. Any PR matching the conditions automatically enters a loop:
+
+```toml
+[[loop.templates]]
+name = "pr-review"
+trigger.labels = ["auto-review"]
+trigger.base_branches = ["main", "dev"]
+trigger.exclude_authors = ["dependabot"]
+trigger.exclude_paths = ["docs/**"]    # skip docs-only PRs
+reviewer = "1493128125402320996"        # 普渡
+coder = "1490365068863606784"           # 超渡
+max_iterations = 3
+token_budget = 50000
+timeout_review = "10m"
+timeout_fix = "15m"
+
+[[loop.templates]]
+name = "docs-review"
+trigger.labels = ["docs-review"]
+trigger.paths = ["docs/**"]             # only docs PRs
+reviewer = "1496553369442189472"        # 覺渡
+coder = "1490365068863606784"
+max_iterations = 2
+token_budget = 20000
+```
+
+### Creation Priority
+
+When multiple triggers match the same PR:
+
+| Priority | Source | Behavior |
+|----------|--------|----------|
+| 1 (highest) | Discord command | Human intent always wins. Overrides any template. |
+| 2 | config.toml template | First matching template applies. |
+| 3 | Label trigger (no template match) | Uses system defaults. |
+
+**Rule:** One PR = one active Loop at a time. If a Loop already exists for a PR, duplicate triggers are no-ops.
+
+### Loop Creation Sequence
+
+```
+Trigger detected (command / label / template match)
+        │
+        ▼
+  PR already has active Loop? ── yes ──▶ no-op (log duplicate)
+        │
+       no
+        │
+        ▼
+  Resolve config (command args > template > defaults)
+        │
+        ▼
+  Create Discord thread: "🔄 Loop: {repo}#{pr} — {pr_title}"
+        │
+        ▼
+  Initialize LoopState (state: IDLE, iteration: 0)
+        │
+        ▼
+  Register thread_id in active_loop_threads set
+        │
+        ▼
+  Persist state to store (file / Redis)
+        │
+        ▼
+  loop.start() → state: REVIEWING → dispatch(reviewer)
+```
+
 ## Loop Lifecycle
 
 A Loop is a **bounded, stateful coordination unit** managing one work item (e.g., one PR) through repeated agent cycles until completion or escalation.
