@@ -490,13 +490,13 @@ In this model, agents self-dispatch via Discord mentions without a dedicated con
 
 This phase exists as documentation of the rejected alternative. We start directly at Phase 1.
 
-### Phase 1 (MVP) — Loop Controller as Single Process
+### Phase 1 (MVP) — Controller in Core, Polling Mode
 
-Phase 1 ships with a **lightweight Loop Controller** from day one. Relying on agents to self-dispatch is unreliable — agents can hallucinate, forget context, or skip steps. A dedicated controller provides deterministic event routing and safety enforcement.
+Phase 1 ships the Loop Controller as part of the **OAB core process**. It runs alongside the existing agent runtime, using polling to detect events.
 
-**Phase 1 controller scope:**
-- Single long-running process (can be a simple Node/Python/Rust daemon)
-- Polls GitHub API for PR events (no webhook infra required)
+**Phase 1 scope:**
+- Controller embedded in the core agent process
+- Polls GitHub API for PR events (new commits, CI status)
 - Listens to Discord messages for verdicts
 - Maintains file-based state per PR (`~/.openab/loops/state/pr-{number}.json`)
 - Enforces timeouts via timestamp comparison on each poll cycle
@@ -512,17 +512,22 @@ Phase 1 ships with a **lightweight Loop Controller** from day one. Relying on ag
 6. Controller dispatches Reviewer for re-review
 7. Loop repeats until LGTM, max_iterations, or escalation
 
-**Why controller-first:**
-- Agents are stateless and unreliable for coordination — they may drop context mid-loop
+**Why in-core + polling:**
+- No additional infrastructure needed — runs where agents already run
+- Polling requires only repo read permission (no admin webhook config)
+- Single process = single log = easy to debug
 - Controller holds the single source of truth (state file)
 - All safety enforcement is centralized and auditable
-- Easy to debug: one process, one log, deterministic behavior
 
-### Phase 2 — Eval Gates & Webhook Support
+### Phase 2 — Controller in Gateway, Webhook Mode
 
-- Add structured quality checks at each step beyond "does it build"
-- Add webhook support as opt-in acceleration (faster than polling)
-- Migrate state to Redis for multi-instance deployment
+Move the Loop Controller out of core into a **dedicated Gateway service** that receives GitHub webhooks in real-time.
+
+- Real-time event delivery (seconds vs polling interval)
+- Gateway handles webhook validation, event normalization, and routing
+- Supports multiple concurrent loops at scale
+- State migrates to Redis/DynamoDB for distributed deployment
+- Add structured eval gates at each step beyond "does it build"
 
 ### Phase 3 — Loop History & Feedback
 
