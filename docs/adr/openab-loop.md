@@ -1669,6 +1669,67 @@ GET /repos/{repo}/issues?state=open&labels=auto-implement&sort=created&direction
 | Controller verifies | SHA match | PR exists + references issue |
 | Event sources | GitHub PR + Discord | GitHub Issue + PR + Discord |
 
+### Multi-Agent: Lead Delegation Pattern
+
+Controller always communicates with **one Lead per role** — never directly with sub-agents.
+
+```
+Controller ←→ Lead Reviewer ←→ (sub-reviewers, Lead's decision)
+Controller ←→ Lead Coder    ←→ (sub-coders, Lead's decision)
+```
+
+The Lead decides whether to delegate, to how many, and how to aggregate. Controller doesn't know or care.
+
+**Why this is better than Controller managing N reviewers:**
+
+| | Controller manages N | Lead delegation |
+|---|---|---|
+| Controller complexity | Tracks N dispatch_ids, aggregation logic, quorum | 1 dispatch_id, 1 report |
+| Flexibility | Fixed at config time | Lead adapts per-PR |
+| Config | `reviewers = [A, B, C]` | `reviewer = Lead` |
+| Code changes | New state tracking, merge logic | Zero |
+
+**Config stays simple:**
+
+```toml
+[roles]
+coder = "1490365068863606784"      # Lead Coder (may delegate)
+reviewer = "1490365068863606784"   # Lead Reviewer (may delegate)
+```
+
+The Lead's instruction template can mention delegation ability:
+
+```
+You may delegate sub-tasks to other agents if needed.
+You are responsible for aggregating results and posting one CompletionReport.
+```
+
+### Thread Model: One Thread Per Loop
+
+Each Loop instance gets **one Discord thread**. All participants (Controller, Coder, Reviewer) communicate in the same thread.
+
+```
+Thread: "🔄 Loop: openabdev/openab#123 — Add feature X"
+├── [Controller] @lead_coder 請實作 issue #123 {dispatch payload}
+├── [Lead Coder] (may delegate to sub-coders in same thread)
+├── [Lead Coder] 完成，PR #42 已開 {CompletionReport}
+├── [Controller] @lead_reviewer 請 review PR #42 {dispatch payload}
+├── [Lead Reviewer] (may summon sub-reviewers)
+├── [Lead Reviewer] CHANGES REQUESTED ⚠️ {CompletionReport}
+├── [Controller] @lead_coder 請修改 {dispatch payload + findings}
+├── [Lead Coder] 已 push {CompletionReport}
+├── [Controller] @lead_reviewer 請 re-review
+├── [Lead Reviewer] LGTM ✅ {CompletionReport}
+└── [Controller] ✅ Loop 完成，awaiting merge
+```
+
+**Why same thread:**
+
+1. **Observability** — human opens one thread, sees entire loop history
+2. **Context sharing** — Reviewer can see Coder's previous work summary
+3. **Simplicity** — Controller manages one `thread_id` per loop
+4. **Agent independence** — agents get context from DispatchPayload, not thread history; thread visibility is bonus, not dependency
+
 ## Loop Definition Files
 
 Loop definitions follow the same pattern as usercron: **one file = one loop**. Place `.toml` files in `~/.openab/loop/` and they activate automatically on startup.
