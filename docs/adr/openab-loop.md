@@ -1242,6 +1242,63 @@ Controller                          Agent (new session)
 | Multiple agents in same thread | Each report carries `agent_id` + `dispatch_id` — no ambiguity |
 | Agent crashes without reporting | Controller's `tick()` detects timeout → retry or escalate |
 
+### Message Routing — Callback Detection
+
+OAB processes every incoming Discord message. To avoid adding overhead to normal message flow, callback detection uses a two-layer fast-path filter:
+
+```
+Discord message arrives
+        │
+        ▼
+  ┌──────────────────────────────────┐
+  │ Layer 1: thread_id ∈ active_loops? │  ← HashSet lookup, O(1)
+  └──────────────┬───────────────────┘
+                 │
+          no ────┴──── yes
+          │              │
+          ▼              ▼
+   normal flow    ┌─────────────────────────────────────┐
+   (zero cost)    │ Layer 2: has structured report marker? │
+                  └──────────────┬──────────────────────┘
+                                 │
+                          no ────┴──── yes
+                          │              │
+                          ▼              ▼
+                   human chat in   Controller.consume()
+                   loop thread     → parse → transition
+                   (ignore)
+```
+
+**Layer 1 — Active Loop Thread Set**
+
+Controller maintains: `active_loop_threads: Set<thread_id>`
+
+- Added when `Loop.start()` creates a thread
+- Removed when loop reaches DONE
+- 99%+ of messages fail this check → zero additional processing
+
+**Layer 2 — Structured Report Marker**
+
+Agent completion reports MUST include a machine-parseable marker at the start of the message:
+
+```
+<!-- oab-loop-report:{"dispatch_id":"abc-123","agent_id":"149...","status":"completed"} -->
+
+(human-readable content below)
+LGTM ✅ — code looks good, no issues found.
+```
+
+Detection: `message.content.startsWith("<!-- oab-loop-report:")`
+
+**Why two layers:**
+
+| Layer | Filters out | Cost |
+|-------|-------------|------|
+| 1 (thread set) | All messages in non-loop threads | 1 HashSet lookup |
+| 2 (marker prefix) | Human chat within loop threads | 1 string prefix check |
+
+**Impact on normal OAB message flow: effectively zero.**
+
 ### Methods Summary
 
 | Method | Input | Output | Mutates State? | Side Effects |
