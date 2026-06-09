@@ -135,13 +135,13 @@ sandbox$ openab run --config config.toml
 
 ## Network Policy
 
-OpenShell sandboxes have **default-deny egress**. OAB ships its own policy preset at `openshell/policies/openab-full.yaml` that covers all supported backends in one file:
+OpenShell sandboxes have **default-deny egress**. OAB ships a complete policy file at `openshell/policies/openab-full.yaml` that covers all supported backends. It includes the required static sections (`version`, `filesystem_policy`, `landlock`, `process`) so it works directly with `openshell policy set`:
 
 ```bash
 openshell policy set oab --policy openshell/policies/openab-full.yaml --wait
 ```
 
-This "open tier" uses L4 passthrough (no HTTP inspection) for maximum compatibility. You can also apply it at sandbox creation:
+You can also apply it at sandbox creation:
 
 ```bash
 openshell sandbox create --name oab \
@@ -150,6 +150,8 @@ openshell sandbox create --name oab \
   --provider discord \
   -- bash
 ```
+
+> **Note:** This file lives in the source repo. Clone the repo or download the file before referencing it with `--policy`.
 
 ### Required endpoints by backend
 
