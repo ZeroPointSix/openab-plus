@@ -29,7 +29,7 @@ use serenity::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Wait for SIGINT (ctrl_c) or, on unix, SIGTERM. SIGTERM is what Kubernetes
 /// sends during pod termination, so handling it lets us run the full cleanup
