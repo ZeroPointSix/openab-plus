@@ -819,7 +819,7 @@ If none appears within the timeout window, the controller treats it as an incomp
 
 ### State Store
 
-Phase 1: file-based state under `~/.openab/loops/state/pr-{number}.json`
+Phase 1: file-based state under `~/.openab/loop/state/pr-{number}.json`
 
 ```json
 {
@@ -1671,22 +1671,22 @@ GET /repos/{repo}/issues?state=open&labels=auto-implement&sort=created&direction
 
 ## Loop Definition Files
 
-Loop definitions follow the same pattern as usercron: **one file = one loop**. Place `.loop.toml` files in `~/.openab/loops/` and they activate automatically on startup.
+Loop definitions follow the same pattern as usercron: **one file = one loop**. Place `.toml` files in `~/.openab/loop/` and they activate automatically on startup.
 
 ### File Layout
 
 ```
-~/.openab/loops/
-├── pr-review.loop.toml          # active
-├── issue-implement.loop.toml    # active
-├── docs-review.loop.toml        # active
-└── experiment.loop.toml         # disabled inside file
+~/.openab/loop/
+├── pr-review.toml          # active
+├── issue-implement.toml    # active
+├── docs-review.toml        # active
+└── experiment.toml         # disabled inside file
 ```
 
 ### File Format
 
 ```toml
-# ~/.openab/loops/pr-review.loop.toml
+# ~/.openab/loop/pr-review.toml
 
 name = "pr-review"
 enabled = true                    # set to false to disable without deleting
@@ -1748,7 +1748,7 @@ action = "escalate"
 ### Issue Loop Example
 
 ```toml
-# ~/.openab/loops/issue-implement.loop.toml
+# ~/.openab/loop/issue-implement.toml
 
 name = "issue-implement"
 enabled = true
@@ -1803,7 +1803,7 @@ Reply in thread: {thread_id}
 OAB startup / hot-reload
         │
         ▼
-  Scan ~/.openab/loops/*.loop.toml
+  Scan ~/.openab/loop/*.toml
         │
         ▼
   For each file:
@@ -1821,19 +1821,19 @@ OAB startup / hot-reload
 
 | | usercron | loop |
 |---|---|---|
-| File pattern | `~/.openab/crons/*.cron.toml` | `~/.openab/loops/*.loop.toml` |
+| File pattern | `~/.openab/crons/*.cron.toml` | `~/.openab/loop/*.toml` |
 | One file = | One scheduled job | One loop definition |
 | Disable | `enabled = false` | `enabled = false` |
 | Trigger | Schedule (cron expr) | Event (label, PR, issue) |
 | Runtime state | Stateless (fire & forget) | Stateful (state machine per work item) |
-| State storage | None | `~/.openab/loops/state/` |
+| State storage | None | `~/.openab/loop/state/` |
 
 ### Runtime State Files (auto-managed)
 
 Active loop instances write state to:
 
 ```
-~/.openab/loops/state/
+~/.openab/loop/state/
 ├── pr-review--42.json           # loop state for PR #42
 ├── pr-review--45.json           # loop state for PR #45
 └── issue-implement--123.json    # loop state for issue #123
@@ -2606,7 +2606,7 @@ Phase 1 ships the Loop Controller as part of the **OAB core process**. It runs a
 - Controller embedded in the core agent process
 - Polls GitHub API for PR events (new commits, CI status)
 - Listens to Discord messages for verdicts
-- Maintains file-based state per PR (`~/.openab/loops/state/pr-{number}.json`)
+- Maintains file-based state per PR (`~/.openab/loop/state/pr-{number}.json`)
 - Enforces timeouts via timestamp comparison on each poll cycle
 - Enforces safety policy (path denylist, category escalation) before dispatching to Coder
 - Per-PR event queue (actor pattern) — events for different PRs process concurrently; within one PR, events are serialized
