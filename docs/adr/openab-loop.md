@@ -217,6 +217,8 @@ patterns = [
 
 Pattern matching uses glob semantics. Both directory-based (`**/auth/**`) and filename-based (`**/auth*`) patterns are needed to cover cases like `src/auth.rs` that live outside a dedicated `auth/` directory.
 
+**Principle: path denylist is defense-in-depth, not the sole classifier.** Patterns can never exhaustively cover all sensitive files. The primary safety gate is the structured `category` + `risk_level` in findings. Path denylist is a secondary catch-all that triggers even when a reviewer fails to tag a finding correctly.
+
 **Category escalation rules:**
 
 | category | risk_level | Action |
