@@ -1,0 +1,75 @@
+# OpenAB "open tier" network policy preset for OpenShell sandboxes.
+# Allows all endpoints required by OAB across all supported backends.
+# Usage:
+#   openshell policy set oab --policy openshell/policies/openab-full.yaml --wait
+#
+# This uses L4 passthrough (no protocol inspection) for maximum compatibility.
+
+network_policies:
+  discord:
+    name: discord
+    endpoints:
+      - { host: discord.com, port: 443 }
+      - { host: gateway.discord.gg, port: 443 }
+      - { host: cdn.discordapp.com, port: 443 }
+      - { host: media.discordapp.net, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab }
+      - { path: /usr/local/bin/openab-agent }
+
+  openai:
+    name: openai
+    endpoints:
+      - { host: chatgpt.com, port: 443 }
+      - { host: api.openai.com, port: 443 }
+      - { host: auth0.openai.com, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+
+  anthropic:
+    name: anthropic
+    endpoints:
+      - { host: api.anthropic.com, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+
+  github:
+    name: github
+    endpoints:
+      - { host: github.com, port: 443 }
+      - { host: api.github.com, port: 443 }
+      - { host: objects.githubusercontent.com, port: 443 }
+      - { host: raw.githubusercontent.com, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/bin/gh }
+      - { path: /usr/bin/git }
+
+  google:
+    name: google
+    endpoints:
+      - { host: generativelanguage.googleapis.com, port: 443 }
+      - { host: oauth2.googleapis.com, port: 443 }
+      - { host: accounts.google.com, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+
+  groq:
+    name: groq
+    endpoints:
+      - { host: api.groq.com, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+
+  packages:
+    name: packages
+    endpoints:
+      - { host: pypi.org, port: 443 }
+      - { host: files.pythonhosted.org, port: 443 }
+      - { host: registry.npmjs.org, port: 443 }
+      - { host: ghcr.io, port: 443 }
+    binaries:
+      - { path: /usr/bin/pip }
+      - { path: /usr/local/bin/uv }
+      - { path: /usr/bin/npm }
+      - { path: /usr/bin/curl }
