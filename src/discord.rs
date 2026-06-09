@@ -458,6 +458,7 @@ impl EventHandler for Handler {
         // ── Loop Controller callback detection (Layer 1/2) ──
         // Layer 1: Is this message in an active loop thread?
         // Layer 2: Does it contain a CompletionReport marker?
+        // Messages in loop threads are NOT dispatched to the normal OAB backend.
         if let Some(ref lc) = self.loop_controller {
             let thread_id = msg.channel_id.to_string();
             let ctrl = lc.lock().await;
@@ -474,8 +475,21 @@ impl EventHandler for Handler {
                     drop(ctrl);
                     let mut ctrl = lc.lock().await;
                     ctrl.consume(event).await;
-                    return; // handled by loop controller, don't dispatch to backend
+                } else {
+                    // Check for human override commands (stop, resume)
+                    let content_lower = msg.content.to_lowercase();
+                    if content_lower.contains("stop") || content_lower.contains("resume") {
+                        let cmd = if content_lower.contains("stop") { "stop" } else { "resume" };
+                        drop(ctrl);
+                        let mut ctrl = lc.lock().await;
+                        ctrl.consume(crate::loop_controller::LoopEvent::HumanOverride {
+                            thread_id: msg.channel_id.to_string(),
+                            command: cmd.to_string(),
+                        }).await;
+                    }
+                    // else: regular chat in loop thread — ignore, don't dispatch to backend
                 }
+                return; // all loop thread messages stop here
             }
         }
 

@@ -543,6 +543,14 @@ impl LoopController {
         self.active_loops.insert(key.clone(), instance);
         self.persist_state(&key);
 
+        // Create Discord thread for this loop
+        let thread_id = format!("loop-{}", key);
+        if let Some(inst) = self.active_loops.get_mut(&key) {
+            inst.thread_id = Some(thread_id.clone());
+        }
+        self.active_threads.insert(thread_id);
+        self.persist_state(&key);
+
         // Dispatch first step
         match initial_state {
             LoopState::Coding => {
