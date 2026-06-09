@@ -1,0 +1,31 @@
+suite: workspace aliases
+templates:
+  - templates/configmap.yaml
+tests:
+  - it: renders [workspace.aliases] with quoted keys and values
+    set:
+      agents.kiro.workspace.aliases.myproject: "~/projects/myproject"
+      agents.kiro.workspace.aliases.my-org: "~/org"
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: '\[workspace\.aliases\]'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: '"myproject" = "~/projects/myproject"'
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: '"my-org" = "~/org"'
+
+  - it: omits [workspace.aliases] when not configured
+    asserts:
+      - notMatchRegex:
+          path: data["config.toml"]
+          pattern: '\[workspace\.aliases\]'
+
+  - it: rejects non-string alias value
+    set:
+      agents.kiro.workspace.aliases.bad: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "workspace.aliases.bad must be a string"
