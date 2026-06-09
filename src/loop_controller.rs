@@ -781,6 +781,8 @@ impl LoopController {
                 if inst.retries_this_step < max_retries {
                     inst.retries_this_step += 1;
                     inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
                     NextAction::RetryStep(inst.state.clone())
                 } else {
                     NextAction::EscalateNow("Step failed after max retries".into())
@@ -793,6 +795,8 @@ impl LoopController {
                             inst.head_sha = head_sha;
                             inst.state = LoopState::Reviewing;
                             inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
                             inst.retries_this_step = 0;
                             NextAction::TransitionCodingDone(pr)
                         } else {
@@ -812,6 +816,8 @@ impl LoopController {
                             } else {
                                 inst.state = LoopState::Fixing;
                                 inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
                                 inst.retries_this_step = 0;
                                 NextAction::TransitionToFixing
                             }
@@ -826,6 +832,8 @@ impl LoopController {
                         inst.iteration += 1;
                         inst.state = LoopState::Reviewing;
                         inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
                         inst.retries_this_step = 0;
                         NextAction::TransitionToReviewing
                     }
@@ -899,6 +907,8 @@ impl LoopController {
                 inst.iteration += 1;
                 inst.state = LoopState::Reviewing;
                 inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
                 inst.retries_this_step = 0;
                 true
             } else {
@@ -1036,6 +1046,8 @@ impl LoopController {
             if let Some(inst) = self.active_loops.get_mut(key) {
                 inst.retries_this_step += 1;
                 inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
             }
             self.persist_state(key);
             info!(key, "step timeout — retrying");
@@ -1078,6 +1090,8 @@ impl LoopController {
                     inst.state = LoopState::Reviewing; // safe default
                     inst.retries_this_step = 0;
                     inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
                     self.persist_state(&key);
                     info!(key, "loop resumed by human");
                 }
@@ -1096,6 +1110,8 @@ impl LoopController {
             let inst = self.active_loops.get_mut(key).unwrap();
             inst.last_dispatch_id = Some(dispatch_id.clone());
             inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
         }
         self.persist_state(key);
 
@@ -1137,6 +1153,8 @@ impl LoopController {
             let inst = self.active_loops.get_mut(key).unwrap();
             inst.last_dispatch_id = Some(dispatch_id.clone());
             inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
         }
         self.persist_state(key);
 
@@ -1192,6 +1210,8 @@ impl LoopController {
             let inst = self.active_loops.get_mut(key).unwrap();
             inst.last_dispatch_id = Some(dispatch_id.clone());
             inst.current_step_started = Utc::now();
+                    inst.last_seen = Utc::now();
+                    inst.pings_sent = 0;
         }
         self.persist_state(key);
 
