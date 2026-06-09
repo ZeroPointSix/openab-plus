@@ -198,6 +198,8 @@ Safety boundaries must be **structural and automatable**, not reliant on natural
 
 **Path denylist — Coder agent must NOT modify these without human approval:**
 
+> **Principle:** Path rules are **defense-in-depth**, not the sole safety classifier. The primary classifier is the structured `category` + `risk_level` in findings. Path denylist catches cases where the Coder attempts to modify sensitive files not explicitly flagged by the Reviewer.
+
 ```toml
 [safety.path_denylist]
 patterns = [
@@ -213,9 +215,12 @@ patterns = [
   "**/*.key",
   ".env*",
 ]
+
+# Keyword matching on file path (catches files path globs miss)
+keywords = ["auth", "secret", "credential", "token", "password", "infra"]
 ```
 
-Pattern matching uses glob semantics. Both directory-based (`**/auth/**`) and filename-based (`**/auth*`) patterns are needed to cover cases like `src/auth.rs` that live outside a dedicated `auth/` directory.
+**Matching logic:** A file is denied if it matches **any** glob pattern OR its path contains **any** keyword. This dual approach (glob + keyword) ensures safety without needing to enumerate every possible file layout.
 
 **Principle: path denylist is defense-in-depth, not the sole classifier.** Patterns can never exhaustively cover all sensitive files. The primary safety gate is the structured `category` + `risk_level` in findings. Path denylist is a secondary catch-all that triggers even when a reviewer fails to tag a finding correctly.
 
