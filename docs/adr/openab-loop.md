@@ -922,6 +922,132 @@ Users opt in by adding the `auto-review` label to a PR. No label = traditional m
 
 **Polling is the universal default; webhook is an opt-in acceleration for teams that can configure it.**
 
+### PR Discovery — How Controller Finds New PRs to Loop
+
+Before the Controller can manage a loop, it needs to **discover** which PRs should enter a loop. This is separate from monitoring PRs already in a loop.
+
+**Discovery sources (in priority order):**
+
+| Source | Trigger | Latency |
+|--------|---------|---------|
+| Discord command | Human says `loop start PR#42` | Instant |
+| GitHub webhook | `pull_request.opened` or `pull_request.labeled` | Seconds |
+| PR scan (polling) | Controller periodically lists open PRs | poll_interval |
+
+**PR Scan — the polling-based discovery:**
+
+```typescript
+class PRDiscovery {
+  private known_prs: Set<number>;  // PRs already in active_loops or rejected
+
+  /**
+   * Runs every poll_interval. Finds new PRs matching loop conditions.
+   * Only creates loops for PRs not already tracked.
+   */
+  async scan(): Promise<void> {
+    // Fetch open PRs (newest first, paginated)
+    const prs = await github.get(
+      `/repos/${repo}/pulls?state=open&sort=created&direction=desc&per_page=30`
+    );
+
+    for (const pr of prs) {
+      // Skip if already tracked
+      if (this.known_prs.has(pr.number)) continue;
+
+      // Match against loop templates
+      const template = this.matchTemplate(pr);
+      if (!template) {
+        this.known_prs.add(pr.number);  // remember rejection to avoid re-checking
+        continue;
+      }
+
+      // Create new loop
+      this.controller.createLoop(pr, template);
+      this.known_prs.add(pr.number);
+    }
+  }
+
+  /**
+   * Check if a PR matches any configured loop template.
+   */
+  matchTemplate(pr: PullRequest): LoopTemplate | null {
+    for (const tmpl of this.config.templates) {
+      const match =
+        this.hasRequiredLabel(pr, tmpl.trigger.labels) &&
+        this.matchesBranch(pr, tmpl.trigger.base_branches) &&
+        !this.isExcludedAuthor(pr, tmpl.trigger.exclude_authors) &&
+        !this.isExcludedPaths(pr, tmpl.trigger.exclude_paths);
+
+      if (match) return tmpl;
+    }
+    return null;
+  }
+}
+```
+
+**Matching conditions (all must be true):**
+
+```toml
+[[loop.templates]]
+name = "pr-review"
+
+[loop.templates.trigger]
+labels = ["auto-review"]          # PR has this label
+base_branches = ["main", "dev"]   # PR targets one of these
+exclude_authors = ["dependabot"]  # skip these authors
+exclude_paths = ["docs/**"]       # skip if PR ONLY touches these paths
+min_changes = 1                   # skip empty PRs
+```
+
+**Discovery flow:**
+
+```
+Every poll_interval:
+        │
+        ▼
+  GET /repos/{repo}/pulls?state=open
+        │
+        ▼
+  For each PR:
+        │
+  already in active_loops? ── yes ──▶ skip
+        │
+       no
+        │
+        ▼
+  matches a template? ── no ──▶ skip (add to known_prs)
+        │
+      yes
+        │
+        ▼
+  createLoop(pr, template)
+  → open Discord thread
+  → state: IDLE → start() → REVIEWING
+  → dispatch reviewer
+```
+
+**When webhook is available:**
+
+If GitHub webhooks are configured, the scan is still useful as a **catch-up mechanism** (in case a webhook was missed), but primary discovery is event-driven:
+
+```
+GitHub webhook: pull_request.opened
+  → payload includes labels, base, author
+  → matchTemplate() → createLoop() if match
+
+GitHub webhook: pull_request.labeled
+  → check if new label triggers a template
+  → createLoop() if match and no active loop exists
+```
+
+**Rate limit for discovery:**
+
+| Scenario | API calls | Note |
+|----------|-----------|------|
+| Scan (per tick) | 1 | `GET /pulls?state=open` (with ETag) |
+| Webhook mode | 0 | Event-driven, no polling |
+| Hybrid (webhook + scan as backup) | 1 every 5 min | Reduced scan frequency |
+
 ### Event Consumption — How Controller Receives Events
 
 Controller needs to poll **two sources**: GitHub (PR state) and Discord (agent replies). Both feed into the same `consume()` pipeline.
