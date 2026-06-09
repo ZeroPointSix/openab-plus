@@ -397,33 +397,35 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Spawn Loop Controller (background task) — watches ~/.openab/loop/*.toml
-    let loop_handle = {
+    let (shared_loop_controller, loop_handle) = {
         let loop_dir = std::env::var("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_default()
             .join(".openab")
             .join("loop");
         if loop_dir.is_dir() {
-            let shutdown_rx = shutdown_rx.clone();
             let adapter = shared_discord_adapter.clone();
             let github_token = std::env::var("GITHUB_TOKEN").ok();
             if let Some(adapter) = adapter {
-                info!(path = %loop_dir.display(), "starting loop controller");
-                Some(tokio::spawn(async move {
-                    loop_controller::run_loop_controller(
-                        loop_dir,
-                        adapter,
-                        github_token,
-                        shutdown_rx,
-                    )
-                    .await;
-                }))
+                if let Some(ctrl) = loop_controller::create_loop_controller(
+                    &loop_dir, adapter, github_token,
+                ) {
+                    info!(path = %loop_dir.display(), "starting loop controller");
+                    let ctrl_bg = ctrl.clone();
+                    let shutdown_rx = shutdown_rx.clone();
+                    let handle = tokio::spawn(async move {
+                        loop_controller::run_loop_controller(ctrl_bg, shutdown_rx).await;
+                    });
+                    (Some(ctrl), Some(handle))
+                } else {
+                    (None, None)
+                }
             } else {
                 debug!("loop controller skipped — no Discord adapter");
-                None
+                (None, None)
             }
         } else {
-            None
+            (None, None)
         }
     };
 
@@ -502,7 +504,7 @@ async fn main() -> anyhow::Result<()> {
             dispatcher: discord_dispatcher,
             reminder_store: reminder_store.clone(),
             scheduled_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
-            loop_controller: None, // TODO: wire shared Arc from loop_controller spawn
+            loop_controller: shared_loop_controller,
         };
 
         let intents = GatewayIntents::GUILD_MESSAGES

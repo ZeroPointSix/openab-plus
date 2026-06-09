@@ -905,7 +905,6 @@ impl LoopController {
                 }
             }
         }
-        }
         true
     }
 
@@ -1013,10 +1012,11 @@ impl LoopController {
                 inst.thread_id.as_deref().unwrap_or("unknown"),
             );
 
-        let _message = format!(
+        let message = format!(
             "<@{}> 🔄 **Loop: {} #{}**\n\n{}",
             def.roles.coder, inst.work_item.kind, inst.work_item.number, instruction
         );
+        self.send_to_loop_thread(key, &message).await;
 
         info!(
             key,
@@ -1063,7 +1063,7 @@ impl LoopController {
                 inst.thread_id.as_deref().unwrap_or("unknown"),
             );
 
-        let _message = format!(
+        let message = format!(
             "<@{}> 🔄 **Loop Review: PR #{}** (iteration {}/{})\n\n{}",
             def.roles.reviewer,
             inst.pr_number.unwrap_or(0),
@@ -1071,6 +1071,7 @@ impl LoopController {
             inst.max_iterations,
             instruction
         );
+        self.send_to_loop_thread(key, &message).await;
 
         info!(
             key,
@@ -1126,7 +1127,7 @@ impl LoopController {
                 inst.thread_id.as_deref().unwrap_or("unknown"),
             );
 
-        let _message = format!(
+        let message = format!(
             "<@{}> 🔧 **Loop Fix: PR #{}** (iteration {}/{})\n\n{}",
             def.roles.coder,
             inst.pr_number.unwrap_or(0),
@@ -1134,6 +1135,7 @@ impl LoopController {
             inst.max_iterations,
             instruction
         );
+        self.send_to_loop_thread(key, &message).await;
 
         info!(
             key,
@@ -1158,6 +1160,26 @@ impl LoopController {
     }
 
     // ─── Internal: Helpers ──────────────────────────────────────────────────
+
+    async fn send_to_loop_thread(&self, key: &str, content: &str) {
+        let thread_id = match self.active_loops.get(key).and_then(|i| i.thread_id.clone()) {
+            Some(tid) => tid,
+            None => {
+                error!(key, "cannot send: no thread_id for loop");
+                return;
+            }
+        };
+        let channel = crate::adapter::ChannelRef {
+            platform: "discord".into(),
+            channel_id: thread_id,
+            thread_id: None,
+            parent_id: None,
+            origin_event_id: None,
+        };
+        if let Err(e) = self.adapter.send_message(&channel, content).await {
+            error!(key, error = %e, "failed to send message to loop thread");
+        }
+    }
 
     fn find_loop_by_thread(&self, thread_id: &str) -> Option<String> {
         self.active_loops
@@ -1287,29 +1309,30 @@ pub fn load_loop_definitions(dir: &Path) -> Vec<LoopDefinition> {
     defs
 }
 
-/// Run the loop controller as a background task.
-pub async fn run_loop_controller(
-    loop_dir: PathBuf,
+/// Create a shared LoopController instance (call once, share with Handler).
+pub fn create_loop_controller(
+    loop_dir: &Path,
     adapter: Arc<dyn ChatAdapter>,
     github_token: Option<String>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-) {
-    let defs = load_loop_definitions(&loop_dir);
+) -> Option<Arc<Mutex<LoopController>>> {
+    let defs = load_loop_definitions(loop_dir);
     if defs.is_empty() {
         info!("no loop definitions found, loop controller idle");
-        return;
+        return None;
     }
     let enabled_count = defs.iter().filter(|d| d.enabled).count();
-    info!(total = defs.len(), enabled = enabled_count, "loop controller starting");
-
+    info!(total = defs.len(), enabled = enabled_count, "loop controller created");
     let state_dir = loop_dir.join("state");
-    let controller = Arc::new(Mutex::new(LoopController::new(
-        defs,
-        state_dir,
-        adapter,
-        github_token,
-    )));
+    Some(Arc::new(Mutex::new(LoopController::new(
+        defs, state_dir, adapter, github_token,
+    ))))
+}
 
+/// Run the loop controller background tick task.
+pub async fn run_loop_controller(
+    controller: Arc<Mutex<LoopController>>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
     let poll_interval = tokio::time::Duration::from_secs(60);
 
     loop {

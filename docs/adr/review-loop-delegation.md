@@ -229,7 +229,18 @@ reviewer = ""    # empty = auto-create on first dispatch
 
 ---
 
-## 10. Decision
+## 10. Phase Plan
+
+| Phase | Thread Model | Config |
+|-------|-------------|--------|
+| **Phase 1 (current)** | Single shared thread per loop — Controller, Coder, and Reviewer all operate in the same Discord thread | `thread_id` (singular) in `LoopInstance` |
+| **Phase 2** | Dual isolated threads — Coder thread + Reviewer thread, Controller mediates via structured data | `[roles.threads]` config with per-role thread_id |
+
+Phase 1 validates the core loop mechanics (state machine, dispatch, safety policy). Phase 2 adds thread isolation when the single-thread model is proven stable.
+
+---
+
+## 11. Decision
 
 1. **Delegation Pattern** — Controller dispatches to one Lead per role; internal fan-out is encapsulated.
 2. **Symmetric** — applies to both Lead Reviewer and Lead Coder.
