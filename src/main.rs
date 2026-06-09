@@ -10,6 +10,7 @@ mod error_display;
 mod format;
 mod gateway;
 mod hooks;
+mod loop_controller;
 mod markdown;
 mod media;
 mod reactions;
