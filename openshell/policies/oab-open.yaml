@@ -27,6 +27,10 @@ network_policies:
       - allow: { method: PUT, path: "/**" }
       - allow: { method: PATCH, path: "/**" }
       - allow: { method: DELETE, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
 
   # ── OpenAI / ChatGPT ──────────────────────────────────────────────────
   openai:
@@ -47,6 +51,10 @@ network_policies:
     rules:
       - allow: { method: GET, path: "/**" }
       - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
 
   # ── Anthropic ──────────────────────────────────────────────────────────
   anthropic:
@@ -56,9 +64,21 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
+      - host: claude.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+      - host: console.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
     rules:
       - allow: { method: GET, path: "/**" }
       - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
 
   # ── Google AI (Gemini) ─────────────────────────────────────────────────
   google:
@@ -71,6 +91,10 @@ network_policies:
     rules:
       - allow: { method: GET, path: "/**" }
       - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
 
   # ── GitHub ─────────────────────────────────────────────────────────────
   github:
@@ -90,6 +114,12 @@ network_policies:
       - allow: { method: PUT, path: "/**" }
       - allow: { method: PATCH, path: "/**" }
       - allow: { method: DELETE, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
+      - { path: /usr/bin/git }
+      - { path: /usr/local/bin/gh }
 
   # ── npm registry ───────────────────────────────────────────────────────
   npm:
@@ -101,6 +131,11 @@ network_policies:
         enforcement: enforce
     rules:
       - allow: { method: GET, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
+      - { path: /usr/local/bin/npm }
 
   # ── PyPI ───────────────────────────────────────────────────────────────
   pypi:
@@ -116,3 +151,7 @@ network_policies:
         enforcement: enforce
     rules:
       - allow: { method: GET, path: "/**" }
+    binaries:
+      - { path: /usr/bin/python3 }
+      - { path: /usr/local/bin/pip }
+      - { path: /usr/local/bin/pip3 }
