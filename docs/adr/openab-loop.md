@@ -519,6 +519,163 @@ The controller communicates with agents **only through Discord mentions**. Agent
 Controller → Discord mention → Agent works → Discord/GitHub event → Controller
 ```
 
+## Loop Lifecycle
+
+A Loop is a **bounded, stateful coordination unit** managing one work item (e.g., one PR) through repeated agent cycles until completion or escalation.
+
+### Lifecycle Diagram
+
+```
+                         ┌─────────────────────────────────────────┐
+                         │              LOOP LIFECYCLE              │
+                         └─────────────────────────────────────────┘
+
+  new Loop(config)
+        │
+        ▼
+   ┌─────────┐   start()    ┌────────────┐  consume(verdict)   ┌─────────┐
+   │  IDLE   │─────────────▶│ REVIEWING  │────────────────────▶│ FIXING  │
+   └─────────┘              └────────────┘                     └─────────┘
+                                  ▲    │                            │
+                                  │    │ verdict=LGTM              │ synchronize
+                                  │    ▼                           │ (new push)
+                                  │  ┌──────────┐                  │
+                                  │  │ APPROVED │                  │
+                                  │  └──────────┘                  │
+                                  │                                │
+                                  └────────────────────────────────┘
+                                        iteration++
+
+   Any state ──── timeout / budget / safety violation ────▶ ┌───────────┐
+                                                           │ ESCALATED │
+                                                           └───────────┘
+                                                                 │
+                                                    resume()     │  stop()
+                                                    (human ok)   │
+                                                        │        ▼
+                                                        │   ┌────────┐
+                                                        └──▶│  DONE  │
+                                                            └────────┘
+```
+
+### Loop Instance — Properties
+
+```typescript
+interface LoopConfig {
+  pr: number;
+  repo: string;
+  max_iterations: number;       // hard cap (default: 3)
+  token_budget: number;         // max tokens across all steps (default: 50000)
+  timeout: {
+    review: Duration;           // per review step (default: 10m)
+    fix: Duration;              // per fix step (default: 15m)
+    total: Duration;            // entire loop (default: 60m)
+  };
+  safety_policy: SafetyPolicy;  // path denylist + category escalation rules
+}
+
+interface LoopState {
+  state: "IDLE" | "REVIEWING" | "FIXING" | "APPROVED" | "ESCALATED" | "DONE";
+  iteration: number;
+  head_sha: string;
+  token_used: number;
+  started_at: Timestamp;
+  current_step_started: Timestamp;
+  last_dispatch_id: string;
+  history: StepRecord[];
+}
+```
+
+### Loop Instance — Methods
+
+| Method | Responsibility | Mutates State? |
+|--------|---------------|----------------|
+| `start()` | Initialize state, dispatch first reviewer | Yes → REVIEWING |
+| `consume(event)` | Receive event, deduplicate, enqueue | No (queues only) |
+| `transition(event)` | Evaluate state × event → decide next state | Yes |
+| `validate(findings)` | Pre-dispatch safety check (budget, policy, iteration cap) | No (read-only) |
+| `dispatch(target, payload)` | Send work to a worker agent (via Discord mention) | Yes (records dispatch_id) |
+| `escalate(reason)` | Hard stop, notify human, freeze loop | Yes → ESCALATED |
+| `tick()` | Periodic check: timeout expired? poll for new events? | Maybe (triggers transition if timeout) |
+| `stop(reason)` | Terminate loop (human or merged) | Yes → DONE |
+| `resume()` | Recover from ESCALATED after human intervention | Yes → previous state |
+
+### Method Flow Diagram
+
+```
+              External Events
+              (webhook, Discord, timer)
+                      │
+                      ▼
+               ┌──────────────┐
+               │  consume()   │  ← deduplicate, normalize, enqueue
+               └──────┬───────┘
+                      │
+                      ▼
+               ┌──────────────┐
+               │ transition() │  ← state × event → new state
+               └──────┬───────┘
+                      │
+              ┌───────┴───────┐
+              │               │
+         need dispatch?    terminal?
+              │               │
+              ▼               ▼
+       ┌──────────────┐  ┌──────────┐
+       │  validate()  │  │  stop()  │
+       └──────┬───────┘  └──────────┘
+              │
+         pass? ──── no ──▶ escalate()
+              │
+             yes
+              │
+              ▼
+       ┌──────────────┐
+       │  dispatch()  │  ← mention worker, record dispatch_id
+       └──────┬───────┘
+              │
+              ▼
+       ┌──────────────┐
+       │ start timer  │  ← tick() will check this
+       └──────────────┘
+```
+
+### Typical Lifecycle Example
+
+```
+1. l = new Loop({ pr: 42, max_iterations: 3, token_budget: 50000 })
+   → state: IDLE
+
+2. l.start()
+   → dispatch(reviewer, { pr: 42, head_sha: "aaa" })
+   → state: REVIEWING, timer: 10m
+
+3. l.consume({ type: "verdict", verdict: "CHANGES_REQUESTED", findings: [...] })
+   → transition: REVIEWING × CHANGES_REQUESTED → validate(findings) → pass
+   → dispatch(coder, { findings, head_sha: "aaa" })
+   → state: FIXING, iteration: 1, timer: 15m
+
+4. l.consume({ type: "synchronize", head_sha: "bbb" })
+   → transition: FIXING × SYNCHRONIZE → iteration++
+   → dispatch(reviewer, { pr: 42, head_sha: "bbb" })
+   → state: REVIEWING, iteration: 2, timer: 10m
+
+5. l.consume({ type: "verdict", verdict: "LGTM" })
+   → transition: REVIEWING × LGTM → notify human
+   → state: APPROVED
+
+6. l.stop("merged")
+   → state: DONE
+```
+
+### Invariants (must hold at all times)
+
+1. **Bounded** — `iteration` never exceeds `max_iterations`; `token_used` never exceeds `token_budget`.
+2. **Single state** — A Loop is in exactly one state at any moment.
+3. **SHA-bound** — Every dispatch and verdict is tied to a specific `head_sha`. Stale SHA = discard.
+4. **Idempotent** — Same `(pr, head_sha, dispatch_id)` processed twice = no-op.
+5. **Human supreme** — `stop()` is callable from any state and always wins.
+
 ## Open vs Closed Looping
 
 | | Open Loop | Closed Loop |
