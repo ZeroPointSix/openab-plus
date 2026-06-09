@@ -478,6 +478,18 @@ This ADR implements a **closed loop**. Open loops may be explored in future ADRs
 
 ## Implementation Phases
 
+### Phase 0 (Considered, Not Implemented) — Agent-Based Coordination
+
+In this model, agents self-dispatch via Discord mentions without a dedicated controller. Reviewer directly mentions Coder on `CHANGES REQUESTED`, and Coder self-validates safety before acting.
+
+**Why we skip this:**
+- Agents are stateless — they can hallucinate, forget context, or skip steps mid-loop
+- No centralized audit trail or timeout enforcement
+- Safety policy enforcement distributed across agents is unreliable and hard to verify
+- Debugging requires reading multiple agent logs with no single source of truth
+
+This phase exists as documentation of the rejected alternative. We start directly at Phase 1.
+
 ### Phase 1 (MVP) — Loop Controller as Single Process
 
 Phase 1 ships with a **lightweight Loop Controller** from day one. Relying on agents to self-dispatch is unreliable — agents can hallucinate, forget context, or skip steps. A dedicated controller provides deterministic event routing and safety enforcement.
