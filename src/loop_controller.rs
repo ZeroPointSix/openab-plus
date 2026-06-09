@@ -6,7 +6,7 @@
 //! Each loop definition is a `.toml` file in `~/.openab/loop/`.
 //! Runtime state is persisted in `~/.openab/loop/state/`.
 
-use crate::adapter::{AdapterRouter, ChatAdapter};
+use crate::adapter::ChatAdapter;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -437,7 +437,6 @@ impl LoopController {
 
     async fn discover_prs(&mut self, def: &LoopDefinition) {
         for repo in &def.trigger.repos {
-            let labels = def.trigger.labels.join(",");
             let url = format!(
                 "https://api.github.com/repos/{}/pulls?state=open&sort=created&direction=desc&per_page=10",
                 repo
@@ -549,7 +548,7 @@ impl LoopController {
         head_sha: Option<String>,
         tokens_consumed: u64,
         verdict: Option<String>,
-        findings: Option<String>,
+        _findings: Option<String>,
     ) {
         // Find the loop instance by thread_id
         let key = match self.find_loop_by_thread(thread_id) {
@@ -566,116 +565,135 @@ impl LoopController {
             .find(|d| d.name == self.active_loops[&key].loop_name)
             .cloned();
 
-        let inst = match self.active_loops.get_mut(&key) {
-            Some(i) => i,
-            None => return,
-        };
-
         // Verify dispatch_id matches
-        if inst.last_dispatch_id.as_deref() != Some(dispatch_id) {
-            debug!(
-                expected = ?inst.last_dispatch_id,
-                got = dispatch_id,
-                "dispatch_id mismatch, ignoring"
-            );
-            return;
+        {
+            let inst = match self.active_loops.get(&key) {
+                Some(i) => i,
+                None => return,
+            };
+            if inst.last_dispatch_id.as_deref() != Some(dispatch_id) {
+                debug!(
+                    expected = ?inst.last_dispatch_id,
+                    got = dispatch_id,
+                    "dispatch_id mismatch, ignoring"
+                );
+                return;
+            }
         }
 
-        // Record step
-        inst.token_used += tokens_consumed;
-        inst.history.push(StepRecord {
-            step: format!("{:?}", inst.state),
-            dispatch_id: dispatch_id.to_string(),
-            head_sha: head_sha.clone(),
-            result: status.to_string(),
-            tokens_consumed,
-            timestamp: Utc::now(),
-        });
+        // Record step + determine next action
+        enum NextAction {
+            RetryStep(LoopState),
+            EscalateNow(String),
+            TransitionToReviewing,
+            TransitionToFixing,
+            TransitionToApproved,
+            TransitionCodingDone(u64),  // pr_number
+            Noop,
+        }
 
-        if status == "failed" {
-            if inst.retries_this_step < def.as_ref().map(|d| d.limits.retry_per_step).unwrap_or(1) {
-                inst.retries_this_step += 1;
-                inst.current_step_started = Utc::now();
-                self.persist_state(&key);
-                // Retry same step
+        let next_action = {
+            let inst = self.active_loops.get_mut(&key).unwrap();
+            inst.token_used += tokens_consumed;
+            inst.history.push(StepRecord {
+                step: format!("{:?}", inst.state),
+                dispatch_id: dispatch_id.to_string(),
+                head_sha: head_sha.clone(),
+                result: status.to_string(),
+                tokens_consumed,
+                timestamp: Utc::now(),
+            });
+
+            if status == "failed" {
+                let max_retries = def.as_ref().map(|d| d.limits.retry_per_step).unwrap_or(1);
+                if inst.retries_this_step < max_retries {
+                    inst.retries_this_step += 1;
+                    inst.current_step_started = Utc::now();
+                    NextAction::RetryStep(inst.state.clone())
+                } else {
+                    NextAction::EscalateNow("Step failed after max retries".into())
+                }
+            } else {
+                match inst.state.clone() {
+                    LoopState::Coding => {
+                        if let Some(pr) = pr_created {
+                            inst.pr_number = Some(pr);
+                            inst.head_sha = head_sha;
+                            inst.state = LoopState::Reviewing;
+                            inst.current_step_started = Utc::now();
+                            inst.retries_this_step = 0;
+                            NextAction::TransitionCodingDone(pr)
+                        } else {
+                            NextAction::EscalateNow("Coder completed but no PR was created".into())
+                        }
+                    }
+                    LoopState::Reviewing => {
+                        let v = verdict.as_deref().unwrap_or("");
+                        if v.contains("LGTM") {
+                            inst.state = LoopState::Approved;
+                            NextAction::TransitionToApproved
+                        } else if v.contains("CHANGES REQUESTED") || v.contains("CHANGES_REQUESTED") {
+                            if inst.iteration >= inst.max_iterations {
+                                NextAction::EscalateNow("Max iterations reached".into())
+                            } else if inst.token_used >= inst.token_budget {
+                                NextAction::EscalateNow("Token budget exhausted".into())
+                            } else {
+                                inst.state = LoopState::Fixing;
+                                inst.current_step_started = Utc::now();
+                                inst.retries_this_step = 0;
+                                NextAction::TransitionToFixing
+                            }
+                        } else {
+                            NextAction::EscalateNow(format!("Unparseable verdict: {}", v))
+                        }
+                    }
+                    LoopState::Fixing => {
+                        if let Some(sha) = head_sha {
+                            inst.head_sha = Some(sha);
+                        }
+                        inst.iteration += 1;
+                        inst.state = LoopState::Reviewing;
+                        inst.current_step_started = Utc::now();
+                        inst.retries_this_step = 0;
+                        NextAction::TransitionToReviewing
+                    }
+                    _ => NextAction::Noop,
+                }
+            }
+        };
+        // Borrow of active_loops is now dropped
+
+        self.persist_state(&key);
+
+        // Execute the action
+        match next_action {
+            NextAction::RetryStep(state) => {
                 if let Some(d) = &def {
-                    match inst.state {
+                    match state {
                         LoopState::Coding => self.dispatch_coder_implement(&key, d).await,
                         LoopState::Reviewing => self.dispatch_reviewer(&key, d).await,
                         LoopState::Fixing => self.dispatch_coder_fix(&key, d).await,
                         _ => {}
                     }
                 }
-            } else {
-                self.escalate(&key, "Step failed after max retries").await;
             }
-            return;
-        }
-
-        // State transition based on current state
-        let current_state = inst.state.clone();
-        match current_state {
-            LoopState::Coding => {
-                // Coder finished implementing — should have created a PR
-                if let Some(pr) = pr_created {
-                    inst.pr_number = Some(pr);
-                    inst.head_sha = head_sha;
-                    inst.state = LoopState::Reviewing;
-                    inst.current_step_started = Utc::now();
-                    inst.retries_this_step = 0;
-                    self.persist_state(&key);
-                    if let Some(d) = &def {
-                        self.dispatch_reviewer(&key, d).await;
-                    }
-                } else {
-                    self.escalate(&key, "Coder completed but no PR was created").await;
-                }
+            NextAction::EscalateNow(reason) => {
+                self.escalate(&key, &reason).await;
             }
-            LoopState::Reviewing => {
-                let v = verdict.as_deref().unwrap_or("");
-                if v.contains("LGTM") {
-                    inst.state = LoopState::Approved;
-                    self.persist_state(&key);
-                    self.notify_approved(&key).await;
-                } else if v.contains("CHANGES REQUESTED") || v.contains("CHANGES_REQUESTED") {
-                    // Check iteration limit
-                    if inst.iteration >= inst.max_iterations {
-                        self.escalate(&key, "Max iterations reached").await;
-                        return;
-                    }
-                    // Check token budget
-                    if inst.token_used >= inst.token_budget {
-                        self.escalate(&key, "Token budget exhausted").await;
-                        return;
-                    }
-                    inst.state = LoopState::Fixing;
-                    inst.current_step_started = Utc::now();
-                    inst.retries_this_step = 0;
-                    self.persist_state(&key);
-                    if let Some(d) = &def {
-                        self.dispatch_coder_fix(&key, d).await;
-                    }
-                } else {
-                    // Incomplete or unparseable verdict
-                    self.escalate(&key, &format!("Unparseable verdict: {}", v))
-                        .await;
-                }
-            }
-            LoopState::Fixing => {
-                // Coder pushed fix
-                if let Some(sha) = head_sha {
-                    inst.head_sha = Some(sha);
-                }
-                inst.iteration += 1;
-                inst.state = LoopState::Reviewing;
-                inst.current_step_started = Utc::now();
-                inst.retries_this_step = 0;
-                self.persist_state(&key);
+            NextAction::TransitionCodingDone(_) | NextAction::TransitionToReviewing => {
                 if let Some(d) = &def {
                     self.dispatch_reviewer(&key, d).await;
                 }
             }
-            _ => {}
+            NextAction::TransitionToFixing => {
+                if let Some(d) = &def {
+                    self.dispatch_coder_fix(&key, d).await;
+                }
+            }
+            NextAction::TransitionToApproved => {
+                self.notify_approved(&key).await;
+            }
+            NextAction::Noop => {}
         }
     }
 
@@ -698,32 +716,39 @@ impl LoopController {
     }
 
     async fn handle_timeout(&mut self, key: &str) {
-        let inst = match self.active_loops.get_mut(key) {
-            Some(i) => i,
-            None => return,
-        };
-
-        if inst.retries_this_step
-            < self
+        let (should_retry, loop_name, state) = {
+            let inst = match self.active_loops.get(key) {
+                Some(i) => i,
+                None => return,
+            };
+            let max_retries = self
                 .definitions
                 .iter()
                 .find(|d| d.name == inst.loop_name)
                 .map(|d| d.limits.retry_per_step)
-                .unwrap_or(1)
-        {
-            inst.retries_this_step += 1;
-            inst.current_step_started = Utc::now();
+                .unwrap_or(1);
+            (
+                inst.retries_this_step < max_retries,
+                inst.loop_name.clone(),
+                inst.state.clone(),
+            )
+        };
+
+        if should_retry {
+            if let Some(inst) = self.active_loops.get_mut(key) {
+                inst.retries_this_step += 1;
+                inst.current_step_started = Utc::now();
+            }
             self.persist_state(key);
             info!(key, "step timeout — retrying");
-            // Re-dispatch
             let def = self
                 .definitions
                 .iter()
-                .find(|d| d.name == inst.loop_name)
+                .find(|d| d.name == loop_name)
                 .cloned();
             if let Some(d) = def {
                 let key = key.to_string();
-                match self.active_loops[&key].state {
+                match state {
                     LoopState::Coding => self.dispatch_coder_implement(&key, &d).await,
                     LoopState::Reviewing => self.dispatch_reviewer(&key, &d).await,
                     LoopState::Fixing => self.dispatch_coder_fix(&key, &d).await,
@@ -769,11 +794,14 @@ impl LoopController {
 
     async fn dispatch_coder_implement(&mut self, key: &str, def: &LoopDefinition) {
         let dispatch_id = Uuid::new_v4().to_string();
-        let inst = self.active_loops.get_mut(key).unwrap();
-        inst.last_dispatch_id = Some(dispatch_id.clone());
-        inst.current_step_started = Utc::now();
+        {
+            let inst = self.active_loops.get_mut(key).unwrap();
+            inst.last_dispatch_id = Some(dispatch_id.clone());
+            inst.current_step_started = Utc::now();
+        }
         self.persist_state(key);
 
+        let inst = &self.active_loops[key];
         let template = def
             .instructions
             .get("coder_implement")
@@ -791,7 +819,7 @@ impl LoopController {
                 inst.thread_id.as_deref().unwrap_or("unknown"),
             );
 
-        let message = format!(
+        let _message = format!(
             "<@{}> 🔄 **Loop: {} #{}**\n\n{}",
             def.roles.coder, inst.work_item.kind, inst.work_item.number, instruction
         );
@@ -802,19 +830,18 @@ impl LoopController {
             dispatch_id,
             "dispatching coder (implement)"
         );
-
-        // TODO: Send via Discord adapter to the loop thread
-        // For now, log the dispatch
-        debug!(message = %message, "dispatch message ready");
     }
 
     async fn dispatch_reviewer(&mut self, key: &str, def: &LoopDefinition) {
         let dispatch_id = Uuid::new_v4().to_string();
-        let inst = self.active_loops.get_mut(key).unwrap();
-        inst.last_dispatch_id = Some(dispatch_id.clone());
-        inst.current_step_started = Utc::now();
+        {
+            let inst = self.active_loops.get_mut(key).unwrap();
+            inst.last_dispatch_id = Some(dispatch_id.clone());
+            inst.current_step_started = Utc::now();
+        }
         self.persist_state(key);
 
+        let inst = &self.active_loops[key];
         let pr_url = format!(
             "https://github.com/{}/pull/{}",
             inst.work_item.repo,
@@ -842,7 +869,7 @@ impl LoopController {
                 inst.thread_id.as_deref().unwrap_or("unknown"),
             );
 
-        let message = format!(
+        let _message = format!(
             "<@{}> 🔄 **Loop Review: PR #{}** (iteration {}/{})\n\n{}",
             def.roles.reviewer,
             inst.pr_number.unwrap_or(0),
@@ -857,27 +884,28 @@ impl LoopController {
             dispatch_id,
             "dispatching reviewer"
         );
-        debug!(message = %message, "dispatch message ready");
     }
 
     async fn dispatch_coder_fix(&mut self, key: &str, def: &LoopDefinition) {
         let dispatch_id = Uuid::new_v4().to_string();
-        let inst = self.active_loops.get_mut(key).unwrap();
-        inst.last_dispatch_id = Some(dispatch_id.clone());
-        inst.current_step_started = Utc::now();
+        {
+            let inst = self.active_loops.get_mut(key).unwrap();
+            inst.last_dispatch_id = Some(dispatch_id.clone());
+            inst.current_step_started = Utc::now();
+        }
         self.persist_state(key);
 
+        let inst = &self.active_loops[key];
         let pr_url = format!(
             "https://github.com/{}/pull/{}",
             inst.work_item.repo,
             inst.pr_number.unwrap_or(0)
         );
 
-        // Get last findings from history
         let last_findings = inst
             .history
             .last()
-            .and_then(|s| Some(s.result.clone()))
+            .map(|s| s.result.clone())
             .unwrap_or_default();
 
         let template = def
@@ -903,7 +931,7 @@ impl LoopController {
                 inst.thread_id.as_deref().unwrap_or("unknown"),
             );
 
-        let message = format!(
+        let _message = format!(
             "<@{}> 🔧 **Loop Fix: PR #{}** (iteration {}/{})\n\n{}",
             def.roles.coder,
             inst.pr_number.unwrap_or(0),
@@ -918,15 +946,12 @@ impl LoopController {
             dispatch_id,
             "dispatching coder (fix)"
         );
-        debug!(message = %message, "dispatch message ready");
     }
 
     async fn escalate(&mut self, key: &str, reason: &str) {
-        let inst = match self.active_loops.get_mut(key) {
-            Some(i) => i,
-            None => return,
-        };
-        inst.state = LoopState::Escalated;
+        if let Some(inst) = self.active_loops.get_mut(key) {
+            inst.state = LoopState::Escalated;
+        }
         self.persist_state(key);
         warn!(key, reason, "loop escalated to human");
         // TODO: Post escalation message to thread
