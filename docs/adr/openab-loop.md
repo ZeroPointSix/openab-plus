@@ -267,6 +267,61 @@ Phase 1: file-based state under `~/.openab/loops/state/pr-{number}.json`
 
 Later phases can migrate to Redis or DynamoDB.
 
+### Event Source: Webhook vs Polling
+
+Not all users can configure GitHub webhooks (no admin access, private repo policies, firewall restrictions). The controller must support both push and pull models.
+
+**Push mode (webhook):** GitHub sends events to the controller in real-time.
+
+**Pull mode (polling):** Controller periodically queries GitHub API for changes.
+
+```
+┌─────────────────────────────────────┐
+│         EVENT SOURCE                 │
+│                                     │
+│  ┌─────────┐    ┌─────────────┐    │
+│  │ Webhook │ OR │ Poller      │    │
+│  │ (HTTP)  │    │ (cron/timer)│    │
+│  └────┬────┘    └──────┬──────┘    │
+│       │                │           │
+│       └───────┬────────┘           │
+│               ▼                    │
+│      Normalized Event              │
+│      {type, pr, payload}           │
+└───────────────┬─────────────────────┘
+                │
+                ▼
+         State Machine
+         (same logic regardless of source)
+```
+
+Polling endpoints:
+
+| Detection target | GitHub API |
+|-----------------|------------|
+| New commits pushed | `GET /repos/{owner}/{repo}/pulls/{pr}/commits` |
+| New comment (verdict) | `GET /repos/{owner}/{repo}/issues/{pr}/comments` |
+| CI status | `GET /repos/{owner}/{repo}/commits/{sha}/status` |
+
+Comparison:
+
+| | Webhook | Polling |
+|--|---------|---------|
+| Latency | Seconds | Depends on interval (30-120s) |
+| GitHub API quota | None | 2-3 calls per active loop per minute |
+| Setup requirement | Admin webhook config | Only repo read permission |
+| Best for | Teams with infra control | Everyone |
+
+Configuration:
+
+```toml
+[loop]
+event_source = "polling"   # "webhook" or "polling"
+poll_interval = 60         # seconds, only used when polling
+```
+
+**Polling is the universal default; webhook is an opt-in acceleration for teams that can configure it.**
+
 ### Deployment Options
 
 | Option | Description | Tradeoff |
