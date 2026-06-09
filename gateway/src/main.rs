@@ -1,4 +1,5 @@
 mod adapters;
+pub mod loop_controller;
 mod media;
 mod schema;
 pub mod store;
@@ -441,6 +442,12 @@ async fn main() -> Result<()> {
 
     // Background task: evict expired media files (colocate store, TTL 2 min)
     tokio::spawn(store::eviction_loop());
+
+    // Loop Controller: poll GitHub and dispatch review/fix cycles
+    if let Some(loop_config) = loop_controller::LoopConfig::from_env() {
+        info!("loop controller enabled");
+        tokio::spawn(loop_controller::start(loop_config));
+    }
 
     // Spawn feishu WebSocket long-connection if configured
     // feishu_shutdown_tx must remain alive for the lifetime of main() — dropping

@@ -75,6 +75,19 @@ url = "ws://gateway:8080/ws"
 | `WECOM_WEBHOOK_PATH` | `/webhook/wecom` | Webhook endpoint path |
 | `WECOM_STREAMING_ENABLED` | `false` | Enable thinking-placeholder + recall streaming (causes brief client flicker) |
 | `WECOM_DEBOUNCE_SECS` | `3` | Debounce quiet-period seconds before flushing buffered streamed text |
+| `LOOP_ENABLED` | `false` | Set to `true` or `1` to enable the Loop Controller |
+| `LOOP_GITHUB_TOKEN` | (required*) | GitHub token for PR polling (needs repo read) |
+| `LOOP_DISCORD_TOKEN` | (required*) | Discord bot token for dispatch messages |
+| `LOOP_DISCORD_CHANNEL_ID` | (required*) | Discord channel ID for loop threads |
+| `LOOP_REVIEWER_AGENT_ID` | (required*) | Discord UID of the reviewer agent |
+| `LOOP_CODER_AGENT_ID` | (required*) | Discord UID of the coder agent |
+| `LOOP_ESCALATION_USER_ID` | (required*) | Discord UID to notify on escalation |
+| `LOOP_POLL_INTERVAL` | `60` | Seconds between GitHub API polls |
+| `LOOP_MAX_ITERATIONS` | `3` | Max review→fix cycles before escalation |
+| `LOOP_STEP_TIMEOUT` | `600` | Seconds before a step is considered timed out |
+| `LOOP_LABELS` | (optional) | Comma-separated PR labels that activate the loop (e.g. `auto-review`) |
+| `LOOP_BASE_BRANCHES` | (optional) | Comma-separated base branches to watch (e.g. `main,dev`) |
+| `LOOP_REPOS` | (required*) | Comma-separated repos to poll (e.g. `openabdev/openab`) |
 
 ### Endpoints
 
