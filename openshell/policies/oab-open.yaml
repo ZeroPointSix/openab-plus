@@ -21,6 +21,10 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
+      - host: media.discordapp.net
+        port: 443
+        protocol: rest
+        enforcement: enforce
     rules:
       - allow: { method: GET, path: "/**" }
       - allow: { method: POST, path: "/**" }
@@ -72,6 +76,10 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
+      - host: downloads.claude.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
     rules:
       - allow: { method: GET, path: "/**" }
       - allow: { method: POST, path: "/**" }
@@ -85,6 +93,38 @@ network_policies:
     name: google
     endpoints:
       - host: generativelanguage.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
+
+  # ── xAI (Grok) ────────────────────────────────────────────────────────
+  xai:
+    name: xai
+    endpoints:
+      - host: api.x.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+      - { path: /usr/bin/node }
+
+  # ── Groq ───────────────────────────────────────────────────────────────
+  groq:
+    name: groq
+    endpoints:
+      - host: api.groq.com
         port: 443
         protocol: rest
         enforcement: enforce
