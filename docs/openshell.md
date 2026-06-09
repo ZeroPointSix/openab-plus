@@ -95,10 +95,19 @@ openshell sandbox create --name oab \
 Apply the OAB open-tier policy (Discord + LLM providers + GitHub + package registries):
 
 ```bash
+# If you haven't cloned the repo, download the policy file first:
+curl -LO https://raw.githubusercontent.com/openabdev/openab/main/openshell/policies/oab-open.yaml
+
+openshell policy set --policy oab-open.yaml oab
+```
+
+Or, from a cloned repo:
+
+```bash
 openshell policy set --policy openshell/policies/oab-open.yaml oab
 ```
 
-Or, for a minimal policy with only Discord + one LLM backend:
+For a minimal policy with only Discord + one LLM backend:
 
 ```bash
 openshell policy update oab \
