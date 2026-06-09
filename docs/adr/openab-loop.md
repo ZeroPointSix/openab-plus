@@ -248,6 +248,117 @@ RUNNING.inner:  REVIEWING ←──→ FIXING ──→ APPROVED
 
 All must pass. First failure short-circuits and returns the reason.
 
+#### Dispatch Context & Completion Report
+
+Since each dispatch creates a **new agent session**, the Loop must pass enough context for the agent to:
+1. Know which loop it belongs to
+2. Work in the correct thread
+3. Report back to the correct place when done
+
+**Dispatch payload (Controller → Agent):**
+
+```typescript
+interface DispatchPayload {
+  // --- Loop identity ---
+  loopId: string;                       // Which loop instance this belongs to
+  dispatchId: string;                   // Unique ID for this dispatch (idempotency)
+  iteration: number;                    // Current iteration
+
+  // --- Thread context (for session continuity) ---
+  threadId: string;                     // Discord thread ID — agent must reply HERE
+  channelId: string;                    // Discord channel ID
+  replyToMessageId?: string;           // Message to reply to (maintains thread chain)
+
+  // --- Work context ---
+  task: Task;                           // The actual work to perform
+  callbackFormat: "discord-reply";      // How to report back (extensible for future: webhook, etc.)
+}
+```
+
+**Completion report (Agent → Controller):**
+
+When an agent finishes its work (review done, fix pushed, or failed), it posts a structured reply **in the same thread**:
+
+```typescript
+interface CompletionReport {
+  // --- Routing (how Controller finds this report) ---
+  loopId: string;                       // Echo back — Controller filters on this
+  dispatchId: string;                   // Echo back — Controller matches to pending dispatch
+  threadId: string;                     // The thread this reply lives in
+  messageId: string;                    // This message's ID (for Controller to ack)
+
+  // --- Result ---
+  status: "completed" | "failed" | "blocked";
+  verdict?: "LGTM" | "CHANGES_REQUESTED";  // For reviewers
+  action?: "pushed" | "escalated";          // For coders
+
+  // --- Accounting ---
+  tokensConsumed: number;               // Tokens used in this session
+  headSha: string;                      // SHA the work was done against
+  duration: number;                     // Seconds elapsed
+
+  // --- Findings (reviewer) or Changes (coder) ---
+  findings?: Finding[];                 // What reviewer found
+  filesChanged?: string[];              // What coder modified
+  newHeadSha?: string;                  // After push (coder only)
+
+  // --- Error context (if failed/blocked) ---
+  error?: {
+    reason: string;
+    details?: string;
+  };
+}
+```
+
+**Flow diagram (session boundary):**
+
+```
+┌─────────────────────┐         ┌─────────────────────────────┐
+│   LOOP CONTROLLER   │         │   AGENT (new session)        │
+│                     │         │                             │
+│  dispatch() ────────┼────────→│  receives DispatchPayload    │
+│                     │         │    - knows loopId            │
+│                     │         │    - knows threadId          │
+│                     │         │    - knows what to do        │
+│                     │         │                             │
+│                     │         │  ... does work ...           │
+│                     │         │                             │
+│  consume() ←────────┼─────────│  posts CompletionReport      │
+│    (via Discord     │         │    - in same threadId        │
+│     message event)  │         │    - echoes loopId           │
+│                     │         │    - echoes dispatchId       │
+└─────────────────────┘         └─────────────────────────────┘
+```
+
+**Key invariants:**
+
+1. **Thread pinning** — All messages for one loop iteration live in the same Discord thread. Controller creates the thread; agents reply in it.
+2. **Echo pattern** — Agent MUST echo `loopId` + `dispatchId` in its report. Controller uses these to correlate the response to the pending dispatch.
+3. **Thread ID in state** — Controller stores `threadId` in `LoopState`. If the loop spans multiple iterations, all stay in the same thread.
+4. **Agent doesn't need loop state** — Agent receives a self-contained task. It doesn't query the Controller; it just does the work and posts the result.
+5. **Controller discovers completion via consume()** — The CompletionReport is just another Event. Controller's existing `consume()` pipeline handles it (dedup, validate sha, transition state).
+
+**Updated LoopState with thread tracking:**
+
+```typescript
+interface LoopState {
+  status: LoopStatus;
+  innerState?: string;
+  iteration: number;
+  tokenUsed: number;
+  headSha: string;
+  startedAt: string;
+  currentStepStartedAt: string;
+  retriesThisStep: number;
+
+  // --- Thread context ---
+  threadId: string;                     // Discord thread for this loop
+  channelId: string;                    // Parent channel
+  pendingDispatchId?: string;           // Currently awaited dispatch (null if idle)
+  pendingWorker?: string;               // Who we're waiting on
+}
+```
+
 ---
 
 ### Loop Design
