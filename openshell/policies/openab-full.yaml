@@ -69,6 +69,14 @@ network_policies:
       - { path: /usr/local/bin/openab-agent }
       - { path: /usr/local/bin/node }
 
+  xai:
+    name: xai
+    endpoints:
+      - { host: api.x.ai, port: 443 }
+    binaries:
+      - { path: /usr/local/bin/openab-agent }
+      - { path: /usr/local/bin/node }
+
   packages:
     name: packages
     endpoints:
