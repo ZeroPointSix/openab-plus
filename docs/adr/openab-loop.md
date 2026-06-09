@@ -101,18 +101,26 @@ Every dispatch and verdict message **must** include these fields to ensure idemp
 2. **Idempotent handling** — The controller deduplicates on `(pr, head_sha, dispatch_id)`. Receiving the same dispatch twice is a no-op.
 3. **Replay protection** — Events with a `head_sha` older than the current PR head are dropped. The controller always checks `GET /repos/{owner}/{repo}/pulls/{pr}` to confirm head before acting.
 4. **Ordering** — Events are processed in `timestamp` order per PR. Out-of-order arrivals are reordered in the state machine before transition.
+5. **Replication delay tolerance** — GitHub webhooks may arrive before the API reflects new state. If a `synchronize` event arrives but the API still returns the old SHA, the controller retries with exponential backoff (1s, 2s, 4s, max 3 retries) before discarding.
 
 **Completion criteria for a loop step:**
 
 A step is complete only when **both** conditions are met for the **same** `head_sha`:
 1. Reviewer verdict received (LGTM or CHANGES_REQUESTED)
-2. All required CI checks pass (GitHub Checks API, not legacy commit status)
+2. All required CI checks pass
 
 ```
+# Step 1: Get required status check contexts from branch protection
+GET /repos/{owner}/{repo}/branches/{base}/protection/required_status_checks
+→ returns { contexts: ["ci/test", "ci/lint", ...] }
+
+# Step 2: Get check runs for head_sha, filter by required contexts
 GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
-→ filter: required checks only
+→ filter by names matching required contexts
 → all must have conclusion: "success"
 ```
+
+**Note:** The branch protection API requires admin access. If unavailable, fall back to: wait until all check-runs on `head_sha` reach a terminal state, and none have `conclusion: "failure"`.
 
 ### Coder Agent Behavior on Dispatch
 
@@ -140,8 +148,10 @@ Human override has the highest priority at all times.
 To detect "same finding unresolved across iterations," each finding carries a stable fingerprint:
 
 ```
-fingerprint = sha256(file + ":" + line_range + ":" + normalized_issue_text)[:8]
+fingerprint = sha256(file + ":" + normalized_issue_text)[:8]
 ```
+
+Line numbers are explicitly excluded — code edits shift lines, which would cause the same defect to produce a different fingerprint across iterations.
 
 The controller tracks fingerprints across iterations in `history`. If a fingerprint appears in iteration N and N+1 without resolution, the hard stop triggers. Per-dispatch sequential `id` fields are NOT stable across iterations — use fingerprint instead.
 
@@ -375,7 +385,7 @@ Multiple events (webhook `synchronize` + Discord verdict) can arrive simultaneou
 
 | Phase | Mechanism | Tradeoff |
 |-------|-----------|----------|
-| Phase 1 (MVP) | **Single-writer guarantee**: all state transitions run in a single-threaded event loop (one process, one PR at a time). Incoming events are queued in-memory and processed sequentially. | Simple, no locking needed; limits throughput to one event per PR at a time |
+| Phase 1 (MVP) | **Per-PR single-writer**: each PR gets its own sequential event queue (actor pattern). Different PRs process events concurrently; within a single PR, events are serialized. No cross-PR blocking. | Simple, no locking needed per PR; scales to multiple active loops |
 | Phase 1 (alt) | **File lock** (`flock` / `fcntl`): acquire exclusive lock on `pr-{number}.json` before read-modify-write | Works for multi-process; adds OS-level dependency |
 | Phase 2+ | Atomic compare-and-swap in Redis/DynamoDB (optimistic locking with version field) | Production-grade; handles distributed deployments |
 
@@ -501,7 +511,7 @@ Phase 1 ships the Loop Controller as part of the **OAB core process**. It runs a
 - Maintains file-based state per PR (`~/.openab/loops/state/pr-{number}.json`)
 - Enforces timeouts via timestamp comparison on each poll cycle
 - Enforces safety policy (path denylist, category escalation) before dispatching to Coder
-- Single-threaded event loop — one event per PR at a time (no race conditions)
+- Per-PR event queue (actor pattern) — events for different PRs process concurrently; within one PR, events are serialized
 
 **Phase 1 flow:**
 1. Controller detects new PR (via polling or human trigger)
