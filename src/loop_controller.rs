@@ -80,6 +80,12 @@ pub struct LimitsConfig {
     pub timeout_total: String,
     #[serde(default = "default_retry")]
     pub retry_per_step: u32,
+    /// How long without any message before pinging the agent (e.g. "5m").
+    #[serde(default = "default_liveness_timeout")]
+    pub liveness_timeout: String,
+    /// Max consecutive pings before declaring dead and retrying/escalating.
+    #[serde(default = "default_max_pings")]
+    pub max_pings: u32,
 }
 
 fn default_max_iter() -> u32 {
@@ -102,6 +108,12 @@ fn default_total_timeout() -> String {
 }
 fn default_retry() -> u32 {
     1
+}
+fn default_liveness_timeout() -> String {
+    "5m".into()
+}
+fn default_max_pings() -> u32 {
+    2
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -173,6 +185,12 @@ pub struct LoopInstance {
     pub thread_id: Option<String>,
     pub retries_this_step: u32,
     pub history: Vec<StepRecord>,
+    /// Last time any message was observed in this loop's thread (passive liveness).
+    #[serde(default = "Utc::now")]
+    pub last_seen: DateTime<Utc>,
+    /// How many consecutive pings sent without response.
+    #[serde(default)]
+    pub pings_sent: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +301,17 @@ impl LoopController {
         self.active_threads.contains(thread_id)
     }
 
+    /// Update last_seen timestamp when any message is observed in a loop thread.
+    /// This is the passive liveness signal — no special protocol needed.
+    pub fn touch_thread(&mut self, thread_id: &str) {
+        if let Some(inst) = self.active_loops.values_mut().find(|i| {
+            i.thread_id.as_deref() == Some(thread_id)
+        }) {
+            inst.last_seen = Utc::now();
+            inst.pings_sent = 0; // reset ping counter on any activity
+        }
+    }
+
     /// Try to parse a message as a CompletionReport (Layer 2 check).
     pub fn try_parse_report(content: &str) -> Option<LoopEvent> {
         const MARKER: &str = "<!-- oab-loop-report:";
@@ -376,6 +405,63 @@ impl LoopController {
 
         for key in timeout_keys {
             self.handle_timeout(&key).await;
+        }
+
+        // Passive liveness check — ping agents that have gone silent
+        let liveness_actions: Vec<(String, bool)> = self
+            .active_loops
+            .iter()
+            .filter(|(_, inst)| {
+                matches!(
+                    inst.state,
+                    LoopState::Coding | LoopState::Reviewing | LoopState::Fixing
+                )
+            })
+            .filter_map(|(k, inst)| {
+                let def = self.definitions.iter().find(|d| d.name == inst.loop_name)?;
+                let liveness_secs = parse_duration_secs(&def.limits.liveness_timeout);
+                let elapsed = (now - inst.last_seen).num_seconds();
+                if elapsed > liveness_secs {
+                    Some((k.clone(), inst.pings_sent >= def.limits.max_pings))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (key, exhausted) in liveness_actions {
+            if exhausted {
+                self.escalate(&key, "Agent unresponsive — no activity after repeated pings")
+                    .await;
+            } else {
+                // Ping the agent
+                let (role_id, thread_id) = {
+                    let inst = &self.active_loops[&key];
+                    let def = self.definitions.iter().find(|d| d.name == inst.loop_name);
+                    let role = match inst.state {
+                        LoopState::Coding | LoopState::Fixing => {
+                            def.map(|d| d.roles.coder.clone()).unwrap_or_default()
+                        }
+                        _ => def.map(|d| d.roles.reviewer.clone()).unwrap_or_default(),
+                    };
+                    (role, inst.thread_id.clone())
+                };
+                if let Some(tid) = thread_id {
+                    let ping_msg = format!("<@{}> 🏓 still working?", role_id);
+                    let channel = crate::adapter::ChannelRef {
+                        platform: "discord".into(),
+                        channel_id: tid,
+                        thread_id: None,
+                        parent_id: None,
+                        origin_event_id: None,
+                    };
+                    let _ = self.adapter.send_message(&channel, &ping_msg).await;
+                }
+                if let Some(inst) = self.active_loops.get_mut(&key) {
+                    inst.pings_sent += 1;
+                }
+                self.persist_state(&key);
+            }
         }
 
         // Discover new work items
@@ -543,6 +629,8 @@ impl LoopController {
             thread_id: None,
             retries_this_step: 0,
             history: vec![],
+            last_seen: now,
+            pings_sent: 0,
         };
 
         self.active_loops.insert(key.clone(), instance);

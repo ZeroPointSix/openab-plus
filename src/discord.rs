@@ -461,8 +461,16 @@ impl EventHandler for Handler {
         // Messages in loop threads are NOT dispatched to the normal OAB backend.
         if let Some(ref lc) = self.loop_controller {
             let thread_id = msg.channel_id.to_string();
-            let ctrl = lc.lock().await;
-            if ctrl.is_loop_thread(&thread_id) {
+            let is_loop = {
+                let ctrl = lc.lock().await;
+                ctrl.is_loop_thread(&thread_id)
+            };
+            if is_loop {
+                // Passive liveness: any message = agent is alive
+                {
+                    let mut ctrl = lc.lock().await;
+                    ctrl.touch_thread(&thread_id);
+                }
                 if let Some(mut event) =
                     crate::loop_controller::LoopController::try_parse_report(&msg.content)
                 {
@@ -472,7 +480,6 @@ impl EventHandler for Handler {
                     {
                         *thread_id = msg.channel_id.to_string();
                     }
-                    drop(ctrl);
                     let mut ctrl = lc.lock().await;
                     ctrl.consume(event).await;
                 } else {
@@ -480,7 +487,6 @@ impl EventHandler for Handler {
                     let content_lower = msg.content.to_lowercase();
                     if content_lower.contains("stop") || content_lower.contains("resume") {
                         let cmd = if content_lower.contains("stop") { "stop" } else { "resume" };
-                        drop(ctrl);
                         let mut ctrl = lc.lock().await;
                         ctrl.consume(crate::loop_controller::LoopEvent::HumanOverride {
                             thread_id: msg.channel_id.to_string(),
