@@ -1311,33 +1311,149 @@ PR gets label "auto-review" → GitHub webhook/poll → Controller detects → n
 
 The label acts as the opt-in signal. Removing the label mid-loop triggers `loop.stop("label removed")`.
 
-### 3. config.toml (persistent rules, zero-touch)
+### 3. Loop Definition Files (`~/.openab/*.loop.toml`)
 
-Define loop templates in `config.toml`. Any PR matching the conditions automatically enters a loop:
+Following the same pattern as user cron (`~/.openab/*.cron.toml`), each `.loop.toml` file defines **one loop template**. File exists = active. Add `enabled = false` to disable without deleting.
+
+**Directory:** `~/.openab/` (user-level) or `/etc/openab/loops/` (system-level)
+
+**Convention:** `{name}.loop.toml` — one file per loop definition.
+
+```
+~/.openab/
+├── pr-review.loop.toml          # active
+├── issue-implement.loop.toml    # active
+├── docs-review.loop.toml        # active
+└── deploy-verify.loop.toml      # has enabled = false → inactive
+```
+
+**Example: `pr-review.loop.toml`**
 
 ```toml
-[[loop.templates]]
+# ~/.openab/pr-review.loop.toml
 name = "pr-review"
-trigger.labels = ["auto-review"]
-trigger.base_branches = ["main", "dev"]
-trigger.exclude_authors = ["dependabot"]
-trigger.exclude_paths = ["docs/**"]    # skip docs-only PRs
-reviewer = "1493128125402320996"        # 普渡
-coder = "1490365068863606784"           # 超渡
+description = "Automated PR review → fix → re-review cycle"
+enabled = true                          # default true; set false to disable
+
+[trigger]
+event = "pull_request.opened"
+labels = ["auto-review"]
+base_branches = ["main", "dev"]
+exclude_authors = ["dependabot"]
+exclude_paths = ["docs/**"]
+
+[limits]
 max_iterations = 3
 token_budget = 50000
-timeout_review = "10m"
-timeout_fix = "15m"
 
-[[loop.templates]]
-name = "docs-review"
-trigger.labels = ["docs-review"]
-trigger.paths = ["docs/**"]             # only docs PRs
-reviewer = "1496553369442189472"        # 覺渡
-coder = "1490365068863606784"
-max_iterations = 2
-token_budget = 20000
+[timeouts]
+review = "10m"
+fix = "15m"
+total = "60m"
+
+[workers.reviewer]
+agent_id = "1493128125402320996"        # 普渡
+dispatch_via = "discord-mention"
+
+[workers.coder]
+agent_id = "1490365068863606784"        # 超渡
+dispatch_via = "discord-mention"
+
+[[steps]]
+name = "review"
+worker = "reviewer"
+action = "review"
+prompt_template = """
+請 review PR：{pr_url}
+HEAD: `{head_sha}` | Iteration: {iteration}/{max_iterations}
+完成後回報 verdict + findings 到此 thread。
+loopId: `{loop_id}` | dispatchId: `{dispatch_id}`
+"""
+
+[[steps]]
+name = "fix"
+worker = "coder"
+action = "fix"
+prompt_template = """
+請修復 findings：
+PR: {pr_url} | HEAD: `{head_sha}` | Iteration: {iteration}/{max_iterations}
+{findings_json}
+修完 push 後回報到此 thread。
+loopId: `{loop_id}` | dispatchId: `{dispatch_id}`
+"""
+
+[safety]
+path_denylist = [".github/workflows/**", "**/auth*", "**/*.key", ".env*"]
+path_keywords = ["auth", "secret", "credential", "token"]
+escalate_categories = ["security", "auth", "infra"]
+escalate_risk_levels = ["high", "critical"]
 ```
+
+**Example: `issue-implement.loop.toml`**
+
+```toml
+# ~/.openab/issue-implement.loop.toml
+name = "issue-implement"
+description = "Issue → Coder implements → PR → Review → Merge"
+enabled = true
+
+[trigger]
+event = "issues.labeled"
+labels = ["auto-implement"]
+
+[limits]
+max_iterations = 3
+token_budget = 80000
+
+[timeouts]
+implement = "20m"
+review = "10m"
+fix = "15m"
+total = "90m"
+
+[workers.coder]
+agent_id = "1490365068863606784"
+dispatch_via = "discord-mention"
+
+[workers.reviewer]
+agent_id = "1493128125402320996"
+dispatch_via = "discord-mention"
+
+[[steps]]
+name = "implement"
+worker = "coder"
+action = "implement"
+prompt_template = """
+請實作 issue：{issue_url}
+Title: {issue_title}
+{issue_body}
+開 PR 後回報 newPrNumber。loopId: `{loop_id}` | dispatchId: `{dispatch_id}`
+"""
+
+[[steps]]
+name = "review"
+worker = "reviewer"
+action = "review"
+
+[[steps]]
+name = "fix"
+worker = "coder"
+action = "fix"
+```
+
+**Loading behavior:**
+
+| Condition | Behavior |
+|-----------|----------|
+| File exists, no `enabled` field | Active (default true) |
+| File exists, `enabled = true` | Active |
+| File exists, `enabled = false` | Skipped — Controller ignores this template |
+| File deleted | Template removed — no new loops from this trigger |
+| File modified | Controller hot-reloads on next poll cycle |
+
+**Hot-reload:** Controller watches `~/.openab/*.loop.toml` (via fs notify or periodic scan). Changes take effect within one poll interval — no restart needed.
+
+**Precedence (unchanged):**
 
 ### Creation Priority
 
