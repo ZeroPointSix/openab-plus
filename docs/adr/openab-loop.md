@@ -478,34 +478,39 @@ This ADR implements a **closed loop**. Open loops may be explored in future ADRs
 
 ## Implementation Phases
 
-### Phase 1 (MVP) — No Dedicated Controller
+### Phase 1 (MVP) — Loop Controller as Single Process
 
-Phase 1 does **not** require a standalone Loop Controller process. The loop is driven entirely by agent-to-agent communication:
+Phase 1 ships with a **lightweight Loop Controller** from day one. Relying on agents to self-dispatch is unreliable — agents can hallucinate, forget context, or skip steps. A dedicated controller provides deterministic event routing and safety enforcement.
 
-1. **Reviewer agent** receives PR (triggered by human or webhook) and produces verdict
-2. If `CHANGES REQUESTED` → Reviewer **directly mentions** Coder agent in Discord with structured dispatch (including `head_sha`, `dispatch_id`)
-3. **Coder agent** validates dispatch, applies fixes, pushes
-4. GitHub `synchronize` webhook (or human re-trigger) starts next review cycle
-5. **Safety enforcement** lives in the Coder agent itself: it checks path denylist and category/risk_level before acting
+**Phase 1 controller scope:**
+- Single long-running process (can be a simple Node/Python/Rust daemon)
+- Polls GitHub API for PR events (no webhook infra required)
+- Listens to Discord messages for verdicts
+- Maintains file-based state per PR (`~/.openab/loops/state/pr-{number}.json`)
+- Enforces timeouts via timestamp comparison on each poll cycle
+- Enforces safety policy (path denylist, category escalation) before dispatching to Coder
+- Single-threaded event loop — one event per PR at a time (no race conditions)
 
-**What Phase 1 skips:**
-- No persistent state machine process
-- No automated timeout/retry (human intervenes if stuck)
-- No centralized event routing
-- Timeout detection is manual (human notices if loop stalls)
+**Phase 1 flow:**
+1. Controller detects new PR (via polling or human trigger)
+2. Controller dispatches Reviewer via Discord mention
+3. Controller receives verdict from Discord, validates SHA binding
+4. If `CHANGES REQUESTED` → Controller validates safety policy → dispatches Coder
+5. Controller detects push (via polling), validates new head SHA
+6. Controller dispatches Reviewer for re-review
+7. Loop repeats until LGTM, max_iterations, or escalation
 
-**What Phase 1 requires:**
-- Structured dispatch format with Control Plane Contract fields
-- Machine-enforceable safety policy in Coder agent
-- SHA binding on all messages
+**Why controller-first:**
+- Agents are stateless and unreliable for coordination — they may drop context mid-loop
+- Controller holds the single source of truth (state file)
+- All safety enforcement is centralized and auditable
+- Easy to debug: one process, one log, deterministic behavior
 
-### Phase 2 — Lightweight Controller
+### Phase 2 — Eval Gates & Webhook Support
 
-Add a persistent polling process that:
-- Tracks loop state per PR (file-based, single-writer)
-- Enforces timeouts via timestamp polling
-- Routes events to appropriate agents
-- Manages retry policy
+- Add structured quality checks at each step beyond "does it build"
+- Add webhook support as opt-in acceleration (faster than polling)
+- Migrate state to Redis for multi-instance deployment
 
 ### Phase 3 — Loop History & Feedback
 
