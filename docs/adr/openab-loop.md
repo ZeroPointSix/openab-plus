@@ -313,11 +313,15 @@ def on_event(event, loop_state):
                 elif event.verdict == "CHANGES_REQUESTED":
                     if loop_state.iteration >= max_iterations:
                         escalate("Max iterations reached")
-                    elif has_security_findings(event.findings):
-                        escalate("Security findings need human")
+                    elif loop_state.token_used + estimate_next_step(loop_state) > loop_state.token_budget:
+                        escalate("Token budget would be exceeded")
+                    elif not validate_safety_policy(event.findings, loop_state):
+                        # Checks: category/risk_level, path denylist, fingerprint repeat
+                        escalate("Safety policy violation — requires human")
                     else:
                         loop_state.state = "FIXING"
-                        dispatch_coder(findings)
+                        loop_state.token_used += event.tokens_consumed
+                        dispatch_coder(findings, head_sha=loop_state.head_sha)
                         start_timer(timeout=15min)
                 elif event.verdict == "INCOMPLETE":
                     retry_or_escalate(loop_state)
