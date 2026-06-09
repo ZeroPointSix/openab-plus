@@ -1311,26 +1311,26 @@ PR gets label "auto-review" → GitHub webhook/poll → Controller detects → n
 
 The label acts as the opt-in signal. Removing the label mid-loop triggers `loop.stop("label removed")`.
 
-### 3. Loop Definition Files (`~/.openab/*.loop.toml`)
+### 3. Loop Definition Files (`~/.openab/loop/*.toml`)
 
-Following the same pattern as user cron (`~/.openab/*.cron.toml`), each `.loop.toml` file defines **one loop template**. File exists = active. Add `enabled = false` to disable without deleting.
+Following the same pattern as user cron, each `.toml` file in `~/.openab/loop/` defines **one loop template**. File exists = active. Add `enabled = false` to disable without deleting.
 
-**Directory:** `~/.openab/` (user-level) or `/etc/openab/loops/` (system-level)
+**Directory:** `~/.openab/loop/` (user-level) or `/etc/openab/loop/` (system-level)
 
-**Convention:** `{name}.loop.toml` — one file per loop definition.
+**Convention:** `{name}.toml` — one file per loop definition.
 
 ```
-~/.openab/
-├── pr-review.loop.toml          # active
-├── issue-implement.loop.toml    # active
-├── docs-review.loop.toml        # active
-└── deploy-verify.loop.toml      # has enabled = false → inactive
+~/.openab/loop/
+├── pr-review.toml               # active
+├── issue-implement.toml         # active
+├── docs-review.toml             # active
+└── deploy-verify.toml           # has enabled = false → inactive
 ```
 
-**Example: `pr-review.loop.toml`**
+**Example: `pr-review.toml`**
 
 ```toml
-# ~/.openab/pr-review.loop.toml
+# ~/.openab/loop/pr-review.toml
 name = "pr-review"
 description = "Automated PR review → fix → re-review cycle"
 enabled = true                          # default true; set false to disable
@@ -1389,10 +1389,10 @@ escalate_categories = ["security", "auth", "infra"]
 escalate_risk_levels = ["high", "critical"]
 ```
 
-**Example: `issue-implement.loop.toml`**
+**Example: `issue-implement.toml`**
 
 ```toml
-# ~/.openab/issue-implement.loop.toml
+# ~/.openab/loop/issue-implement.toml
 name = "issue-implement"
 description = "Issue → Coder implements → PR → Review → Merge"
 enabled = true
@@ -1451,7 +1451,7 @@ action = "fix"
 | File deleted | Template removed — no new loops from this trigger |
 | File modified | Controller hot-reloads on next poll cycle |
 
-**Hot-reload:** Controller watches `~/.openab/*.loop.toml` (via fs notify or periodic scan). Changes take effect within one poll interval — no restart needed.
+**Hot-reload:** Controller watches `~/.openab/loop/*.toml` (via fs notify or periodic scan). Changes take effect within one poll interval — no restart needed.
 
 **Precedence (unchanged):**
 
