@@ -763,7 +763,7 @@ impl LoopController {
             }
             NextAction::TransitionToFixing => {
                 if let Some(d) = &def {
-                    if self.validate_safety_policy(&key, d) {
+                    if self.validate_safety_policy(&key, d).await {
                         self.dispatch_coder_fix(&key, d).await;
                     } else {
                         self.escalate(&key, "Safety policy violation — requires human review").await;
@@ -803,13 +803,21 @@ impl LoopController {
 
         if should_dispatch {
             self.persist_state(&key);
+            let inst = &self.active_loops[&key];
+            let repo = inst.work_item.repo.clone();
+            let sha = inst.head_sha.clone().unwrap_or_default();
             let def = self
                 .definitions
                 .iter()
-                .find(|d| d.name == self.active_loops[&key].loop_name)
+                .find(|d| d.name == inst.loop_name)
                 .cloned();
             if let Some(d) = def {
-                self.dispatch_reviewer(&key, &d).await;
+                if !sha.is_empty() && !self.check_ci_status(&repo, &sha).await {
+                    self.escalate(&key, "CI checks failed — blocking review dispatch")
+                        .await;
+                } else {
+                    self.dispatch_reviewer(&key, &d).await;
+                }
             }
         }
     }
@@ -834,7 +842,7 @@ impl LoopController {
         check_runs.iter().all(|run| {
             let status = run["status"].as_str().unwrap_or("");
             if status != "completed" {
-                return true; // Still running — don't block
+                return false; // Still running — not ready for review yet
             }
             let conclusion = run["conclusion"].as_str().unwrap_or("");
             conclusion == "success" || conclusion == "skipped" || conclusion == "neutral"
@@ -842,23 +850,52 @@ impl LoopController {
     }
 
     /// Validate safety policy before dispatching to coder.
-    fn validate_safety_policy(&self, key: &str, def: &LoopDefinition) -> bool {
+    /// Checks BOTH reviewer findings AND the actual PR changed files against denylist.
+    async fn validate_safety_policy(&self, key: &str, def: &LoopDefinition) -> bool {
         let inst = match self.active_loops.get(key) {
             Some(i) => i,
             None => return false,
         };
+
+        // Layer 1: Check PR's actual changed files against denylist/keywords
+        if let Some(pr_number) = inst.pr_number {
+            let url = format!(
+                "https://api.github.com/repos/{}/pulls/{}/files",
+                inst.work_item.repo, pr_number
+            );
+            if let Some(files) = self.github_get(&url).await {
+                if let Some(arr) = files.as_array() {
+                    for file_entry in arr {
+                        let filename = file_entry["filename"].as_str().unwrap_or("");
+                        for pattern in &def.safety.path_denylist {
+                            if glob_match::glob_match(pattern, filename) {
+                                warn!(key, filename, pattern = pattern.as_str(), "safety policy: PR file matches path denylist");
+                                return false;
+                            }
+                        }
+                        for keyword in &def.safety.path_keywords {
+                            if filename.contains(keyword.as_str()) {
+                                warn!(key, filename, keyword = keyword.as_str(), "safety policy: PR file matches path keyword");
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Layer 2: Check reviewer findings for escalation rules
         let findings_str = match inst.history.iter().rev().find_map(|s| s.findings.clone()) {
             Some(f) => f,
             None => return true,
         };
         let findings: Vec<serde_json::Value> = match serde_json::from_str(&findings_str) {
             Ok(v) => v,
-            Err(_) => return true, // Can't parse — allow (defense in depth)
+            Err(_) => return true,
         };
         for finding in &findings {
             let category = finding["category"].as_str().unwrap_or("");
             let risk_level = finding["risk_level"].as_str().unwrap_or("");
-            // Check escalation rules
             for rule in &def.safety.escalation {
                 let cat_match = rule.category == "*" || rule.category == category;
                 let risk_match = rule.risk_level == "*" || rule.risk_level == risk_level;
@@ -867,21 +904,7 @@ impl LoopController {
                     return false;
                 }
             }
-            // Check path keywords
-            let file = finding["file"].as_str().unwrap_or("");
-            for keyword in &def.safety.path_keywords {
-                if file.contains(keyword.as_str()) {
-                    warn!(key, file, keyword = keyword.as_str(), "safety policy: path keyword match");
-                    return false;
-                }
-            }
-            // Check path denylist (glob patterns)
-            for pattern in &def.safety.path_denylist {
-                if glob_match::glob_match(pattern, file) {
-                    warn!(key, file, pattern = pattern.as_str(), "safety policy: path denylist match");
-                    return false;
-                }
-            }
+        }
         }
         true
     }
