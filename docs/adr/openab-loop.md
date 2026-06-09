@@ -306,11 +306,16 @@ def on_event(event, loop_state):
 
         case "REVIEWING":
             if event == VERDICT_RECEIVED:
+                if event.head_sha != loop_state.head_sha:
+                    backoff_retry(event, max=3)  # API replication delay
+                    return
                 cancel_timer()
+                loop_state.token_used += event.tokens_consumed
                 if event.verdict == "LGTM":
                     loop_state.state = "APPROVED"
                     notify_human("PR ready to merge")
                 elif event.verdict == "CHANGES_REQUESTED":
+                    # --- Pre-dispatch safety checks (all must pass) ---
                     if loop_state.iteration >= max_iterations:
                         escalate("Max iterations reached")
                     elif loop_state.token_used + estimate_next_step(loop_state) > loop_state.token_budget:
@@ -321,7 +326,7 @@ def on_event(event, loop_state):
                     else:
                         loop_state.state = "FIXING"
                         loop_state.token_used += event.tokens_consumed
-                        dispatch_coder(findings, head_sha=loop_state.head_sha)
+                        dispatch_coder(event.findings, head_sha=loop_state.head_sha)
                         start_timer(timeout=15min)
                 elif event.verdict == "INCOMPLETE":
                     retry_or_escalate(loop_state)
@@ -331,11 +336,13 @@ def on_event(event, loop_state):
 
         case "FIXING":
             if event == SYNCHRONIZE:
-                # Canonical trigger: GitHub webhook `pull_request.synchronize`
-                # Discord "I pushed" message is informational only, not a state trigger
                 cancel_timer()
                 loop_state.iteration += 1
                 loop_state.head_sha = event.head_sha
+                loop_state.token_used += event.tokens_consumed
+                if loop_state.token_used >= loop_state.token_budget:
+                    escalate("Token budget exhausted")
+                    return
                 loop_state.state = "REVIEWING"
                 dispatch_reviewer(loop_state.pr, head_sha=event.head_sha)
                 start_timer(timeout=10min)
