@@ -1268,7 +1268,108 @@ interface DispatchPayload {
   findings?: Finding[];       // only for action = "fix"
   thread_id: string;          // Discord thread ID — agent MUST reply here
   dispatch_id: Uuid;          // correlation ID for this dispatch
+  instruction: string;        // rendered task prompt — tells agent exactly what to do
 }
+
+// ─── Dispatch Instructions ──────────────────────────────────────────────────
+//
+// The `instruction` field is the actual prompt the agent receives.
+// It is rendered at dispatch time from a template defined in config.toml.
+// Templates use {placeholder} syntax for variable interpolation.
+//
+
+interface InstructionTemplate {
+  role: "reviewer" | "coder";
+  template: string;           // template with {placeholders}
+}
+
+// Available placeholders (resolved at dispatch time):
+//
+//   {pr}              — PR number
+//   {repo}            — "owner/repo"
+//   {branch}          — PR head branch name
+//   {head_sha}        — current commit SHA
+//   {iteration}       — current iteration number
+//   {max_iterations}  — configured cap
+//   {findings}        — formatted findings list (for coder)
+//   {thread_id}       — Discord thread to reply in
+//   {dispatch_id}     — correlation ID to echo back
+//   {pr_title}        — PR title
+//   {pr_url}          — full PR URL
+//   {diff_url}        — URL to the PR diff
+```
+
+**config.toml — Instruction Templates:**
+
+```toml
+[[loop.templates]]
+name = "pr-review"
+reviewer = "1493128125402320996"
+coder = "1490365068863606784"
+max_iterations = 3
+token_budget = 50000
+
+[loop.templates.instructions.reviewer]
+template = """
+Review PR {pr_url} at commit `{head_sha}` (iteration {iteration}/{max_iterations}).
+
+Scope:
+- Read the diff and assess correctness, security, performance.
+- Post your verdict as: `LGTM ✅` or `CHANGES REQUESTED ⚠️`
+- If CHANGES REQUESTED, list findings in structured format:
+  severity | category | risk_level | file | line | issue | suggestion
+
+Response format:
+<!-- oab-loop-report:{{"dispatch_id":"{dispatch_id}","agent_id":"YOUR_ID","status":"completed"}} -->
+Your review content here...
+
+Reply in thread: {thread_id}
+"""
+
+[loop.templates.instructions.coder]
+template = """
+Fix the findings below on branch `{branch}` at commit `{head_sha}` (iteration {iteration}/{max_iterations}).
+
+PR: {pr_url}
+
+Findings to fix:
+{findings}
+
+Rules:
+1. Only modify files mentioned in the findings.
+2. Run tests before pushing. If tests fail, report status: "failed".
+3. Do NOT touch files outside the findings scope.
+4. Push to branch `{branch}` when done.
+
+Response format:
+<!-- oab-loop-report:{{"dispatch_id":"{dispatch_id}","agent_id":"YOUR_ID","status":"completed"}} -->
+Summary of changes...
+
+Reply in thread: {thread_id}
+"""
+```
+
+**Rendering example:**
+
+Template input:
+```
+Review PR {pr_url} at commit `{head_sha}` (iteration {iteration}/{max_iterations}).
+```
+
+Rendered output (what agent actually receives):
+```
+Review PR https://github.com/openabdev/openab/pull/42 at commit `abc1234` (iteration 2/3).
+```
+
+**Instruction resolution order:**
+
+| Priority | Source | When used |
+|----------|--------|-----------|
+| 1 | Discord command `--instruction "..."` | Ad-hoc override |
+| 2 | `config.toml` template matching the PR | Normal operation |
+| 3 | Built-in defaults (hardcoded in Controller) | Fallback if no template |
+
+The Controller MUST ship with sensible built-in defaults so loops work even without explicit templates in config.toml.
 
 // ─── Completion Report ──────────────────────────────────────────────────────
 //
