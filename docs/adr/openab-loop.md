@@ -128,12 +128,22 @@ GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
 
 - `iteration >= max_iterations` (default: 3)
 - Safety policy violation (see machine-enforceable rules below)
-- Same finding unresolved for 2 consecutive iterations (matched by `finding.id`)
+- Same finding unresolved for 2 consecutive iterations (matched by finding fingerprint)
 - Tests fail after fix
 - Required CI checks fail after push
 - Human explicitly intervenes ("stop" / "I'll handle it")
 
 Human override has the highest priority at all times.
+
+### Finding Fingerprint (Cross-Iteration Dedup)
+
+To detect "same finding unresolved across iterations," each finding carries a stable fingerprint:
+
+```
+fingerprint = sha256(file + ":" + line_range + ":" + normalized_issue_text)[:8]
+```
+
+The controller tracks fingerprints across iterations in `history`. If a fingerprint appears in iteration N and N+1 without resolution, the hard stop triggers. Per-dispatch sequential `id` fields are NOT stable across iterations — use fingerprint instead.
 
 ### Machine-Enforceable Safety Policy
 
@@ -215,7 +225,7 @@ The Loop Controller is the central coordinator. It does no actual work (no revie
 ┌─────────────────────────────────────────────────────┐
 │  Loop State for PR #N                               │
 │                                                     │
-│  state: REVIEWING | FIXING | APPROVED | ESCALATED   │
+│  state: IDLE | REVIEWING | FIXING | APPROVED | ESCALATED | DONE │
 │  iteration: <current>                               │
 │  max_iterations: 3                                  │
 │  started_at: <timestamp>                            │
@@ -273,12 +283,15 @@ def on_event(event, loop_state):
                 retry_or_escalate(loop_state)
 
         case "FIXING":
-            if event == PUSH_RECEIVED:
+            if event == SYNCHRONIZE:
+                # Canonical trigger: GitHub webhook `pull_request.synchronize`
+                # Discord "I pushed" message is informational only, not a state trigger
                 cancel_timer()
                 loop_state.iteration += 1
+                loop_state.head_sha = event.head_sha
                 loop_state.state = "REVIEWING"
+                dispatch_reviewer(loop_state.pr, head_sha=event.head_sha)
                 start_timer(timeout=10min)
-                # No dispatch needed — webhook synchronize triggers reviewer
 
             if event == FIX_FAILED:
                 escalate("Coder failed to fix")
@@ -404,7 +417,9 @@ Polling endpoints:
 |-----------------|------------|
 | New commits pushed | `GET /repos/{owner}/{repo}/pulls/{pr}/commits` |
 | New comment (verdict) | `GET /repos/{owner}/{repo}/issues/{pr}/comments` |
-| CI status | `GET /repos/{owner}/{repo}/commits/{sha}/status` |
+| CI status | `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` |
+
+**Rate limit optimization:** All polling requests MUST use conditional requests (`If-None-Match` / `ETag`). A `304 Not Modified` response does not count against the rate limit. The poller stores the last `ETag` per endpoint per PR and sends it on subsequent requests.
 
 Comparison:
 
