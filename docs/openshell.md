@@ -92,6 +92,14 @@ openshell sandbox create --name oab \
 
 ### 3. Set network policy (from host)
 
+Apply the OAB open-tier policy (Discord + LLM providers + GitHub + package registries):
+
+```bash
+openshell policy set --policy openshell/policies/oab-open.yaml oab
+```
+
+Or, for a minimal policy with only Discord + one LLM backend:
+
 ```bash
 openshell policy update oab \
   --add-endpoint "discord.com:443:read-write:rest:enforce" \
@@ -135,14 +143,17 @@ sandbox$ openab run --config config.toml
 
 ## Network Policy
 
-OpenShell sandboxes have **default-deny egress**. Required endpoints by backend:
+OpenShell sandboxes have **default-deny egress**. The full OAB open-tier policy is maintained in [`openshell/policies/oab-open.yaml`](../openshell/policies/oab-open.yaml). Required endpoints by backend:
 
 | Backend | Endpoints |
 |---------|-----------|
 | All | `discord.com:443`, `gateway.discord.gg:443`, `cdn.discordapp.com:443` |
-| Native Agent (codex) | `chatgpt.com:443`, `auth0.openai.com:443` |
+| Native Agent (codex) | `chatgpt.com:443`, `api.openai.com:443`, `auth0.openai.com:443` |
 | Native Agent (anthropic) | `api.anthropic.com:443` |
+| Native Agent (gemini) | `generativelanguage.googleapis.com:443` |
 | GitHub access | `api.github.com:443`, `github.com:443` |
+| npm | `registry.npmjs.org:443` |
+| PyPI | `pypi.org:443`, `files.pythonhosted.org:443` |
 
 ## Reconnecting
 

@@ -1,0 +1,118 @@
+# OAB Open Tier — Network policy for OpenAB running inside OpenShell.
+# Allows all endpoints OAB needs: Discord, LLM providers, GitHub, package
+# registries, and web search. Apply with:
+#   openshell policy set --policy openshell/policies/oab-open.yaml oab
+version: 1
+
+network_policies:
+  # ── Discord ────────────────────────────────────────────────────────────
+  discord:
+    name: discord
+    endpoints:
+      - host: discord.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+      - host: gateway.discord.gg
+        port: 443
+        protocol: websocket
+        enforcement: enforce
+      - host: cdn.discordapp.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+      - allow: { method: PUT, path: "/**" }
+      - allow: { method: PATCH, path: "/**" }
+      - allow: { method: DELETE, path: "/**" }
+
+  # ── OpenAI / ChatGPT ──────────────────────────────────────────────────
+  openai:
+    name: openai
+    endpoints:
+      - host: api.openai.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+      - host: chatgpt.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+      - host: auth0.openai.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+
+  # ── Anthropic ──────────────────────────────────────────────────────────
+  anthropic:
+    name: anthropic
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+
+  # ── Google AI (Gemini) ─────────────────────────────────────────────────
+  google:
+    name: google
+    endpoints:
+      - host: generativelanguage.googleapis.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+
+  # ── GitHub ─────────────────────────────────────────────────────────────
+  github:
+    name: github
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+      - host: api.github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+      - allow: { method: POST, path: "/**" }
+      - allow: { method: PUT, path: "/**" }
+      - allow: { method: PATCH, path: "/**" }
+      - allow: { method: DELETE, path: "/**" }
+
+  # ── npm registry ───────────────────────────────────────────────────────
+  npm:
+    name: npm
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
+
+  # ── PyPI ───────────────────────────────────────────────────────────────
+  pypi:
+    name: pypi
+    endpoints:
+      - host: pypi.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+      - host: files.pythonhosted.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/**" }
