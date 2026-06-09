@@ -77,24 +77,128 @@ A Loop is a generic, reusable abstraction. Regardless of what work it coordinate
 #### Loop Interface (Generic)
 
 ```typescript
+// ═══════════════════════════════════════════════════════════════
+// Types
+// ═══════════════════════════════════════════════════════════════
+
+type LoopStatus = "CREATED" | "RUNNING" | "PAUSED" | "ESCALATED" | "DONE";
+
+interface LoopConfig {
+  id: string;                           // Unique loop instance ID (e.g. "pr-review-1045")
+  maxIterations: number;                // Hard cap on cycles (default: 3)
+  tokenBudget: number;                  // Max tokens across all steps (default: 50000)
+  timeouts: {
+    perStep: Record<string, Duration>;  // e.g. { review: "10m", fix: "15m" }
+    total: Duration;                    // Hard cap on entire loop (default: "60m")
+  };
+  safetyPolicy: SafetyPolicy;
+  workers: WorkerRegistry;              // Available workers this loop can dispatch to
+}
+
+interface Event {
+  id: string;                           // Unique event ID (for dedup)
+  type: string;                         // e.g. "pr.opened", "verdict.received", "push.synchronize"
+  source: string;                       // e.g. "github-webhook", "discord-message", "timer"
+  timestamp: string;                    // ISO 8601
+  headSha?: string;                     // Current PR head (for staleness check)
+  payload: Record<string, unknown>;     // Event-specific data
+}
+
+interface Task {
+  dispatchId: string;                   // UUID, for idempotency
+  worker: string;                       // Target worker ID
+  action: string;                       // e.g. "review", "fix"
+  headSha: string;                      // SHA this task is bound to
+  iteration: number;                    // Current iteration count
+  findings?: Finding[];                 // Findings to fix (for coder dispatch)
+  metadata?: Record<string, unknown>;   // Extensible
+}
+
+interface Finding {
+  fingerprint: string;                  // sha256(file + ":" + normalized_issue)[:8]
+  severity: "🔴" | "🟡" | "🟢";
+  category: "logic" | "performance" | "style" | "security" | "auth" | "infra" | "config";
+  riskLevel: "low" | "medium" | "high" | "critical";
+  file: string;
+  line: number;
+  issue: string;
+  suggestion?: string;
+}
+
+interface ValidationResult {
+  ok: boolean;
+  reason?: string;                      // Why validation failed (if !ok)
+  failedCheck?: string;                 // Which check failed (e.g. "token_budget")
+}
+
+interface LoopState {
+  status: LoopStatus;
+  innerState?: string;                  // Work-type-specific (e.g. "REVIEWING", "FIXING")
+  iteration: number;
+  tokenUsed: number;
+  headSha: string;
+  startedAt: string;
+  currentStepStartedAt: string;
+  retriesThisStep: number;
+}
+
+interface StepRecord {
+  step: number;
+  action: string;                       // "review" | "fix" | "escalate"
+  worker: string;
+  startedAt: string;
+  completedAt: string;
+  result: "success" | "failed" | "timeout" | "escalated";
+  tokensConsumed: number;
+  headSha: string;
+  findings?: Finding[];                 // What was found/fixed in this step
+}
+
+interface Worker {
+  id: string;                           // e.g. Discord UID
+  name: string;                         // e.g. "超渡法師"
+  capabilities: string[];               // e.g. ["review", "fix", "test"]
+  dispatchChannel: string;              // How to reach them (e.g. "discord-mention")
+}
+
+interface SafetyPolicy {
+  pathDenylist: { patterns: string[]; keywords: string[] };
+  categoryRules: CategoryRule[];
+}
+
+interface CategoryRule {
+  category: string;
+  riskLevel: string;
+  action: "allow" | "escalate";
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Loop Interface
+// ═══════════════════════════════════════════════════════════════
+
 interface Loop {
+  readonly config: LoopConfig;
+
   // --- Lifecycle ---
-  start(): void;                        // CREATED → RUNNING
+  start(): void;                        // CREATED → RUNNING, dispatch first worker
   pause(): void;                        // RUNNING → PAUSED (human intervenes)
   resume(): void;                       // PAUSED | ESCALATED → RUNNING
-  stop(reason: string): void;           // any → DONE
+  stop(reason: string): void;           // any → DONE, cleanup timers, emit event
 
-  // --- Core methods (the consume → validate → dispatch pipeline) ---
-  consume(event: Event): void;          // Ingest event, dedup, trigger state transition
-  validate(task: Task): ValidationResult;  // Pre-dispatch gate (budget, safety, staleness)
-  dispatch(worker: Worker, task: Task): void;  // Send work to a processor
+  // --- Core Pipeline: consume → validate → dispatch ---
+  consume(event: Event): void;          // Ingest event, dedup, reorder, state transition
+  validate(task: Task): ValidationResult;  // Pre-dispatch gate (all 7 checks)
+  dispatch(task: Task): void;           // Send work to worker, start step timer
 
   // --- Escalation ---
-  escalate(reason: string): void;       // → ESCALATED, notify human
+  escalate(reason: string): void;       // → ESCALATED, notify human with full context
 
-  // --- State ---
+  // --- Notification ---
+  notify(target: string, message: string): void;  // Inform without expecting response
+
+  // --- State & History ---
   getState(): LoopState;                // Current state snapshot
-  getHistory(): StepRecord[];           // Full audit trail
+  getHistory(): StepRecord[];           // Full audit trail of all steps
 }
 ```
 
