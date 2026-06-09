@@ -58,6 +58,10 @@ pub struct TriggerConfig {
 pub struct RolesConfig {
     pub coder: String,
     pub reviewer: String,
+    /// Pre-existing Discord thread ID. If set, the loop uses this thread
+    /// instead of creating a new one. Empty or absent = auto-create.
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -544,45 +548,58 @@ impl LoopController {
         self.active_loops.insert(key.clone(), instance);
         self.persist_state(&key);
 
-        // Create a dedicated Discord thread for this loop
-        let thread_title = format!("🔄 {} #{}", def.name, item.number);
-        let channel = crate::adapter::ChannelRef {
-            platform: "discord".into(),
-            channel_id: def.channel_id.clone(),
-            thread_id: None,
-            parent_id: None,
-            origin_event_id: None,
-        };
-        // Send an anchor message then create thread from it
-        match self.adapter.send_message(&channel, &thread_title).await {
-            Ok(anchor_msg) => {
-                match self
-                    .adapter
-                    .create_thread(&channel, &anchor_msg, &thread_title)
-                    .await
-                {
-                    Ok(thread_channel) => {
-                        let tid = thread_channel.channel_id.clone();
-                        if let Some(inst) = self.active_loops.get_mut(&key) {
-                            inst.thread_id = Some(tid.clone());
+        // Resolve thread: use pre-configured thread_id or create a new one
+        if let Some(ref tid) = def.roles.thread_id {
+            if !tid.is_empty() {
+                // Use existing thread
+                if let Some(inst) = self.active_loops.get_mut(&key) {
+                    inst.thread_id = Some(tid.clone());
+                }
+                self.active_threads.insert(tid.clone());
+                self.persist_state(&key);
+                info!(key, thread_id = %tid, "using pre-configured loop thread");
+            }
+        }
+        // If no thread_id yet (not pre-configured or empty), create one
+        if self.active_loops.get(&key).and_then(|i| i.thread_id.as_ref()).is_none() {
+            let thread_title = format!("🔄 {} #{}", def.name, item.number);
+            let channel = crate::adapter::ChannelRef {
+                platform: "discord".into(),
+                channel_id: def.channel_id.clone(),
+                thread_id: None,
+                parent_id: None,
+                origin_event_id: None,
+            };
+            match self.adapter.send_message(&channel, &thread_title).await {
+                Ok(anchor_msg) => {
+                    match self
+                        .adapter
+                        .create_thread(&channel, &anchor_msg, &thread_title)
+                        .await
+                    {
+                        Ok(thread_channel) => {
+                            let tid = thread_channel.channel_id.clone();
+                            if let Some(inst) = self.active_loops.get_mut(&key) {
+                                inst.thread_id = Some(tid.clone());
+                            }
+                            self.active_threads.insert(tid);
+                            self.persist_state(&key);
+                            info!(key, thread_id = %thread_channel.channel_id, "created loop thread");
                         }
-                        self.active_threads.insert(tid);
-                        self.persist_state(&key);
-                        info!(key, thread_id = %thread_channel.channel_id, "created loop thread");
-                    }
-                    Err(e) => {
-                        error!(key, error = %e, "failed to create loop thread");
-                        self.escalate(&key, "Failed to create Discord thread for loop")
-                            .await;
-                        return;
+                        Err(e) => {
+                            error!(key, error = %e, "failed to create loop thread");
+                            self.escalate(&key, "Failed to create Discord thread for loop")
+                                .await;
+                            return;
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                error!(key, error = %e, "failed to send anchor message for loop thread");
-                self.escalate(&key, "Failed to send anchor message for loop thread")
-                    .await;
-                return;
+                Err(e) => {
+                    error!(key, error = %e, "failed to send anchor message for loop thread");
+                    self.escalate(&key, "Failed to send anchor message for loop thread")
+                        .await;
+                    return;
+                }
             }
         }
 
