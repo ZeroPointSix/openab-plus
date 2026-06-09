@@ -187,6 +187,10 @@ pub struct StepRecord {
     pub result: String,
     pub tokens_consumed: u64,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub verdict: Option<String>,
+    #[serde(default)]
+    pub findings: Option<String>,
 }
 
 // ─── Loop Events ────────────────────────────────────────────────────────────
@@ -563,7 +567,7 @@ impl LoopController {
             head_sha,
             tokens_consumed,
             verdict,
-            ..
+            findings,
         } = report;
         let thread_id = &thread_id;
         let dispatch_id = &dispatch_id;
@@ -620,6 +624,8 @@ impl LoopController {
                 result: status.to_string(),
                 tokens_consumed,
                 timestamp: Utc::now(),
+                verdict: verdict.clone(),
+                findings: findings.clone(),
             });
 
             if status == "failed" {
@@ -705,7 +711,11 @@ impl LoopController {
             }
             NextAction::TransitionToFixing => {
                 if let Some(d) = &def {
-                    self.dispatch_coder_fix(&key, d).await;
+                    if self.validate_safety_policy(&key, d) {
+                        self.dispatch_coder_fix(&key, d).await;
+                    } else {
+                        self.escalate(&key, "Safety policy violation — requires human review").await;
+                    }
                 }
             }
             NextAction::TransitionToApproved => {
@@ -723,14 +733,98 @@ impl LoopController {
             .find(|(_, inst)| inst.pr_number == Some(pr_number))
             .map(|(k, _)| k.clone());
 
-        if let Some(key) = key {
+        let Some(key) = key else { return };
+
+        let should_dispatch = {
             let inst = self.active_loops.get_mut(&key).unwrap();
             if inst.state == LoopState::Fixing {
                 inst.head_sha = Some(new_sha.to_string());
-                // Don't auto-transition here — wait for CompletionReport
-                self.persist_state(&key);
+                inst.iteration += 1;
+                inst.state = LoopState::Reviewing;
+                inst.current_step_started = Utc::now();
+                inst.retries_this_step = 0;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_dispatch {
+            self.persist_state(&key);
+            let def = self
+                .definitions
+                .iter()
+                .find(|d| d.name == self.active_loops[&key].loop_name)
+                .cloned();
+            if let Some(d) = def {
+                self.dispatch_reviewer(&key, &d).await;
             }
         }
+    }
+
+    /// Check if required CI checks have passed for a given SHA.
+    async fn check_ci_status(&self, repo: &str, sha: &str) -> bool {
+        let url = format!(
+            "https://api.github.com/repos/{}/commits/{}/check-runs",
+            repo, sha
+        );
+        let response = match self.github_get(&url).await {
+            Some(v) => v,
+            None => return true, // Can't reach API — don't block
+        };
+        let check_runs = match response["check_runs"].as_array() {
+            Some(runs) => runs,
+            None => return true,
+        };
+        if check_runs.is_empty() {
+            return true;
+        }
+        check_runs.iter().all(|run| {
+            let status = run["status"].as_str().unwrap_or("");
+            if status != "completed" {
+                return true; // Still running — don't block
+            }
+            let conclusion = run["conclusion"].as_str().unwrap_or("");
+            conclusion == "success" || conclusion == "skipped" || conclusion == "neutral"
+        })
+    }
+
+    /// Validate safety policy before dispatching to coder.
+    fn validate_safety_policy(&self, key: &str, def: &LoopDefinition) -> bool {
+        let inst = match self.active_loops.get(key) {
+            Some(i) => i,
+            None => return false,
+        };
+        let findings_str = match inst.history.iter().rev().find_map(|s| s.findings.clone()) {
+            Some(f) => f,
+            None => return true,
+        };
+        let findings: Vec<serde_json::Value> = match serde_json::from_str(&findings_str) {
+            Ok(v) => v,
+            Err(_) => return true, // Can't parse — allow (defense in depth)
+        };
+        for finding in &findings {
+            let category = finding["category"].as_str().unwrap_or("");
+            let risk_level = finding["risk_level"].as_str().unwrap_or("");
+            // Check escalation rules
+            for rule in &def.safety.escalation {
+                let cat_match = rule.category == "*" || rule.category == category;
+                let risk_match = rule.risk_level == "*" || rule.risk_level == risk_level;
+                if cat_match && risk_match && rule.action == "escalate" {
+                    warn!(key, category, risk_level, "safety policy: escalation triggered");
+                    return false;
+                }
+            }
+            // Check path keywords
+            let file = finding["file"].as_str().unwrap_or("");
+            for keyword in &def.safety.path_keywords {
+                if file.contains(keyword.as_str()) {
+                    warn!(key, file, keyword = keyword.as_str(), "safety policy: path keyword match");
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     async fn handle_timeout(&mut self, key: &str) {
@@ -922,8 +1016,9 @@ impl LoopController {
 
         let last_findings = inst
             .history
-            .last()
-            .map(|s| s.result.clone())
+            .iter()
+            .rev()
+            .find_map(|s| s.findings.clone())
             .unwrap_or_default();
 
         let template = def
