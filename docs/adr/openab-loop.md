@@ -1008,8 +1008,90 @@ interface DispatchPayload {
   iteration: number;
   max_iterations: number;
   findings?: Finding[];       // only for action = "fix"
+  thread_id: string;          // Discord thread ID — agent MUST reply here
+  dispatch_id: Uuid;          // correlation ID for this dispatch
+}
+
+// ─── Completion Report ──────────────────────────────────────────────────────
+//
+// When an agent finishes a dispatched task, it MUST post a CompletionReport
+// back to the SAME thread_id it received in the DispatchPayload.
+// The Loop Controller listens for these reports to drive state transitions.
+//
+
+interface CompletionReport {
+  // --- Routing (how Controller finds this report) ---
+  dispatch_id: Uuid;          // echo back the dispatch_id from DispatchPayload
+  thread_id: string;          // echo back thread_id — proves continuity
+  in_reply_to: Uuid;          // same as dispatch_id (explicit link)
+
+  // --- Identity ---
+  agent_id: string;           // Discord UID of the reporting agent
+  role: "reviewer" | "coder";
+
+  // --- Result ---
+  status: "completed" | "failed" | "partial";
+  verdict?: Verdict;          // only for role = "reviewer"
+  findings?: Finding[];       // only for role = "reviewer", when CHANGES_REQUESTED
+  commits_pushed?: Sha[];     // only for role = "coder", the new commit(s)
+
+  // --- Metadata ---
+  head_sha: Sha;              // the SHA this work was performed against
+  tokens_consumed: number;    // for budget tracking
+  duration_ms: number;        // wall-clock time spent
+  timestamp: Timestamp;
+
+  // --- Error (when status = "failed") ---
+  error?: {
+    reason: string;           // human-readable explanation
+    recoverable: boolean;     // can Controller retry?
+  };
 }
 ```
+
+### Dispatch ↔ Report Flow
+
+```
+Controller                          Agent (new session)
+    │                                     │
+    │  dispatch(target, payload)          │
+    │  payload includes:                  │
+    │    - dispatch_id (UUID)             │
+    │    - thread_id (Discord thread)     │
+    │    - head_sha, findings, etc.       │
+    │─────────────────────────────────────▶│
+    │   (Discord mention in thread)       │
+    │                                     │  agent opens new session
+    │                                     │  agent does work...
+    │                                     │
+    │◀─────────────────────────────────────│
+    │   CompletionReport posted to        │
+    │   SAME thread_id, echoing           │
+    │   dispatch_id                       │
+    │                                     │
+    │  Controller.consume() picks it up   │
+    │  matches by dispatch_id + thread_id │
+    │  → transition()                     │
+    │                                     │
+```
+
+### Thread Continuity Rules
+
+1. **Controller creates one Discord thread per Loop** (e.g., "Loop: PR #42"). All dispatches and reports happen in this thread.
+2. **DispatchPayload always includes `thread_id`** — agent knows where to reply.
+3. **Agent MUST post CompletionReport to the same `thread_id`** — this is how Controller receives the result even though agent's session is new.
+4. **`dispatch_id` is the correlation key** — Controller matches report to pending dispatch via `(dispatch_id, thread_id)`.
+5. **If agent cannot complete** — it still MUST post a report with `status: "failed"` so Controller can retry or escalate (instead of waiting for timeout).
+
+### Why This Works with New Sessions
+
+| Concern | Solution |
+|---------|----------|
+| Agent has no memory of previous iterations | `DispatchPayload` carries all context needed (findings, head_sha, iteration) |
+| Agent doesn't know where to reply | `thread_id` in payload tells it exactly where |
+| Controller can't find the response | Matches on `dispatch_id` echoed back in report |
+| Multiple agents in same thread | Each report carries `agent_id` + `dispatch_id` — no ambiguity |
+| Agent crashes without reporting | Controller's `tick()` detects timeout → retry or escalate |
 
 ### Methods Summary
 
