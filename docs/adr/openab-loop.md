@@ -858,6 +858,44 @@ The controller communicates with agents **only through Discord mentions**. Agent
 Controller → Discord mention → Agent works → Discord/GitHub event → Controller
 ```
 
+### Message Routing (OAB Core Isolation)
+
+The Loop Controller **does not modify OAB core**. OAB should not need to inspect every incoming message for loop callbacks. The routing design:
+
+```
+Discord Message arrives
+       │
+       ├── threadId ∈ active_loop_threads?
+       │       │
+       │       ├── Yes → Loop Controller handles (independent consumer)
+       │       │
+       │       └── No  → OAB Core handles (normal flow, zero overhead)
+       │
+       └── (parallel, not sequential — both can subscribe to Discord events)
+```
+
+**Implementation:** Loop Controller runs as a **separate gateway module** (or sidecar process) with its own Discord event subscription. It maintains an `active_threads: Set<threadId>` of threads it created for active loops. Messages in non-loop threads never touch loop logic.
+
+```
+┌──────────────────────────┐     ┌─────────────────────────────┐
+│      OAB Core            │     │    Loop Controller           │
+│                          │     │    (gateway module)          │
+│  - Normal agent routing  │     │  - Subscribes only to its   │
+│  - Knows nothing about   │     │    active_threads            │
+│    loops                 │     │  - Filters by loopId marker  │
+│  - Zero performance cost │     │  - Independent lifecycle     │
+└──────────────────────────┘     └─────────────────────────────┘
+           │                                │
+           └──────── Discord Gateway ───────┘
+                  (shared event stream)
+```
+
+**Why this works:**
+- OAB core has **zero awareness** of loops — no code changes, no per-message overhead
+- Loop Controller is **opt-in** — if not deployed, nothing changes
+- Both consumers see the same Discord events; each filters for its own concern
+- If Loop Controller crashes, OAB core is unaffected
+
 ## Loop Lifecycle
 
 A Loop is a **bounded, stateful coordination unit** managing one work item (e.g., one PR) through repeated agent cycles until completion or escalation.
