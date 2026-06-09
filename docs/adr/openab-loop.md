@@ -80,24 +80,107 @@ When Reviewer posts `CHANGES REQUESTED`, it sends a structured Discord message m
 }
 ```
 
+### Control Plane Contract
+
+Every dispatch and verdict message **must** include these fields to ensure idempotency, replay protection, and SHA-bound correctness:
+
+```json
+{
+  "dispatch_id": "uuid-v4",
+  "pr": 42,
+  "head_sha": "abc1234",
+  "iteration": 1,
+  "in_reply_to": "<dispatch_id of the message being responded to>",
+  "timestamp": "2026-06-09T03:35:00Z"
+}
+```
+
+**Invariants:**
+
+1. **SHA binding** — A verdict is only valid for the `head_sha` it was produced against. If the PR head has advanced, the verdict is stale and must be discarded.
+2. **Idempotent handling** — The controller deduplicates on `(pr, head_sha, dispatch_id)`. Receiving the same dispatch twice is a no-op.
+3. **Replay protection** — Events with a `head_sha` older than the current PR head are dropped. The controller always checks `GET /repos/{owner}/{repo}/pulls/{pr}` to confirm head before acting.
+4. **Ordering** — Events are processed in `timestamp` order per PR. Out-of-order arrivals are reordered in the state machine before transition.
+
+**Completion criteria for a loop step:**
+
+A step is complete only when **both** conditions are met for the **same** `head_sha`:
+1. Reviewer verdict received (LGTM or CHANGES_REQUESTED)
+2. All required CI checks pass (GitHub Checks API, not legacy commit status)
+
+```
+GET /repos/{owner}/{repo}/commits/{head_sha}/check-runs
+→ filter: required checks only
+→ all must have conclusion: "success"
+```
+
 ### Coder Agent Behavior on Dispatch
 
 1. Verify sender is in the allowed dispatcher list
-2. Check `iteration < max_iterations`, otherwise escalate to human
-3. Check findings do not involve security/auth/infra, otherwise escalate
-4. Checkout branch, apply fixes for 🔴 (must fix) then 🟡 (should fix)
-5. Run tests — if fail, escalate to human
-6. Push — GitHub webhook automatically triggers re-review
+2. Validate `dispatch_id` and `head_sha` match current PR state
+3. Check `iteration < max_iterations`, otherwise escalate to human
+4. Check findings against safety policy (see below), escalate if restricted
+5. Checkout branch at `head_sha`, apply fixes for 🔴 (must fix) then 🟡 (should fix)
+6. Run tests — if fail, escalate to human
+7. Push — GitHub webhook automatically triggers re-review
 
 ### Safety Boundaries (Hard Stop Conditions)
 
 - `iteration >= max_iterations` (default: 3)
-- Findings involve security / auth / infrastructure changes
-- Same finding unresolved for 2 consecutive iterations
+- Safety policy violation (see machine-enforceable rules below)
+- Same finding unresolved for 2 consecutive iterations (matched by `finding.id`)
 - Tests fail after fix
+- Required CI checks fail after push
 - Human explicitly intervenes ("stop" / "I'll handle it")
 
 Human override has the highest priority at all times.
+
+### Machine-Enforceable Safety Policy
+
+Safety boundaries must be **structural and automatable**, not reliant on natural language interpretation.
+
+**Finding classification (required in dispatch):**
+
+```json
+{
+  "id": 1,
+  "severity": "🔴",
+  "category": "logic | performance | style | security | auth | infra | config",
+  "risk_level": "low | medium | high | critical",
+  "file": "src/auth.rs",
+  "line": 23,
+  "issue": "missing input validation",
+  "suggestion": "add bounds check"
+}
+```
+
+**Path denylist — Coder agent must NOT modify these without human approval:**
+
+```toml
+[safety.path_denylist]
+patterns = [
+  ".github/workflows/**",
+  "infra/**",
+  "helm/**",
+  "terraform/**",
+  "**/auth/**",
+  "**/secrets/**",
+  "**/*.pem",
+  "**/*.key",
+  ".env*",
+]
+```
+
+**Category escalation rules:**
+
+| category | risk_level | Action |
+|----------|-----------|--------|
+| security, auth, infra | any | Always escalate to human |
+| any | critical | Always escalate to human |
+| logic, performance, style, config | low, medium | Coder may fix autonomously |
+| logic, performance, style, config | high | Escalate to human |
+
+**Enforcement point:** The controller validates these rules **before** dispatching to Coder. If any finding triggers escalation, the entire dispatch is blocked.
 
 ## Loop Controller Design
 
@@ -226,12 +309,18 @@ Retry policy:
   - Max 1 retry per step
   - If step fails after retry → escalate to human
   - Retry resets the step timer
-
-Implementation options (simple → complex):
-  1. Cron job polling state store every 2 min
-  2. Delayed message queue (SQS / BullMQ)
-  3. In-process scheduler (tokio timer / setTimeout)
 ```
+
+**Timer implementation (stateless-safe):**
+
+Timers must survive process restarts, container recycling, and serverless cold starts. In-memory timers (`tokio timer`, `setTimeout`) are **not acceptable** as the sole mechanism.
+
+| Phase | Implementation | Survivability |
+|-------|---------------|---------------|
+| Phase 1 (MVP) | `current_step_started` timestamp in state file + cron/polling loop checks `now - current_step_started > timeout` every 2 min | Survives restart — timer state is on disk |
+| Phase 2+ | External delayed queue (SQS delay, Redis ZRANGEBYSCORE, EventBridge scheduled rule) | Survives anything — timer is externalized |
+
+The controller's polling loop (which already runs for GitHub event detection) doubles as the timeout checker — no additional infrastructure needed for Phase 1.
 
 ### Completion Check
 
@@ -251,6 +340,7 @@ Phase 1: file-based state under `~/.openab/loops/state/pr-{number}.json`
   "pr": 42,
   "repo": "openabdev/openab",
   "state": "REVIEWING",
+  "head_sha": "abc1234",
   "iteration": 2,
   "max_iterations": 3,
   "started_at": "2026-06-09T03:30:00Z",
@@ -258,12 +348,25 @@ Phase 1: file-based state under `~/.openab/loops/state/pr-{number}.json`
   "token_used": 18000,
   "token_budget": 50000,
   "retries": 0,
+  "last_dispatch_id": "uuid-v4",
   "history": [
-    {"step": "review", "result": "CHANGES_REQUESTED", "ts": "..."},
-    {"step": "fix", "result": "pushed", "commit": "abc123", "ts": "..."}
+    {"step": "review", "result": "CHANGES_REQUESTED", "head_sha": "abc1234", "dispatch_id": "...", "ts": "..."},
+    {"step": "fix", "result": "pushed", "commit": "def5678", "dispatch_id": "...", "ts": "..."}
   ]
 }
 ```
+
+**Concurrency protection (race condition mitigation):**
+
+Multiple events (webhook `synchronize` + Discord verdict) can arrive simultaneously for the same PR. Without protection, concurrent reads/writes to the state file cause data loss or corrupt transitions.
+
+| Phase | Mechanism | Tradeoff |
+|-------|-----------|----------|
+| Phase 1 (MVP) | **Single-writer guarantee**: all state transitions run in a single-threaded event loop (one process, one PR at a time). Incoming events are queued in-memory and processed sequentially. | Simple, no locking needed; limits throughput to one event per PR at a time |
+| Phase 1 (alt) | **File lock** (`flock` / `fcntl`): acquire exclusive lock on `pr-{number}.json` before read-modify-write | Works for multi-process; adds OS-level dependency |
+| Phase 2+ | Atomic compare-and-swap in Redis/DynamoDB (optimistic locking with version field) | Production-grade; handles distributed deployments |
+
+**Invariant:** No state transition may proceed without holding exclusive write access to the PR's state. Violations must be detected and retried.
 
 Later phases can migrate to Redis or DynamoDB.
 
@@ -360,10 +463,42 @@ This ADR implements a **closed loop**. Open loops may be explored in future ADRs
 
 ## Implementation Phases
 
-1. **Phase 1 (MVP):** Reviewer dispatches to Coder via Discord mention; Coder fixes and pushes; webhook triggers re-review. No new infra required.
-2. **Phase 2:** Add eval gates — structured quality checks at each step beyond just "does it build."
-3. **Phase 3:** Loop history and feedback accumulation — each completed loop feeds context to future runs.
-4. **Phase 4:** Configurable loop parameters in `config.toml` (max_iterations, auto_merge, severity filters, escalation rules).
+### Phase 1 (MVP) — No Dedicated Controller
+
+Phase 1 does **not** require a standalone Loop Controller process. The loop is driven entirely by agent-to-agent communication:
+
+1. **Reviewer agent** receives PR (triggered by human or webhook) and produces verdict
+2. If `CHANGES REQUESTED` → Reviewer **directly mentions** Coder agent in Discord with structured dispatch (including `head_sha`, `dispatch_id`)
+3. **Coder agent** validates dispatch, applies fixes, pushes
+4. GitHub `synchronize` webhook (or human re-trigger) starts next review cycle
+5. **Safety enforcement** lives in the Coder agent itself: it checks path denylist and category/risk_level before acting
+
+**What Phase 1 skips:**
+- No persistent state machine process
+- No automated timeout/retry (human intervenes if stuck)
+- No centralized event routing
+- Timeout detection is manual (human notices if loop stalls)
+
+**What Phase 1 requires:**
+- Structured dispatch format with Control Plane Contract fields
+- Machine-enforceable safety policy in Coder agent
+- SHA binding on all messages
+
+### Phase 2 — Lightweight Controller
+
+Add a persistent polling process that:
+- Tracks loop state per PR (file-based, single-writer)
+- Enforces timeouts via timestamp polling
+- Routes events to appropriate agents
+- Manages retry policy
+
+### Phase 3 — Loop History & Feedback
+
+Each completed loop feeds context to future runs. Historical findings inform reviewer focus areas.
+
+### Phase 4 — Configurable Loops
+
+Configurable loop parameters in `config.toml` (max_iterations, auto_merge, severity filters, escalation rules).
 
 ## Consequences
 
