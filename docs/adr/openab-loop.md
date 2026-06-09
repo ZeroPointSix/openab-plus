@@ -1669,6 +1669,178 @@ GET /repos/{repo}/issues?state=open&labels=auto-implement&sort=created&direction
 | Controller verifies | SHA match | PR exists + references issue |
 | Event sources | GitHub PR + Discord | GitHub Issue + PR + Discord |
 
+## Loop Definition Files
+
+Loop definitions follow the same pattern as usercron: **one file = one loop**. Place `.loop.toml` files in `~/.openab/loops/` and they activate automatically on startup.
+
+### File Layout
+
+```
+~/.openab/loops/
+├── pr-review.loop.toml          # active
+├── issue-implement.loop.toml    # active
+├── docs-review.loop.toml        # active
+└── experiment.loop.toml         # disabled inside file
+```
+
+### File Format
+
+```toml
+# ~/.openab/loops/pr-review.loop.toml
+
+name = "pr-review"
+enabled = true                    # set to false to disable without deleting
+variant = "pr-review"             # "pr-review" | "issue" | custom
+
+[trigger]
+labels = ["auto-review"]
+repos = ["openabdev/openab"]
+base_branches = ["main", "dev"]
+exclude_authors = ["dependabot"]
+exclude_paths = ["docs/**"]
+
+[roles]
+reviewer = "1493128125402320996"   # 普渡
+coder = "1490365068863606784"      # 超渡
+
+[limits]
+max_iterations = 3
+token_budget = 50000
+timeout_review = "10m"
+timeout_fix = "15m"
+timeout_total = "60m"
+retry_per_step = 1
+
+[discovery]
+mode = "polling"                   # "polling" | "webhook"
+poll_interval = "60s"
+
+[instructions.reviewer]
+template = """
+Review PR {pr_url} at commit `{head_sha}` (iteration {iteration}/{max_iterations}).
+Focus: correctness, security, performance.
+Verdict: LGTM ✅ or CHANGES REQUESTED ⚠️
+Reply in thread: {thread_id}
+"""
+
+[instructions.coder]
+template = """
+Fix findings on branch `{branch}` at `{head_sha}`.
+{findings}
+Push when done. Reply in thread: {thread_id}
+"""
+
+[safety]
+path_denylist = [".github/workflows/**", "**/auth*", ".env*"]
+path_keywords = ["secret", "credential", "token"]
+
+[[safety.escalation]]
+category = "security"
+risk_level = "*"
+action = "escalate"
+
+[[safety.escalation]]
+category = "*"
+risk_level = "critical"
+action = "escalate"
+```
+
+### Issue Loop Example
+
+```toml
+# ~/.openab/loops/issue-implement.loop.toml
+
+name = "issue-implement"
+enabled = true
+variant = "issue"
+
+[trigger]
+labels = ["auto-implement"]
+repos = ["openabdev/openab"]
+exclude_labels = ["wontfix", "duplicate"]
+
+[roles]
+coder = "1490365068863606784"
+reviewer = "1493128125402320996"
+
+[limits]
+max_iterations = 3
+token_budget = 80000
+timeout_coding = "30m"
+timeout_review = "10m"
+timeout_fix = "15m"
+timeout_total = "90m"
+
+[discovery]
+mode = "polling"
+poll_interval = "60s"
+
+[instructions.coder_implement]
+template = """
+Implement issue #{issue_number}: {issue_title}
+{issue_body}
+Create branch, implement, open PR with "Fixes #{issue_number}".
+Reply in thread: {thread_id}
+"""
+
+[instructions.coder_fix]
+template = """
+Fix findings on branch `{branch}` at `{head_sha}`.
+{findings}
+Reply in thread: {thread_id}
+"""
+
+[instructions.reviewer]
+template = """
+Review PR {pr_url} at `{head_sha}`.
+Reply in thread: {thread_id}
+"""
+```
+
+### Lifecycle
+
+```
+OAB startup / hot-reload
+        │
+        ▼
+  Scan ~/.openab/loops/*.loop.toml
+        │
+        ▼
+  For each file:
+    enabled = false? → skip
+    enabled = true?  → register loop template → start discovery
+        │
+        ▼
+  On file change (inotify / periodic rescan):
+    file added    → register + start
+    file removed  → stop active loops for this template
+    enabled flipped → start / stop accordingly
+```
+
+### Comparison with usercron
+
+| | usercron | loop |
+|---|---|---|
+| File pattern | `~/.openab/crons/*.cron.toml` | `~/.openab/loops/*.loop.toml` |
+| One file = | One scheduled job | One loop definition |
+| Disable | `enabled = false` | `enabled = false` |
+| Trigger | Schedule (cron expr) | Event (label, PR, issue) |
+| Runtime state | Stateless (fire & forget) | Stateful (state machine per work item) |
+| State storage | None | `~/.openab/loops/state/` |
+
+### Runtime State Files (auto-managed)
+
+Active loop instances write state to:
+
+```
+~/.openab/loops/state/
+├── pr-review--42.json           # loop state for PR #42
+├── pr-review--45.json           # loop state for PR #45
+└── issue-implement--123.json    # loop state for issue #123
+```
+
+These are managed by the Controller. Users don't edit them.
+
 ## Loop Lifecycle
 
 A Loop is a **bounded, stateful coordination unit** managing one work item (e.g., one PR) through repeated agent cycles until completion or escalation.
