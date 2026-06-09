@@ -236,6 +236,8 @@ pub struct Handler {
     pub reminder_store: ReminderStore,
     /// Track scheduled reminder IDs to prevent duplicate scheduling on reconnect.
     pub scheduled_ids: tokio::sync::Mutex<std::collections::HashSet<String>>,
+    /// Loop Controller for closed-loop agent automation (optional).
+    pub loop_controller: Option<Arc<tokio::sync::Mutex<crate::loop_controller::LoopController>>>,
 }
 
 impl Handler {
@@ -451,6 +453,30 @@ impl EventHandler for Handler {
         // Ignore own messages (after counting toward bot turns above)
         if msg.author.id == bot_id {
             return;
+        }
+
+        // ── Loop Controller callback detection (Layer 1/2) ──
+        // Layer 1: Is this message in an active loop thread?
+        // Layer 2: Does it contain a CompletionReport marker?
+        if let Some(ref lc) = self.loop_controller {
+            let thread_id = msg.channel_id.to_string();
+            let ctrl = lc.lock().await;
+            if ctrl.is_loop_thread(&thread_id) {
+                if let Some(mut event) =
+                    crate::loop_controller::LoopController::try_parse_report(&msg.content)
+                {
+                    if let crate::loop_controller::LoopEvent::CompletionReport {
+                        ref mut thread_id, ..
+                    } = event
+                    {
+                        *thread_id = msg.channel_id.to_string();
+                    }
+                    drop(ctrl);
+                    let mut ctrl = lc.lock().await;
+                    ctrl.consume(event).await;
+                    return; // handled by loop controller, don't dispatch to backend
+                }
+            }
         }
 
         let adapter = self

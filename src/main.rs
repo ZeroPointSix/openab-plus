@@ -396,6 +396,37 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Spawn Loop Controller (background task) — watches ~/.openab/loop/*.toml
+    let loop_handle = {
+        let loop_dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default()
+            .join(".openab")
+            .join("loop");
+        if loop_dir.is_dir() {
+            let shutdown_rx = shutdown_rx.clone();
+            let adapter = shared_discord_adapter.clone();
+            let github_token = std::env::var("GITHUB_TOKEN").ok();
+            if let Some(adapter) = adapter {
+                info!(path = %loop_dir.display(), "starting loop controller");
+                Some(tokio::spawn(async move {
+                    loop_controller::run_loop_controller(
+                        loop_dir,
+                        adapter,
+                        github_token,
+                        shutdown_rx,
+                    )
+                    .await;
+                }))
+            } else {
+                debug!("loop controller skipped — no Discord adapter");
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     // Run Discord adapter (foreground, blocking) or wait for ctrl_c
     if let Some(discord_cfg) = cfg.discord {
         let allow_all_channels = config::resolve_allow_all(
@@ -471,6 +502,7 @@ async fn main() -> anyhow::Result<()> {
             dispatcher: discord_dispatcher,
             reminder_store: reminder_store.clone(),
             scheduled_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            loop_controller: None, // TODO: wire shared Arc from loop_controller spawn
         };
 
         let intents = GatewayIntents::GUILD_MESSAGES
@@ -530,6 +562,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = cron_handle {
         // cron.rs drains in-flight tasks for up to 30s, so wait slightly longer
         let _ = tokio::time::timeout(std::time::Duration::from_secs(35), handle).await;
+    }
+    if let Some(handle) = loop_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
     }
     // Drain per-thread dispatchers and log buffered_lost counts before pool shutdown (ADR §6.8).
     for d in dispatchers.lock().unwrap().iter() {
