@@ -922,6 +922,106 @@ Users opt in by adding the `auto-review` label to a PR. No label = traditional m
 
 **Polling is the universal default; webhook is an opt-in acceleration for teams that can configure it.**
 
+### Event Consumption — How Controller Receives Events
+
+Controller needs to poll **two sources**: GitHub (PR state) and Discord (agent replies). Both feed into the same `consume()` pipeline.
+
+#### Source 1: GitHub (PR state changes)
+
+Already covered above — poll or webhook for new commits, CI status, labels.
+
+#### Source 2: Discord (Agent CompletionReports)
+
+Controller monitors its `active_threads` for agent replies:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Discord Poller (runs every N seconds)                   │
+│                                                         │
+│  for each threadId in active_loop_threads:              │
+│    GET /channels/{threadId}/messages?after={last_seen}  │
+│    for each new message:                                │
+│      if sender is bot AND contains loop-report marker:  │
+│        parse CompletionReport                           │
+│        consume(event)                                   │
+│      else:                                              │
+│        check for human override commands ("stop", etc.) │
+│    update last_seen_message_id                          │
+│                                                         │
+│  Sleep poll_interval                                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Discord API endpoint:**
+
+```
+GET /channels/{thread_id}/messages?after={last_message_id}&limit=50
+```
+
+**Optimization — reduce unnecessary calls:**
+
+| Technique | How |
+|-----------|-----|
+| Only poll active threads | `active_loop_threads` set — idle loops don't poll |
+| Cursor-based | `?after={last_seen_id}` — only fetch new messages |
+| Skip if no pending dispatch | If `pendingDispatchId == null`, skip that thread |
+| Adaptive interval | Poll faster (5s) when a step was just dispatched, slow down (30s) after 2 min of silence |
+
+**Alternative: Discord Gateway (WebSocket)**
+
+If Controller already maintains a Discord WebSocket connection (e.g., it's a Discord bot), it receives `MESSAGE_CREATE` events in real-time — no polling needed:
+
+```
+Discord Gateway WebSocket
+    → MESSAGE_CREATE event
+        → threadId ∈ active_loop_threads?
+            → Yes → parse & consume()
+            → No  → ignore
+```
+
+| Mode | Latency | Complexity | Best for |
+|------|---------|-----------|----------|
+| HTTP Polling | 5-30s | Low (stateless) | Serverless, simple deploy |
+| WebSocket Gateway | <1s | Higher (persistent conn) | Always-on bot process |
+
+**Configuration:**
+
+```toml
+[loop.discord]
+mode = "gateway"              # "polling" or "gateway"
+poll_interval = 10            # seconds (only for polling mode)
+adaptive_polling = true       # faster when step is pending
+```
+
+#### Unified Event Loop
+
+Both sources feed into one processing loop:
+
+```
+┌────────────────────────────────────────────┐
+│          CONTROLLER MAIN LOOP              │
+│                                            │
+│  loop {                                    │
+│    // 1. Check GitHub (poll or webhook)    │
+│    github_events = poll_github()           │
+│                                            │
+│    // 2. Check Discord threads             │
+│    discord_events = poll_discord()         │
+│    // (or receive via WebSocket)           │
+│                                            │
+│    // 3. Check timers                      │
+│    timeout_events = check_timeouts()       │
+│                                            │
+│    // 4. Process all events                │
+│    for event in github + discord + timeout │
+│      loop_instance = lookup(event)         │
+│      loop_instance.consume(event)          │
+│                                            │
+│    sleep(poll_interval)                    │
+│  }                                         │
+└────────────────────────────────────────────┘
+```
+
 ### Deployment Options
 
 | Option | Description | Tradeoff |
