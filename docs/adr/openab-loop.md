@@ -318,7 +318,16 @@ Configuration:
 [loop]
 event_source = "polling"   # "webhook" or "polling"
 poll_interval = 60         # seconds, only used when polling
+
+# Only PRs matching these conditions enter the loop
+[loop.conditions]
+labels = ["auto-review"]        # PR must have this label to activate
+base_branch = ["main", "dev"]   # Only PRs targeting these branches
+exclude_authors = ["bot"]       # Skip PRs from these authors
+exclude_paths = ["docs/**"]     # Skip PRs that only touch these paths
 ```
+
+Users opt in by adding the `auto-review` label to a PR. No label = traditional manual flow.
 
 **Polling is the universal default; webhook is an opt-in acceleration for teams that can configure it.**
 
