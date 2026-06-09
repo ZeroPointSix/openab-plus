@@ -2147,6 +2147,144 @@ Detection: `message.content.startsWith("<!-- oab-loop-report:")`
 4. **Idempotent** — Same `(pr, head_sha, dispatch_id)` processed twice = no-op.
 5. **Human supreme** — `stop()` is callable from any state and always wins.
 
+## Loop Template Examples
+
+### Example 1: PR Review Loop (primary use case)
+
+```
+Trigger: PR opened with label "auto-review"
+Steps:   review → fix → review → ... → approved
+```
+
+(Fully defined in the Decision section above.)
+
+### Example 2: Issue Implementation Loop
+
+Demonstrates that Loops are generic — not limited to PR review.
+
+**Trigger:** New issue with label `auto-implement`
+
+**Inner states:**
+
+```
+IDLE → IMPLEMENTING → VERIFYING → REVIEWING → FIXING → ... → DONE
+                          │
+                          └── "Coder opened PR, Controller verifies it exists"
+```
+
+**Template:**
+
+```toml
+[[loop]]
+name = "issue-implement"
+description = "Issue → Coder implements → PR → Review → Fix → Merge"
+
+[loop.trigger]
+event = "issues.labeled"
+conditions = { label = "auto-implement" }
+
+[loop.limits]
+max_iterations = 3
+token_budget = 80000
+
+[[loop.steps]]
+name = "implement"
+worker = "coder"
+action = "implement"
+timeout = "20m"
+prompt_template = """
+請實作這個 issue：{issue_url}
+Title: {issue_title}
+Body:
+{issue_body}
+
+完成後：
+1. 開一個 PR (base: main)
+2. PR body 寫上 `Closes #{issue_number}` 和 `loopId: {loop_id}`
+3. 回報 CompletionReport 到這個 thread，帶上 newPrNumber 和 newHeadSha
+"""
+
+[[loop.steps]]
+name = "review"
+worker = "reviewer"
+action = "review"
+timeout = "10m"
+
+[[loop.steps]]
+name = "fix"
+worker = "coder"
+action = "fix"
+timeout = "15m"
+```
+
+**Completion verification (AND logic):**
+
+```
+Coder "完成" = BOTH conditions true:
+  ✅ CompletionReport received (agent says done, includes newPrNumber)
+  ✅ GitHub API confirms PR exists (GET /repos/.../pulls/{newPrNumber} → 200)
+
+Only then → state transition
+```
+
+**Flow diagram:**
+
+```
+Issue #100 (labeled "auto-implement")
+       │
+       ▼
+Controller: new Loop("issue-implement", target: issue #100)
+       │
+       ▼ dispatch(coder, "implement")
+       │
+   ┌───┴────────────────────────────────────┐
+   │  Coder (new session):                   │
+   │    - reads issue                        │
+   │    - writes code                        │
+   │    - git push → opens PR #101           │
+   │    - posts CompletionReport:            │
+   │        { newPrNumber: 101,              │
+   │          newHeadSha: "def456" }         │
+   └───┬────────────────────────────────────┘
+       │
+       ▼ Controller consume(CompletionReport)
+       │
+       ├── Verify: GET /repos/.../pulls/101 → exists? ✅
+       │
+       ▼ State: IMPLEMENTING → REVIEWING
+       │
+       ▼ dispatch(reviewer, "review PR #101")
+       │
+       │  (now behaves like a normal PR review loop)
+       │  review → fix → review → ... → LGTM
+       │
+       ▼
+    APPROVED → notify human → await merge → DONE
+```
+
+**Fallback (agent didn't report):**
+
+```
+Timeout (20 min, no CompletionReport)
+    → Controller polls GitHub: any new PR with "loopId: {loop_id}" in body?
+        → Found PR #101 → reconcile, treat as completed
+        → Not found → retry once, then escalate to human
+```
+
+### Key Difference from PR Review Loop
+
+| | PR Review Loop | Issue Implementation Loop |
+|--|---|---|
+| Trigger | PR exists | Issue exists, PR doesn't exist yet |
+| First step output | Verdict (text) | New PR (artifact) |
+| Verification | SHA match | PR existence check |
+| Inner states | REVIEWING ↔ FIXING | IMPLEMENTING → VERIFYING → REVIEWING ↔ FIXING |
+| Longer timeout | 10-15 min/step | 20 min for implement (more work) |
+
+This shows the Loop abstraction is **generic** — swap the template, same Controller runs a completely different workflow.
+
+---
+
 ## Open vs Closed Looping
 
 | | Open Loop | Closed Loop |
