@@ -419,6 +419,86 @@ When Reviewer posts `CHANGES REQUESTED`, it sends a structured Discord message m
 }
 ```
 
+### Dispatch Content (Prompt Templates)
+
+The **structured JSON** above is the machine-readable payload. But the actual message sent to an agent is a **rendered prompt** — natural language with embedded context. This prompt is defined per step in `config.toml`:
+
+```toml
+[[loop.steps]]
+name = "review"
+worker = "reviewer"
+action = "review"
+timeout = "10m"
+prompt_template = """
+請 review 這個 PR：{pr_url}
+Branch: `{branch}` | HEAD: `{head_sha}` | Iteration: {iteration}/{max_iterations}
+
+Review 完成後請回報：
+- loopId: `{loop_id}`
+- dispatchId: `{dispatch_id}`
+- verdict: `LGTM ✅` 或 `CHANGES REQUESTED ⚠️`
+- 如果 CHANGES REQUESTED，請附 findings（含 severity, category, file, issue）
+
+請直接在這個 thread 回覆。
+"""
+
+[[loop.steps]]
+name = "fix"
+worker = "coder"
+action = "fix"
+timeout = "15m"
+prompt_template = """
+請修復以下 PR review findings：
+PR: {pr_url} | Branch: `{branch}` | HEAD: `{head_sha}`
+Iteration: {iteration}/{max_iterations}
+
+Findings:
+{findings_json}
+
+規則：
+- 優先修 🔴 (must fix)，再修 🟡 (should fix)
+- 不要碰 🟢 (praise)
+- 修完後 `git push`
+- 回報：loopId `{loop_id}`, dispatchId `{dispatch_id}`, status, filesChanged, newHeadSha
+
+請直接在這個 thread 回覆。
+"""
+```
+
+**Template variables (Controller injects at dispatch time):**
+
+| Variable | Source | Example |
+|----------|--------|---------|
+| `{pr_url}` | `LoopInstance.target` | `https://github.com/openabdev/openab/pull/42` |
+| `{branch}` | `LoopInstance.target.branch` | `feat/example` |
+| `{head_sha}` | `LoopInstance.headSha` | `abc1234` |
+| `{iteration}` | `LoopInstance.iteration` | `1` |
+| `{max_iterations}` | Template config | `3` |
+| `{loop_id}` | `LoopInstance.loopId` | `pr-review-42-a3f2c1` |
+| `{dispatch_id}` | Generated UUID per dispatch | `uuid-v4` |
+| `{findings_json}` | Previous reviewer's findings | JSON array |
+| `{thread_id}` | `LoopInstance.threadId` | Discord thread ID |
+
+**Rendering flow:**
+
+```
+dispatch(task)
+    │
+    ├── Load prompt_template from step config
+    ├── Inject variables from LoopInstance + task
+    ├── Render final message string
+    │
+    ▼
+Discord message: "@{worker_agent} \n{rendered_prompt}"
+```
+
+**Design rationale:**
+
+- **Prompt in config, not code** — Users can customize review/fix instructions without changing Controller code
+- **Variables make it dynamic** — Same template works across PRs, iterations, agents
+- **Agent sees natural language** — Agent doesn't need to parse the Loop protocol; it just follows the prompt and posts results back
+- **Structured echo required** — The prompt explicitly tells the agent to include `loopId` + `dispatchId` in its response, ensuring Controller can match it
+
 ### Control Plane Contract
 
 Every dispatch and verdict message **must** include these fields to ensure idempotency, replay protection, and SHA-bound correctness:
