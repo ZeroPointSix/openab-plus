@@ -19,13 +19,7 @@ jobs:
             const PENDING_COMMUNITY = 'pending-community-review';
             const PENDING_MAINTAINER = 'pending-maintainer-review';
 
-            // Get openab-slack-reviewers team members (team must be associated with repo)
-            const { data: members } = await github.rest.teams.listMembersInOrg({
-              org: 'openabdev',
-              team_slug: 'openab-slack-reviewers',
-              per_page: 100
-            });
-            const SLACK_REVIEWERS = members.map(m => m.login);
+            const SLACK_REVIEWERS = process.env.SLACK_REVIEWERS.split(',');
 
             const prs = await github.rest.pulls.list({
               ...context.repo,
@@ -95,3 +89,5 @@ jobs:
                 console.log(`#${pr.number} — no slack reviewer approval, set ${PENDING_COMMUNITY}`);
               }
             }
+        env:
+          SLACK_REVIEWERS: MuLinForest
