@@ -26,6 +26,11 @@ large amount of explicit configuration. The main blockers were:
 - Runtime tool installation limitations.
 - Provider credential values appearing as resolver placeholders rather than raw
   environment values.
+- Runtime-vs-development expectations: the native quick-start image can run a
+  bot but does not support `sudo`, `apt-get`, or system-wide installs.
+- Policy file compatibility: the proposed broad OAB policy must be tested
+  against the currently documented OpenShell CLI before it is treated as a
+  getting-started requirement.
 
 This ADR proposes discussing an OpenAB-owned OpenShell preset module that makes
 the common case simple while preserving OpenShell's security value.
@@ -66,6 +71,57 @@ gateway:
 ```
 
 This should be treated as a product/API sketch, not a current OpenShell feature.
+
+## 2.1 Current Testing Status
+
+Status as of 2026-06-11: **testing in progress**.
+
+The current `docs/openshell.md` quick start is intended to prove the local
+developer path:
+
+```text
+create sandbox
+verify install-friendly /sandbox paths
+write config
+authenticate openab-agent
+run openab
+connect Discord bot
+reply to a mention
+```
+
+It should not be read as proof that the sandbox has unrestricted root access,
+nor that the broad network policy is stable across OpenShell versions.
+
+Recent local E2E testing found:
+
+- The bot can come online and reply when launched with `HOME=/sandbox` and a
+  valid `openab-agent` auth file.
+- The original runtime image is not suitable for system package installation.
+  Attempts to install tools into `/usr/local/bin` or use `apt` fail under the
+  non-root sandbox user.
+- Most local users need an install-friendly dev sandbox. The recommended
+  direction is user-local installs under `/sandbox`, with common tools
+  preinstalled in the image.
+- Small standalone binaries can be staged under `/sandbox/bin`; Go, npm, and
+  Python installs should write under `/sandbox/go`, `/sandbox/.local`, and
+  `/sandbox/.venv` or other `/sandbox` paths.
+- Host Codex auth (`~/.codex/auth.json`) is not interchangeable with
+  `openab-agent` auth (`/sandbox/.openab/agent/auth.json`).
+- The proposed `oab-open.yaml` broad policy needs compatibility validation
+  against the OpenShell CLI that users install. Until that is validated, policy
+  commands belong in this ADR or policy-specific docs, not in the required
+  quick-start path.
+
+Recommended docs stance while testing continues:
+
+- Keep `docs/openshell.md` focused on the install-friendly local dev quick
+  start.
+- Link policy recommendations from the quick start, but do not require policy
+  edits for the first successful run unless the tested CLI/image combination
+  requires them.
+- If a policy file fails to apply during E2E, treat that as a policy/docs issue.
+  Do not rewrite the policy in a private scratch file and call the guide
+  successful.
 
 ## 3. Core Difference
 
@@ -141,6 +197,30 @@ The most useful default is probably `web-agent`: broad web access, common CLI
 tools, browser/search/GitHub/Google Workspace tools preinstalled, writable
 `/sandbox`, and a managed gateway path. This gets close to Kubernetes
 convenience without pretending the sandbox has no security boundary.
+
+### 6.1 Policy Recommendations
+
+These recommendations are **testing in progress** and should not yet be treated
+as a stable public contract.
+
+| Tier | Use case | Network posture | Install posture | Docs posture |
+|---|---|---|---|---|
+| `dev-agent` | First successful local OpenAB bot and normal developer use | Broad enough for model providers, Discord, GitHub, npm/PyPI, Google APIs as needed | Common tools preinstalled; Go/npm/Python/user binaries write under `/sandbox` | `docs/openshell.md` quick start |
+| `web-agent` | Normal deployed OpenAB assistant with web/API tools | Broad HTTPS/WebSocket egress for selected providers and tools | Tools preinstalled in image; limited user-local `/sandbox/bin` for one-off binaries | Policy-specific docs after validation |
+| `runtime-agent` | Smaller production-like bot | Only what the image and current OpenShell defaults require to connect Discord and model APIs | No runtime installs; writable `/sandbox` only | Advanced/runtime note |
+| `safe-agent` | Enterprise/security-sensitive deployment | Narrow endpoint allowlist per agent/provider | No runtime installs | Production hardening guide |
+
+Policy implementation guidance:
+
+- Validate policy files against the documented OpenShell CLI before linking them
+  from stable docs.
+- Prefer an OpenAB-owned policy artifact only after CI or release testing proves
+  it applies cleanly with the supported OpenShell version.
+- Keep broad policy files out of the first-run happy path until they are proven
+  one-shot.
+- Treat policy edits made during E2E as findings, not as test harness fixes.
+- Separate network policy from install policy. A sandbox can have broad egress
+  and still be intentionally non-root/non-installable.
 
 ## 7. Preset Responsibilities
 
