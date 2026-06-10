@@ -3,7 +3,17 @@ FROM ghcr.io/openabdev/openab-native:beta
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends iproute2 && rm -rf /var/lib/apt/lists/*
 RUN groupadd -g 1000660000 sandbox && \
-    useradd -u 1000660000 -g sandbox -m -s /bin/bash sandbox
+    useradd -u 1000660000 -g sandbox -m -d /sandbox -s /bin/bash sandbox && \
+    mkdir -p \
+      /sandbox/bin \
+      /sandbox/.local/bin \
+      /sandbox/.cache \
+      /sandbox/tmp \
+      /sandbox/work && \
+    chown -R sandbox:sandbox /sandbox
 
 USER sandbox
-WORKDIR /home/sandbox
+ENV HOME=/sandbox
+ENV PATH=/sandbox/bin:/sandbox/.local/bin:/usr/local/bin:/usr/bin:/bin
+ENV TMPDIR=/sandbox/tmp
+WORKDIR /sandbox

@@ -1,21 +1,21 @@
-# OpenShell Dev Quick Start
+# OpenShell Quick Start
 
-Run one OpenAB Discord bot inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) dev sandbox.
+Run one OpenAB Discord bot inside an [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox.
 
-This guide optimizes for the common local developer workflow: run the bot, edit files under `/sandbox`, and install common tools without needing root.
+This guide optimizes for the normal OpenAB agent workflow: keep the image lean, make the agent home writable, and let the agent install extra tools at runtime into its own home directory.
 
 ## What You Will Get
 
 By the end, you should have:
 
 - One OpenShell sandbox named `oab`
-- One install-friendly dev environment with writable `/sandbox`
-- Common developer tools available: `git`, `gh`, `curl`, `jq`, `python3`, `pip`, `node`, `npm`, and `go`
+- A writable agent home at `/sandbox`
+- Runtime tool install paths under `/sandbox/bin` and `/sandbox/.local`
 - One Discord bot connected to Discord
 - One `openab-agent` session using ChatGPT/Codex subscription auth
 - A bot that replies when mentioned in Discord
 
-Install-friendly means user-local installs under `/sandbox`, not unrestricted root access. The dev sandbox supports Go, npm, Python virtualenv/pip, and standalone binaries without writing to `/usr/local/bin`.
+Install-friendly does **not** mean root access or `apt-get` inside the running sandbox. It means the agent can install user-local tools under `/sandbox` without changing the image.
 
 ## Prerequisites
 
@@ -45,23 +45,21 @@ Keep the token in your shell environment. Do not paste it into `config.toml`.
 export DISCORD_BOT_TOKEN="your-discord-bot-token"
 ```
 
-## 2. Create The Dev Sandbox
+## 2. Build The OpenShell Sandbox Image
 
-Build the dev sandbox image from this repo:
+Build the OpenShell sandbox image from this repo:
 
 ```bash
-docker build -t oab-native-dev-sandbox -f openshell/Dockerfile.dev .
-
-openshell sandbox create --name oab \
-  --from oab-native-dev-sandbox:latest \
-  -- bash
+docker build -t oab-native-sandbox -f openshell/Dockerfile .
 ```
 
-After `ghcr.io/openabdev/openab-native-dev-sandbox:latest` is published, you can skip the local build and create the sandbox directly:
+This image is intentionally small. It does not add Go, Node, Python, cloud CLIs, or every tool an agent might someday need. Extra tools should be installed later by the agent into `/sandbox`, following [Agent-Installable Tools](agent-installable-tools.md).
+
+## 3. Create The Sandbox
 
 ```bash
 openshell sandbox create --name oab \
-  --from ghcr.io/openabdev/openab-native-dev-sandbox:latest \
+  --from oab-native-sandbox:latest \
   -- bash
 ```
 
@@ -73,31 +71,34 @@ Reconnect later with:
 openshell sandbox connect oab
 ```
 
-## 3. Verify The Dev Environment
+## 4. Verify Writable Runtime Install Paths
 
 Inside the sandbox:
 
 ```bash
 export HOME=/sandbox
-export PATH="/sandbox/bin:/sandbox/.local/bin:/sandbox/go/bin:$PATH"
-export GOPATH=/sandbox/go
-export GOCACHE=/sandbox/.cache/go-build
-export npm_config_prefix=/sandbox/.local
-export npm_config_cache=/sandbox/.cache/npm
-export PIP_CACHE_DIR=/sandbox/.cache/pip
+export PATH="/sandbox/bin:/sandbox/.local/bin:$PATH"
+export TMPDIR=/sandbox/tmp
 
 test -w /sandbox
-openab --version
+mkdir -p /sandbox/bin /sandbox/.local/bin /sandbox/tmp
+printf '#!/bin/sh\necho openab-local-install-ok\n' > /sandbox/bin/openab-local-install-test
+chmod +x /sandbox/bin/openab-local-install-test
+openab-local-install-test
+
+command -v openab
 command -v openab-agent
-git --version
-gh --version
-go version
-node --version
-npm --version
-python3 --version
 ```
 
-## 4. Create The OpenAB Config
+Expected output:
+
+```text
+openab-local-install-ok
+```
+
+This proves the agent can install standalone tools into `/sandbox/bin` at runtime. For real tools, use the same home-directory install pattern from [Agent-Installable Tools](agent-installable-tools.md).
+
+## 5. Create The OpenAB Config
 
 Inside the sandbox, export the same token for this shell session:
 
@@ -124,12 +125,8 @@ working_dir = "/sandbox"
 
 [agent.env]
 HOME = "/sandbox"
-PATH = "/sandbox/bin:/sandbox/.local/bin:/sandbox/go/bin:/usr/local/bin:/usr/bin:/bin"
-GOPATH = "/sandbox/go"
-GOCACHE = "/sandbox/.cache/go-build"
-npm_config_prefix = "/sandbox/.local"
-npm_config_cache = "/sandbox/.cache/npm"
-PIP_CACHE_DIR = "/sandbox/.cache/pip"
+PATH = "/sandbox/bin:/sandbox/.local/bin:/usr/local/bin:/usr/bin:/bin"
+TMPDIR = "/sandbox/tmp"
 OPENAB_AGENT_OPENAI_MODEL = "gpt-5.4-mini"
 
 [pool]
@@ -147,10 +144,11 @@ Why these defaults:
 - `bot_token = "${DISCORD_BOT_TOKEN}"` keeps the secret out of the file.
 - `working_dir = "/sandbox"` gives the agent a writable project directory.
 - `HOME = "/sandbox"` keeps auth at `/sandbox/.openab/agent/auth.json`.
-- `PATH`, `GOPATH`, npm, and pip cache settings make user-local installs land under `/sandbox`.
+- `PATH` makes runtime-installed tools in `/sandbox/bin` and `/sandbox/.local/bin` available to the agent.
+- `TMPDIR = "/sandbox/tmp"` keeps scratch work inside the writable sandbox home.
 - `allow_all_channels = true` is the easiest first run. Restrict channels after the bot works.
 
-## 5. Authenticate The Agent
+## 6. Authenticate The Agent
 
 Inside the sandbox:
 
@@ -168,12 +166,14 @@ HOME=/sandbox openab-agent auth status
 
 Expected result: the status command reports a valid Codex/OpenAI auth file under `/sandbox/.openab/agent/auth.json`.
 
-## 6. Run OpenAB
+## 7. Run OpenAB
 
 Inside the sandbox:
 
 ```bash
 export HOME=/sandbox
+export PATH="/sandbox/bin:/sandbox/.local/bin:$PATH"
+export TMPDIR=/sandbox/tmp
 : "${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN first}"
 openab run -c /sandbox/config.toml
 ```
@@ -191,7 +191,7 @@ Mention the bot in Discord. It should reply in the channel or thread.
 
 ## If The Bot Shows Offline
 
-If `openab run` starts but Discord still shows the bot offline, keep the sandbox and launch the same config through Docker directly. This avoids a known local OpenShell exec/WebSocket failure mode for long-running Discord bots.
+If `openab run` starts but Discord still shows the bot offline, keep the sandbox and launch the same config through Docker directly. This avoids a local OpenShell exec/WebSocket failure mode seen during E2E testing for long-running Discord bots.
 
 From the host:
 
@@ -213,6 +213,8 @@ docker exec -u 0 \
   cd /sandbox &&
   setpriv --reuid='"$SANDBOX_UID"' --regid='"$SANDBOX_GID"' --clear-groups \
     env HOME=/sandbox USER=sandbox LOGNAME=sandbox \
+    PATH=/sandbox/bin:/sandbox/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    TMPDIR=/sandbox/tmp \
     DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
     nohup openab run -c /sandbox/config.toml >/tmp/openab-discord.log 2>&1 &
 '
@@ -226,76 +228,60 @@ docker exec -u 0 "$CONTAINER_ID" sh -lc 'tail -n 120 /tmp/openab-discord.log'
 
 This still runs OpenAB in the OpenShell-created sandbox container. It only changes how the long-running process is started. Do not replace this with a plain Docker container; a plain `docker run` will not have the same OpenShell-created `/sandbox` setup.
 
-## Installing Extra Tools
+## Installing Extra Tools At Runtime
 
-The dev sandbox supports user-local installs under `/sandbox`.
-
-Standalone binary:
+Use the OpenAB home-directory install pattern:
 
 ```bash
 mkdir -p /sandbox/bin
-cp ./tool /sandbox/bin/tool
-chmod +x /sandbox/bin/tool
+curl -fsSL -o /sandbox/bin/<tool> "<official-linux-binary-url>"
+chmod +x /sandbox/bin/<tool>
 export PATH="/sandbox/bin:$PATH"
+<tool> --version
 ```
 
-Go:
+For tools distributed as archives, download to `/sandbox/tmp`, extract there, and copy only the final executable into `/sandbox/bin`.
+
+For tools distributed as `.deb` packages, extract without root:
 
 ```bash
-export GOPATH=/sandbox/go
-export GOCACHE=/sandbox/.cache/go-build
-export PATH="/sandbox/go/bin:$PATH"
-go install github.com/googleworkspace/cli/cmd/gws@latest
-gws --help
+mkdir -p /sandbox/bin /sandbox/tmp/deb-extract
+curl -fsSL -o /sandbox/tmp/package.deb "<deb-url>"
+dpkg-deb -x /sandbox/tmp/package.deb /sandbox/tmp/deb-extract
+cp /sandbox/tmp/deb-extract/usr/bin/<binary> /sandbox/bin/
+chmod +x /sandbox/bin/<binary>
+rm -rf /sandbox/tmp/package.deb /sandbox/tmp/deb-extract
 ```
 
-npm:
+Rules for agents:
 
-```bash
-export npm_config_prefix=/sandbox/.local
-export npm_config_cache=/sandbox/.cache/npm
-export PATH="/sandbox/.local/bin:$PATH"
-npm install -g <package>
-```
+- Do not use `sudo`.
+- Do not write to `/usr`, `/opt`, or `/usr/local/bin`.
+- Install binaries to `/sandbox/bin`.
+- Install larger user-local tool trees under `/sandbox`.
+- Use `/sandbox/tmp` for scratch work.
+- Detect architecture before downloading binaries.
+- Verify every install with `<tool> --version` or equivalent.
 
-Python:
-
-```bash
-python3 -m venv /sandbox/.venv
-. /sandbox/.venv/bin/activate
-pip install <package>
-```
-
-This sandbox does not promise `sudo apt-get install ...` or writes to `/usr/local/bin` after creation. If you need additional system packages, bake them into a custom dev image:
-
-```dockerfile
-FROM oab-native-dev-sandbox:latest
-USER root
-RUN apt-get update && apt-get install -y --no-install-recommends <package> \
-  && rm -rf /var/lib/apt/lists/*
-USER sandbox
-```
-
-Build your custom image, then create the OpenShell sandbox from that image instead of `oab-native-dev-sandbox:latest`.
+See [Agent-Installable Tools](agent-installable-tools.md) for the full pattern.
 
 ## Troubleshooting
 
 | Symptom | Check | Fix |
 | --- | --- | --- |
 | `failed to query Docker daemon version` | Docker access | Add user to `docker` group and start a new login session |
-| Dev image not found | `docker pull ghcr.io/openabdev/openab-native-dev-sandbox:latest` fails | Use the local `docker build -f openshell/Dockerfile.dev .` path |
 | Bot token error | `test -n "$DISCORD_BOT_TOKEN" && echo set` | Re-export the token in the shell that starts OpenAB |
 | Auth file searched under `/root` | Log says `/root/.openab/...` | Run with `HOME=/sandbox` |
 | Bot online but no reply | `openab-agent auth status` | Re-run `openab-agent auth codex-oauth --no-browser` |
 | Network or model calls blocked | Discord connects, but model/tool calls fail | See the OpenShell preset ADR; broad policy recommendations are still testing in progress |
-| Tool install says `/usr/local/bin` or `apt` is not writable | The running sandbox user is non-root | Use the user-local install paths above, or bake system packages into the dev image |
-| Runtime package install hangs | Package manager is building from source | Prefer tools preinstalled in the dev image; avoid `brew install` during a bot turn |
+| Tool install says `/usr/local/bin` or `apt` is not writable | The running sandbox user is non-root | Install to `/sandbox/bin` or another `/sandbox` path |
+| Tool requires system libraries not present in the image | Binary exists but fails at launch | Choose a static upstream binary, extract compatible `.deb` dependencies into `/sandbox`, or build a custom image only for that deployment |
 
 ## E2E Test Rules
 
 When testing this guide with an agent, keep the test honest:
 
-- Use the dev sandbox image or `openshell/Dockerfile.dev`.
+- Use `openshell/Dockerfile`.
 - Treat the guide author and the E2E test subject as separate roles.
 - If the test subject hits a build or setup failure, let the test subject diagnose, edit, rebuild, and report the fix. Do not patch the guide or image from outside the test and then count that run as one-shot success.
 - Do not rewrite OpenShell policy files to make the test pass.
@@ -303,6 +289,7 @@ When testing this guide with an agent, keep the test honest:
 - Do not copy host `~/.codex/auth.json` into `/sandbox/.openab/agent/auth.json`; `openab-agent` has its own auth file shape.
 - If auth is unavailable, stop at the auth step and report that browser login is required.
 - If a policy file fails to apply, report a docs/policy compatibility issue instead of generating a private fixed policy.
+- Prove runtime installability with at least one `/sandbox/bin` install test.
 - Always delete disposable test sandboxes and scratch files after the run.
 
 ## Optional: Restrict To One Discord Channel
@@ -337,6 +324,7 @@ openshell sandbox delete oab
 
 ## Advanced Reading
 
+- [Agent-Installable Tools](agent-installable-tools.md) — runtime install pattern for tools under the agent home directory.
 - [OpenShell OpenAB preset module ADR](adr/openshell-openab-preset-module.md) — discussion of future `safe-agent`, `web-agent`, and `dev-agent` presets, including network policy recommendations that are still testing in progress.
 - [Native Agent](native-agent.md) — `openab-agent` auth and model options.
 - [Secrets Management](secrets-management.md) — production secret patterns.

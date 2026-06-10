@@ -14,7 +14,8 @@ OpenShell sandboxes. Kubernetes is operationally familiar to many platform
 teams, but it is heavy for average clients. OpenShell gives OpenAB a stronger
 agent sandbox boundary, but the current setup experience exposes too many
 low-level details: sandbox image shape, provider credentials, network policy,
-WebSocket policy, tool installation, writable paths, and gateway placement.
+WebSocket policy, runtime tool installation paths, writable paths, and gateway
+placement.
 
 During the Google Chat + Kiro + OpenShell POC, the team validated the broad
 shape but found the OpenShell route difficult to operate reliably without a
@@ -38,8 +39,8 @@ the common case simple while preserving OpenShell's security value.
 ## 2. Question
 
 Is there a very simple, singular configuration that enables normal OpenAB agent
-functionality, including web access and common tools, without forcing average
-clients to understand every OpenShell policy primitive?
+functionality, including web access and agent-installable tools, without
+forcing average clients to understand every OpenShell policy primitive?
 
 Today, based on the POC, the answer is effectively **no**. OpenShell does not
 currently feel like it has a single "just make it work like Kubernetes" config
@@ -58,12 +59,13 @@ preset: openab-full-agent
 network:
   mode: broad_web
 tools:
-  mode: image_bundled
+  mode: runtime_user_local
 filesystem:
   writable:
     - /sandbox
-    - /tmp
+    - /sandbox/bin
     - /sandbox/.local
+    - /sandbox/tmp
 secrets:
   provider: openab
 gateway:
@@ -96,15 +98,15 @@ Recent local E2E testing found:
 
 - The bot can come online and reply when launched with `HOME=/sandbox` and a
   valid `openab-agent` auth file.
-- The original runtime image is not suitable for system package installation.
+- The running sandbox is not suitable for system package installation.
   Attempts to install tools into `/usr/local/bin` or use `apt` fail under the
-  non-root sandbox user.
-- Most local users need an install-friendly dev sandbox. The recommended
-  direction is user-local installs under `/sandbox`, with common tools
-  preinstalled in the image.
-- Small standalone binaries can be staged under `/sandbox/bin`; Go, npm, and
-  Python installs should write under `/sandbox/go`, `/sandbox/.local`, and
-  `/sandbox/.venv` or other `/sandbox` paths.
+  non-root sandbox user, and that is an intended boundary.
+- Most local users need an install-friendly sandbox. The recommended direction
+  is runtime user-local installs under `/sandbox`, not a large image that
+  preinstalls every possible tool.
+- Small standalone binaries can be staged under `/sandbox/bin`; larger tool
+  trees should live under `/sandbox`; scratch downloads should use
+  `/sandbox/tmp`.
 - Host Codex auth (`~/.codex/auth.json`) is not interchangeable with
   `openab-agent` auth (`/sandbox/.openab/agent/auth.json`).
 - The proposed `oab-open.yaml` broad policy needs compatibility validation
@@ -130,7 +132,7 @@ Recommended docs stance while testing continues:
 | Agent rights by default | A pod/container can often run with broad outbound network, mounted env/secrets, writable container FS depending on image/user | Sandbox user, limited writable paths, network endpoints must be allowed, credentials resolved through provider model |
 | Filesystem | Image FS plus writable container layer; can install tools if root/package manager is available | `/usr`, `/etc`, `/lib`, package-manager state are effectively not runtime-editable; writable paths are mainly `/sandbox` and `/tmp` |
 | Network/web | Usually broad outbound unless NetworkPolicy/firewall restricts it | Network is policy-driven; endpoints often need allowlisting |
-| Tool availability | Whatever is in image; can sometimes apt/pip/npm install at runtime | Better to bake tools into image; runtime installs are friction-heavy |
+| Tool availability | Whatever is in image; can sometimes apt/pip/npm install at runtime | Keep the image lean; install extra tools at runtime into `/sandbox` |
 | Secrets | Kubernetes Secrets/env/volumes are straightforward and raw values enter container | OpenShell provider values may appear as resolver handles, not raw env values; app must cooperate with resolution/rewrites |
 | WebSocket/gateway | Usually direct networking between services/pods or host ingress | WebSocket policy/credential rewrite/proxy behavior can be tricky |
 | Setup style | YAML-heavy but familiar: Deployment, Secret, Service, Ingress | Sandbox image + provider + policy + uploads + endpoint discovery |
@@ -145,9 +147,9 @@ Recommended docs stance while testing continues:
 | Full web browsing / HTTP calls | Usually yes by default | Possible, but needs broad or wildcard-like network policy |
 | Google Chat webhook | Via ingress/service/gateway | Gateway likely still best outside sandbox or as managed component |
 | Google API credentials | Mount secret/env directly | Prefer host gateway or provider-injected short-lived tokens |
-| CLI tools like `gws`, `gh`, `aws`, `python`, `node` | Bake into image or install runtime | Strongly prefer bake into image |
+| CLI tools like `gws`, `aws`, `terraform`, `kubectl` | Bake into image or install runtime | Prefer agent-installed standalone tools under `/sandbox`; bake only bootstrap/runtime dependencies |
 | File editing | Whatever the container user can write | Mostly `/sandbox` unless policy/image is designed otherwise |
-| Package installs | Easy if root + network + package manager | Not good in runtime sandbox; use image build or dev sandbox |
+| Package installs | Easy if root + network + package manager | System package installs are not expected; use user-local binary/archive/`.deb` extraction patterns under `/sandbox` |
 | Long-running bot | Deployment/restart policy | Possible, but more host/OpenShell lifecycle dependent |
 | Strict per-agent security | Possible but requires Kubernetes hardening | Native strength of OpenShell |
 
@@ -190,13 +192,13 @@ OpenShell policy primitives. OpenAB should expose a small number of presets.
 | Preset | Purpose | Default Rights |
 |---|---|---|
 | `safe-agent` | Enterprise/security-sensitive deployments | Narrow endpoints, no runtime installs, secrets via provider |
-| `web-agent` | Most normal OpenAB bots | Broad HTTPS/WebSocket outbound, common tools baked in, writable `/sandbox` |
-| `dev-agent` | Debug/setup only | Broader network, package install paths under `/sandbox`, short-lived, not production webhook |
+| `web-agent` | Most normal OpenAB bots | Broad HTTPS/WebSocket outbound, bootstrap tools only, agent-installable `/sandbox` |
+| `dev-agent` | Debug/setup only | Broader network, same user-local install paths under `/sandbox`, short-lived, not production webhook |
 
-The most useful default is probably `web-agent`: broad web access, common CLI
-tools, browser/search/GitHub/Google Workspace tools preinstalled, writable
-`/sandbox`, and a managed gateway path. This gets close to Kubernetes
-convenience without pretending the sandbox has no security boundary.
+The most useful default is probably `web-agent`: broad web access, bootstrap
+download/search tools, writable `/sandbox`, runtime user-local installs, and a
+managed gateway path. This gets close to Kubernetes convenience without
+pretending the sandbox has no security boundary.
 
 ### 6.1 Policy Recommendations
 
@@ -205,9 +207,9 @@ as a stable public contract.
 
 | Tier | Use case | Network posture | Install posture | Docs posture |
 |---|---|---|---|---|
-| `dev-agent` | First successful local OpenAB bot and normal developer use | Broad enough for model providers, Discord, GitHub, npm/PyPI, Google APIs as needed | Common tools preinstalled; Go/npm/Python/user binaries write under `/sandbox` | `docs/openshell.md` quick start |
-| `web-agent` | Normal deployed OpenAB assistant with web/API tools | Broad HTTPS/WebSocket egress for selected providers and tools | Tools preinstalled in image; limited user-local `/sandbox/bin` for one-off binaries | Policy-specific docs after validation |
-| `runtime-agent` | Smaller production-like bot | Only what the image and current OpenShell defaults require to connect Discord and model APIs | No runtime installs; writable `/sandbox` only | Advanced/runtime note |
+| `dev-agent` | First successful local OpenAB bot and normal developer use | Broad enough for model providers, Discord, GitHub, npm/PyPI, Google APIs as needed | Runtime user-local installs under `/sandbox`; no system package installs | `docs/openshell.md` quick start |
+| `web-agent` | Normal deployed OpenAB assistant with web/API tools | Broad HTTPS/WebSocket egress for selected providers and tools | Bootstrap tools in image; agent installs extras under `/sandbox` | Policy-specific docs after validation |
+| `runtime-agent` | Smaller production-like bot | Only what the image and current OpenShell defaults require to connect Discord and model APIs | Minimal runtime image; optional user-local `/sandbox/bin` installs if policy permits | Advanced/runtime note |
 | `safe-agent` | Enterprise/security-sensitive deployment | Narrow endpoint allowlist per agent/provider | No runtime installs | Production hardening guide |
 
 Policy implementation guidance:
@@ -220,7 +222,8 @@ Policy implementation guidance:
   one-shot.
 - Treat policy edits made during E2E as findings, not as test harness fixes.
 - Separate network policy from install policy. A sandbox can have broad egress
-  and still be intentionally non-root/non-installable.
+  and still be intentionally non-root while allowing user-local installs under
+  `/sandbox`.
 
 ## 7. Preset Responsibilities
 
@@ -231,7 +234,8 @@ An `openab-full-agent` or `web-agent` preset should own the following decisions:
 - Make `/sandbox`, `/sandbox/.local`, `/sandbox/.cache`, and `/tmp` writable.
 - Keep system paths read-only.
 - Run as the non-root `sandbox` user.
-- Include common tools in the image rather than requiring runtime installs.
+- Include only bootstrap/runtime essentials in the image. Extra tools should be
+  installed by the agent into `/sandbox` using the documented user-local pattern.
 - Enable broad outbound HTTPS for normal web/model/API access.
 - Enable WebSocket egress for OpenAB gateway connectivity.
 - Provide a clear gateway mode: host gateway, managed gateway, or direct
@@ -258,7 +262,8 @@ agent path feel obvious.
 
 OpenAB should consider an OpenShell preset module with three layers:
 
-1. A blessed runtime image family with common agent tools already installed.
+1. A blessed runtime image family with bootstrap tools and writable user-local
+   install paths.
 2. A small preset policy vocabulary such as `safe-agent`, `web-agent`, and
    `dev-agent`.
 3. A gateway and credential pattern that handles webhook platforms without
