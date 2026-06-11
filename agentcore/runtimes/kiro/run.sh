@@ -5,7 +5,7 @@ set -euo pipefail
 
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-${AWS_REGION:-us-east-1}}"
 export AWS_REGION="${AWS_REGION:-$AWS_DEFAULT_REGION}"
-export HOME="/home/agent"
+export HOME="${HOME:-/home/agent}"
 
 WORKLOAD_NAME="${AGENTCORE_WORKLOAD_NAME:-kiro-coding-agent}"
 CREDENTIAL_PROVIDER="${AGENTCORE_CREDENTIAL_PROVIDER:-kiro-api-key}"
