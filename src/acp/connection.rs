@@ -296,14 +296,11 @@ impl AcpConnection {
         // Preserve the real HOME so agents can find OAuth/auth files (~/.codex,
         // ~/.claude, ~/.config/gh, etc.). working_dir is already set via
         // current_dir() above and is not necessarily the user's home directory.
-        cmd.env(
-            "HOME",
-            std::env::var("HOME").unwrap_or_else(|_| working_dir.into()),
-        );
-        cmd.env(
-            "PATH",
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into()),
-        );
+        let home = std::env::var("HOME").unwrap_or_else(|_| working_dir.into());
+        cmd.env("HOME", &home);
+        let base_path =
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+        cmd.env("PATH", format!("{}/.local/bin:{}", home, base_path));
         #[cfg(unix)]
         {
             cmd.env(
