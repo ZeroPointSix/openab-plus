@@ -132,10 +132,6 @@ def strip_sender_context(blocks: list) -> str:
 # ---------------------------------------------------------------------------
 
 KIRO_ACP_CMD = "kiro-cli acp --trust-all-tools\n"
-# Marker we look for to confirm kiro-cli ACP mode is ready
-ACP_READY_MARKER = '"jsonrpc"'
-
-
 class ShellSession:
     """Manages a persistent shell connection to a microVM running kiro-cli ACP."""
 
@@ -161,6 +157,14 @@ class ShellSession:
             shell_id=self.shell_id,
             reconnect_config=reconnect_config,
         ).__aenter__()
+
+        # Clear stale state from any prior connection
+        self._line_buffer = ""
+        while not self._response_queue.empty():
+            try:
+                self._response_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
         # Start reader task
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -204,8 +208,12 @@ class ShellSession:
                         elif "method" in msg:
                             # Forward notification to OAB stdout
                             write_stdout(msg)
-        except Exception:
-            pass  # connection closed
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            # Log to stderr so OAB operator can see it; don't crash the adapter
+            import sys as _sys
+            print(f"[agentcore-acp] shell reader error: {e}", file=_sys.stderr, flush=True)
 
     async def send_and_wait(self, msg: dict, timeout: float = 300.0) -> dict | None:
         """Send a JSON-RPC request to kiro-cli and wait for the response."""
@@ -260,10 +268,9 @@ class AcpAdapter:
 
     async def _get_or_create_shell(self, acp_sid: str, blocks: list) -> ShellSession:
         """Get existing shell session or create a new one."""
-        if acp_sid in self.sessions:
-            session = self.sessions[acp_sid]
-            if session._initialized:
-                return session
+        session = self.sessions.get(acp_sid)
+        if session is not None and session._initialized:
+            return session
 
         # Derive runtime session_id and shell_id from prompt context
         runtime_sid = extract_session_id_from_prompt(blocks)
@@ -341,6 +348,15 @@ class AcpAdapter:
                 "params": params,
             })
 
+    async def handle_session_destroy(self, id, params: dict):
+        """Clean up a session and release resources."""
+        acp_sid = params.get("sessionId", "")
+        session = self.sessions.pop(acp_sid, None)
+        if session and session._initialized:
+            await session.close()
+        if id is not None:
+            write_response(id, {})
+
     async def handle_request_permission(self, id, params: dict):
         write_response(id, {"approved": True})
 
@@ -375,6 +391,8 @@ class AcpAdapter:
                 await self.handle_cancel(params)
             elif method == "session/load":
                 await self.handle_session_load(msg_id, params)
+            elif method in ("session/destroy", "session/stop"):
+                await self.handle_session_destroy(msg_id, params)
             elif method == "session/request_permission":
                 if msg_id is not None:
                     await self.handle_request_permission(msg_id, params)
