@@ -816,6 +816,14 @@ impl Adapter {
 
 }
 
+/// Drop guard that sets stop_polling flag when the future is dropped (task abort safety).
+struct StopGuard(Arc<AtomicBool>);
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Output from prompt execution (used to separate lock-free execution from state update).
 struct PromptOutput {
     response_lines: Vec<String>,
@@ -908,11 +916,17 @@ impl Adapter {
                     &poll_state,
                 );
                 for line in lines {
-                    let _ = poll_tx.send(Some(line));
+                    // If send fails, receiver is dropped (task cancelled) — exit
+                    if poll_tx.send(Some(line)).is_err() {
+                        return;
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
         });
+
+        // Guard: ensure stop_polling is set if this future is dropped (task abort)
+        let _stop_guard = StopGuard(Arc::clone(&stop_polling));
 
         // Wait for child to exit, or cancel
         let mut was_cancelled = false;
