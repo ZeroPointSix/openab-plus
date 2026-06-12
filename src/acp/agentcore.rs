@@ -120,6 +120,11 @@ where
             let id = msg.get("id").cloned().unwrap_or(Value::Null);
             let params = msg.get("params").cloned().unwrap_or(json!({}));
 
+            // Skip messages without a method (e.g. stray responses) — same fix as Python F1
+            if method.is_empty() {
+                continue;
+            }
+
             match method {
                 "initialize" => {
                     self.write_response(
