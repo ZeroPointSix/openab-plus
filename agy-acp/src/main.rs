@@ -31,10 +31,10 @@ impl Adapter {
         cancelled: Arc<AtomicBool>,
         out_tx: mpsc::UnboundedSender<Option<String>>,
     ) -> PromptOutput {
-        let agy_cmd = std::iter::once(Adapter::agy_bin().to_string())
-            .chain(args.iter().cloned())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let escaped_args: Vec<String> = args.iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect();
+        let agy_cmd = format!("{} {}", Adapter::agy_bin(), escaped_args.join(" "));
         let spawn_result = Command::new("bash")
             .args(["-lc", &agy_cmd])
             .current_dir(&working_dir)
