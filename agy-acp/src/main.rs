@@ -369,6 +369,12 @@ impl Adapter {
                 continue;
             }
 
+            // Skip narration-only text if OPENAB_TOOL_DISPLAY filtering is active
+            if Self::should_filter_narration() && Self::is_narration(&text) {
+                guard.emitted_len.insert(idx, text.len());
+                continue;
+            }
+
             let new_text = &text[emitted..];
             guard.emitted_len.insert(idx, text.len());
 
@@ -419,6 +425,16 @@ impl Adapter {
             return false;
         }
         lines.iter().all(|l| l.trim_start().starts_with("I will"))
+    }
+
+    /// Check if narration filtering is enabled via OPENAB_TOOL_DISPLAY.
+    fn should_filter_narration() -> bool {
+        std::env::var("OPENAB_TOOL_DISPLAY")
+            .map(|v| {
+                let lower = v.to_lowercase();
+                lower == "compact" || lower == "none" || lower == "off"
+            })
+            .unwrap_or(false)
     }
 
     fn evict_if_needed(&mut self) {
@@ -718,7 +734,13 @@ impl Adapter {
         }
 
         // Build final response
-        let stop_reason = if was_cancelled { "cancelled" } else { "end_turn" };
+        let stop_reason = if was_cancelled {
+            "cancelled"
+        } else if result.as_ref().map(|s| !s.success()).unwrap_or(false) {
+            "error"
+        } else {
+            "end_turn"
+        };
 
         match result {
             Ok(status) => {
@@ -866,17 +888,46 @@ async fn main() {
 
         let output = match req.method.as_deref() {
             Some("initialize") => {
-                let adapter = adapter.lock().await;
-                vec![serde_json::to_string(&adapter.handle_initialize(id)).unwrap()]
+                let adapter = Arc::clone(&adapter);
+                let out_tx = out_tx.clone();
+                pending_prompts += 1;
+                tokio::spawn(async move {
+                    let adapter = adapter.lock().await;
+                    let line =
+                        serde_json::to_string(&adapter.handle_initialize(id)).unwrap();
+                    let _ = out_tx.send(Some(line));
+                    let _ = out_tx.send(None);
+                });
+                Vec::new()
             }
             Some("session/new") => {
-                let mut adapter = adapter.lock().await;
-                vec![serde_json::to_string(&adapter.handle_session_new(id)).unwrap()]
+                let adapter = Arc::clone(&adapter);
+                let out_tx = out_tx.clone();
+                pending_prompts += 1;
+                tokio::spawn(async move {
+                    let mut adapter = adapter.lock().await;
+                    let line =
+                        serde_json::to_string(&adapter.handle_session_new(id)).unwrap();
+                    let _ = out_tx.send(Some(line));
+                    let _ = out_tx.send(None);
+                });
+                Vec::new()
             }
             Some("session/load") => {
                 let params = req.params.unwrap_or(json!({}));
-                let mut adapter = adapter.lock().await;
-                vec![serde_json::to_string(&adapter.handle_session_load(id, &params)).unwrap()]
+                let adapter = Arc::clone(&adapter);
+                let out_tx = out_tx.clone();
+                pending_prompts += 1;
+                tokio::spawn(async move {
+                    let mut adapter = adapter.lock().await;
+                    let line = serde_json::to_string(
+                        &adapter.handle_session_load(id, &params),
+                    )
+                    .unwrap();
+                    let _ = out_tx.send(Some(line));
+                    let _ = out_tx.send(None);
+                });
+                Vec::new()
             }
             Some("session/prompt") => {
                 let params = req.params.unwrap_or(json!({}));
