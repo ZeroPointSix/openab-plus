@@ -931,7 +931,7 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
 
         if !config.agent.command_explicit {
             config.agent = AgentConfig {
-                command: "uv".into(),
+                command: "/home/agent/.local/bin/uv".into(),
                 args: vec![
                     "run".into(),
                     "--script".into(),
@@ -1335,7 +1335,7 @@ bot_token = "t"
 runtime_arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"
 "#;
         let cfg = parse_config(toml, "test").unwrap();
-        assert_eq!(cfg.agent.command, "uv");
+        assert_eq!(cfg.agent.command, "/home/agent/.local/bin/uv");
         assert!(cfg.agent.args.contains(&"--runtime-arn".to_string()));
         assert!(cfg
             .agent
