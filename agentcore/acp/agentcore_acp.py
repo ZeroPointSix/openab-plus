@@ -198,12 +198,9 @@ class ShellSession:
                             continue
                         # Strip ANSI escape sequences that PTY may inject
                         line = ANSI_ESCAPE_RE.sub("", line)
-                        # Only attempt parse if line looks like JSON
-                        if not line.startswith("{"):
-                            continue
-                        try:
-                            msg = json.loads(line)
-                        except json.JSONDecodeError:
+                        # Extract JSON object even if prefixed by PTY prompt garbage
+                        msg = _extract_json_object(line)
+                        if msg is None or not isinstance(msg, dict):
                             continue
 
                         if not isinstance(msg, dict) or "jsonrpc" not in msg:
