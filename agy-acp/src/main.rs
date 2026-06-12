@@ -80,7 +80,7 @@ struct Adapter {
     working_dir: String,
     conversations_dir: PathBuf,
     state_file: PathBuf,
-    available_models: Vec<String>,
+    available_models: Option<Vec<String>>,
 }
 
 impl Adapter {
@@ -94,17 +94,42 @@ impl Adapter {
                 .unwrap_or_else(|_| "/tmp".to_string()),
             conversations_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/conversations"),
             state_file: state_dir.join("sessions.json"),
-            available_models: Self::fetch_available_models(),
+            available_models: None,
         }
     }
 
-    /// Run `agy models` and parse the output into a list of model names.
+    /// Run `agy models` with a 5s timeout and parse the output into a list of model names.
     fn fetch_available_models() -> Vec<String> {
-        std::process::Command::new("agy")
+        use std::time::Instant;
+        let start = Instant::now();
+        let child = std::process::Command::new("agy")
             .arg("models")
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        // Poll with 5s timeout
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() { return Vec::new(); }
+                    break;
+                }
+                Ok(None) => {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        let _ = child.kill();
+                        return Vec::new();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => return Vec::new(),
+            }
+        }
+        child.wait_with_output()
             .ok()
-            .filter(|o| o.status.success())
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -115,16 +140,24 @@ impl Adapter {
             .unwrap_or_default()
     }
 
+    /// Get available models, fetching lazily on first access.
+    fn get_available_models(&mut self) -> &[String] {
+        if self.available_models.is_none() {
+            self.available_models = Some(Self::fetch_available_models());
+        }
+        self.available_models.as_ref().unwrap()
+    }
+
     /// Build the ACP configOptions JSON for the model selector.
-    fn config_options_json(&self, model_id: Option<&str>) -> Value {
-        if self.available_models.is_empty() {
+    fn config_options_json(&mut self, model_id: Option<&str>) -> Value {
+        let models = self.get_available_models();
+        if models.is_empty() {
             return json!([]);
         }
         let current = model_id
-            .or_else(|| self.available_models.first().map(|s| s.as_str()))
+            .or_else(|| models.first().map(|s| s.as_str()))
             .unwrap_or("");
-        let options: Vec<Value> = self
-            .available_models
+        let options: Vec<Value> = models
             .iter()
             .map(|name| json!({ "value": name, "name": name }))
             .collect();
@@ -760,7 +793,11 @@ impl Adapter {
         args.push("--add-dir".to_string());
         args.push(self.working_dir.clone());
         if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
-            args.extend(extra.split_whitespace().map(String::from));
+            if let Ok(parsed) = shell_words::split(&extra) {
+                args.extend(parsed);
+            } else {
+                eprintln!("[agy-acp] WARN: failed to parse AGY_EXTRA_ARGS, ignoring");
+            }
         }
         if let Some(session) = self.sessions.get(&session_id) {
             if let Some(conv_id) = &session.conversation_id {
@@ -1281,7 +1318,7 @@ mod tests {
             working_dir: "/tmp".to_string(),
             conversations_dir: PathBuf::from("/tmp"),
             state_file: PathBuf::from("/tmp/sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
         let response = adapter.handle_initialize(json!(1));
         assert_eq!(
@@ -1306,7 +1343,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"),
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
         adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
@@ -1335,7 +1372,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"),
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         let response = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -1361,7 +1398,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir.clone(),
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         let before = adapter.conversation_snapshot();
@@ -1390,7 +1427,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir.clone(),
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         let before = adapter.conversation_snapshot();
@@ -1412,7 +1449,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"),
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
@@ -1475,7 +1512,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir,
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         let result = adapter.read_response_from_db("test-conv", -1);
@@ -1631,7 +1668,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir,
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         let result = adapter.read_response_from_db("multi", -1);
@@ -1666,7 +1703,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir,
             state_file: root.join("sessions.json"),
-            available_models: vec![],
+            available_models: Some(vec![]),
         };
 
         let result = adapter.read_response_from_db("empty", -1);
