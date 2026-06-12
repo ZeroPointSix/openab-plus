@@ -595,8 +595,7 @@ async fn build_signed_request(
     let shell_id = format!("oab-{}", hex::encode(&hash[..8]));
 
     let query = format!(
-        "qualifier=DEFAULT&runtimeSessionId={}&shellId={shell_id}",
-        urlencoding::encode(session_id),
+        "qualifier=DEFAULT&shellId={shell_id}",
     );
 
     let uri = format!("https://{host}{path}?{query}");
