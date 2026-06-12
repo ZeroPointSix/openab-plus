@@ -480,9 +480,7 @@ where
             }
         });
 
-        // Wait for kiro-cli to boot, then send ACP initialize handshake
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
+        // Send ACP initialize to the agent (it will respond once booted)
         let init_msg = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 0,
@@ -494,12 +492,24 @@ where
             }
         });
         let init_data = format!("{}\n", serde_json::to_string(&init_msg)?);
-        {
+
+        // Retry sending initialize — the agent may need a moment to start
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
             let mut w = ws_write.lock().await;
             let mut frame = Vec::with_capacity(1 + init_data.len());
             frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(init_data.as_bytes());
-            w.send(Message::Binary(frame)).await?;
+            match w.send(Message::Binary(frame)).await {
+                Ok(_) => break,
+                Err(e) if attempt < 2 => {
+                    info!(attempt, "initialize send failed, retrying: {e}");
+                    continue;
+                }
+                Err(e) => return Err(anyhow!("failed to send initialize after retries: {e}")),
+            }
         }
 
         // Wait for initialize response (consume it — don't forward)
