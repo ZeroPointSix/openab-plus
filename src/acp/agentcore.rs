@@ -441,7 +441,9 @@ where
                                     }
                                     // Extract JSON object using brace-counting (handles PTY prefix noise)
                                     if let Some(json_str) = extract_json_object(&trimmed) {
-                                        let _ = line_tx.send(json_str);
+                                        if line_tx.send(json_str).is_err() {
+                                            return; // receiver dropped — exit pump
+                                        }
                                     }
                                 }
                             }
