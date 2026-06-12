@@ -69,9 +69,17 @@ impl Adapter {
         "/usr/local/bin/agy"
     }
 
+    /// Build PATH with common agent binary locations prepended.
+    pub fn augmented_path() -> String {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
+        let base = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+        format!("{home}/bin:{home}/.local/bin:{home}/.local/share/fnm/aliases/default/bin:{base}")
+    }
+
     pub fn fetch_available_models() -> Vec<String> {
-        std::process::Command::new("bash")
-            .args(["-lc", &format!("{} models", Self::agy_bin())])
+        std::process::Command::new(Self::agy_bin())
+            .arg("models")
+            .env("PATH", Self::augmented_path())
             .stderr(std::process::Stdio::null())
             .output()
             .ok()
