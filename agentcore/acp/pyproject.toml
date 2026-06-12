@@ -1,10 +1,10 @@
 [project]
 name = "agentcore-acp"
-version = "0.1.0"
-description = "ACP stdio adapter for Amazon Bedrock AgentCore Runtime"
+version = "0.2.0"
+description = "ACP↔WebSocket bridge for Amazon Bedrock AgentCore Runtime"
 requires-python = ">=3.11"
 dependencies = [
-    "boto3==1.38.34",
+    "bedrock-agentcore>=0.1.0",
 ]
 
 [project.scripts]

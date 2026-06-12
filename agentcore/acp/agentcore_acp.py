@@ -1,51 +1,49 @@
 #!/usr/bin/env python3
-"""agentcore-acp: ACP stdio adapter for Amazon Bedrock AgentCore Runtime.
+"""agentcore-acp: ACP↔WebSocket bridge for Amazon Bedrock AgentCore Runtime.
 
-Bridges OAB's ACP JSON-RPC protocol to AgentCore's InvokeAgentRuntime API.
-OAB spawns this as a subprocess — zero OAB code changes required.
+Bridges OAB's ACP JSON-RPC protocol to AgentCore's InvokeAgentRuntimeCommandShell
+WebSocket API.  Opens a persistent PTY shell in the microVM and runs kiro-cli in
+native ACP mode, forwarding JSON-RPC messages bidirectionally.
 
 Usage:
-    agentcore-acp --runtime-arn ARN --region REGION [--cancel-strategy noop|stop]
+    agentcore-acp --runtime-arn ARN --region REGION
 """
 
 import argparse
+import asyncio
 import json
 import re
 import sys
-import threading
-import time
+import hashlib
 
-import boto3
+from bedrock_agentcore.runtime import AgentCoreRuntimeClient, ReconnectConfig, ShellChannel
 
 # ---------------------------------------------------------------------------
 # ACP stdio helpers
 # ---------------------------------------------------------------------------
 
 
-def write_response(id: int, result=None, error=None):
-    """Write a JSON-RPC response to stdout."""
+def write_stdout(msg: dict):
+    """Write a JSON-RPC message to stdout (toward OAB)."""
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def write_response(id, result=None, error=None):
     msg = {"jsonrpc": "2.0", "id": id}
     if error is not None:
         msg["error"] = error
     else:
         msg["result"] = result if result is not None else {}
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    write_stdout(msg)
 
 
 def write_notification(method: str, params: dict):
-    """Write a JSON-RPC notification to stdout."""
     msg = {"jsonrpc": "2.0", "method": method, "params": params}
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+    write_stdout(msg)
 
 
 def emit_text_chunk(text: str):
-    """Emit a text chunk in the format OAB's classify_notification expects.
-
-    OAB parses: params.update.sessionUpdate == "agent_message_chunk"
-                params.update.content.text == <the text>
-    """
     write_notification("session/update", {
         "update": {
             "sessionUpdate": "agent_message_chunk",
@@ -64,7 +62,6 @@ SENDER_CTX_RE = re.compile(
 
 
 def _extract_json_object(text: str) -> dict | None:
-    """Extract the first complete JSON object from text using brace counting."""
     start = text.find("{")
     if start == -1:
         return None
@@ -97,7 +94,7 @@ def _extract_json_object(text: str) -> dict | None:
 
 
 def extract_session_id_from_prompt(blocks: list) -> str | None:
-    """Parse <sender_context> from prompt blocks to build deterministic session ID."""
+    """Parse <sender_context> to build deterministic session ID (≥33 chars)."""
     for block in blocks:
         if isinstance(block, dict) and block.get("type") == "text":
             m = SENDER_CTX_RE.search(block.get("text", ""))
@@ -107,20 +104,23 @@ def extract_session_id_from_prompt(blocks: list) -> str | None:
                     platform = ctx.get("channel", "unknown")
                     thread_id = ctx.get("thread_id") or ctx.get("channel_id", "")
                     sid = f"oab-{platform}-thread-{thread_id}"
-                    # Guarantee ≥33 chars
                     if len(sid) < 33:
                         sid = sid + "0" * (33 - len(sid))
                     return sid
     return None
 
 
+def derive_shell_id(session_id: str) -> str:
+    """Deterministic shell_id from session_id (1-128 chars, alphanumeric/underscore/hyphen)."""
+    h = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+    return f"acp-{h}"
+
+
 def strip_sender_context(blocks: list) -> str:
-    """Extract plain prompt text from blocks, stripping sender_context."""
     parts = []
     for block in blocks:
         if isinstance(block, dict) and block.get("type") == "text":
             text = block.get("text", "")
-            # Remove sender_context block
             text = SENDER_CTX_RE.sub("", text).strip()
             if text:
                 parts.append(text)
@@ -128,186 +128,234 @@ def strip_sender_context(blocks: list) -> str:
 
 
 # ---------------------------------------------------------------------------
-# AgentCore client
+# Shell session manager
 # ---------------------------------------------------------------------------
 
+KIRO_ACP_CMD = "kiro-cli acp --trust-all-tools\n"
+# Marker we look for to confirm kiro-cli ACP mode is ready
+ACP_READY_MARKER = '"jsonrpc"'
 
-class AgentCoreClient:
-    def __init__(self, runtime_arn: str, region: str, cancel_strategy: str):
+
+class ShellSession:
+    """Manages a persistent shell connection to a microVM running kiro-cli ACP."""
+
+    def __init__(self, client: AgentCoreRuntimeClient, runtime_arn: str,
+                 session_id: str, shell_id: str):
+        self.client = client
         self.runtime_arn = runtime_arn
-        self.region = region
-        self.cancel_strategy = cancel_strategy
-        self.client = boto3.client("bedrock-agentcore", region_name=region)
-        self._active_session: str | None = None
+        self.session_id = session_id
+        self.shell_id = shell_id
+        self.shell = None
+        self._reader_task: asyncio.Task | None = None
+        self._line_buffer = ""
+        self._response_queue: asyncio.Queue = asyncio.Queue()
+        self._ready = asyncio.Event()
+        self._initialized = False
 
-    def invoke_streaming(self, session_id: str, prompt: str):
-        """Call InvokeAgentRuntime and yield response text chunks."""
-        self._active_session = session_id
-        payload = json.dumps({"prompt": prompt}).encode()
+    async def connect(self):
+        """Open shell and start kiro-cli ACP if not already running."""
+        reconnect_config = ReconnectConfig(max_retries=3, base_delay=1.0)
+        self.shell = await self.client.open_shell(
+            self.runtime_arn,
+            session_id=self.session_id,
+            shell_id=self.shell_id,
+            reconnect_config=reconnect_config,
+        ).__aenter__()
 
-        response = self.client.invoke_agent_runtime(
-            agentRuntimeArn=self.runtime_arn,
-            runtimeSessionId=session_id,
-            payload=payload,
-        )
+        # Start reader task
+        self._reader_task = asyncio.create_task(self._read_loop())
 
-        content_type = response.get("contentType", "")
-
-        if "text/event-stream" in content_type:
-            # SSE streaming response
-            # TODO(phase2): Replace iter_lines() with proper SSE parser (httpx-sse)
-            # to handle TCP chunk boundaries correctly. Acceptable for PoC since
-            # AgentCore likely flushes complete lines per event.
-            for line in response["response"].iter_lines(chunk_size=1024):
-                if not line:
-                    continue
-                decoded = line.decode("utf-8") if isinstance(line, bytes) else line
-                # SSE format: "data: <content>"
-                if decoded.startswith("data: "):
-                    yield decoded[6:]
-                elif decoded.startswith("data:"):
-                    yield decoded[5:]
-                # Skip SSE comments (:) and event/id lines
-        elif content_type == "application/json":
-            # Non-streaming JSON response
-            chunks = []
-            for chunk in response.get("response", []):
-                chunks.append(
-                    chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
-                )
-            full = "".join(chunks)
+        if not self.shell.reconnected:
+            # Fresh shell — launch kiro-cli in ACP mode
+            await self.shell.send(KIRO_ACP_CMD)
+            # Wait for kiro-cli to be ready (first JSON-RPC output)
             try:
-                data = json.loads(full)
-                yield data.get("message", data.get("response", full))
-            except json.JSONDecodeError:
-                yield full
+                await asyncio.wait_for(self._ready.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                pass  # proceed anyway — kiro-cli may output differently
         else:
-            # Raw response
-            for chunk in response.get("response", []):
-                yield chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            # Reconnected — kiro-cli should still be running
+            self._ready.set()
+        self._initialized = True
 
-        self._active_session = None
-
-    def cancel(self, session_id: str):
-        """Cancel based on configured strategy."""
-        if self.cancel_strategy == "noop":
-            return
-        # strategy == "stop": terminate the session
+    async def _read_loop(self):
+        """Read frames from shell and route JSON-RPC messages."""
         try:
-            self.client.stop_runtime_session(
-                agentRuntimeArn=self.runtime_arn,
-                runtimeSessionId=session_id,
-            )
+            async for frame in self.shell:
+                if frame.channel == ShellChannel.STDOUT:
+                    self._line_buffer += frame.text
+                    while "\n" in self._line_buffer:
+                        line, self._line_buffer = self._line_buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # Try to parse as JSON-RPC
+                        try:
+                            msg = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue  # skip non-JSON PTY output (prompts, ANSI, etc.)
+
+                        if not self._ready.is_set():
+                            self._ready.set()
+
+                        # Route: if it has "id" it's a response; if "method" it's a notification
+                        if "id" in msg and "method" not in msg:
+                            await self._response_queue.put(msg)
+                        elif "method" in msg:
+                            # Forward notification to OAB stdout
+                            write_stdout(msg)
         except Exception:
-            pass  # Best-effort
+            pass  # connection closed
+
+    async def send_and_wait(self, msg: dict, timeout: float = 300.0) -> dict | None:
+        """Send a JSON-RPC request to kiro-cli and wait for the response."""
+        data = json.dumps(msg) + "\n"
+        await self.shell.send(data)
+
+        if msg.get("id") is None:
+            return None  # notification, no response expected
+
+        # Wait for response with matching id
+        try:
+            while True:
+                resp = await asyncio.wait_for(self._response_queue.get(), timeout=timeout)
+                if resp.get("id") == msg.get("id"):
+                    return resp
+                # Not our response — forward it (shouldn't happen in practice)
+                write_stdout(resp)
+        except asyncio.TimeoutError:
+            return None
+
+    async def send_notification(self, msg: dict):
+        """Send a JSON-RPC notification (no response expected)."""
+        data = json.dumps(msg) + "\n"
+        await self.shell.send(data)
+
+    async def close(self):
+        if self._reader_task:
+            self._reader_task.cancel()
+        if self.shell:
+            try:
+                await self.shell.__aexit__(None, None, None)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
-# ACP Adapter
+# ACP Adapter (async)
 # ---------------------------------------------------------------------------
 
 
 class AcpAdapter:
-    def __init__(self, client: AgentCoreClient):
-        self.client = client
-        self.sessions: dict[str, str] = {}  # acp_session_id → runtime_session_id
-        self._sessions_lock = threading.Lock()  # protects self.sessions dict
-        self._session_locks: dict[str, threading.Lock] = {}  # per-session invoke mutex
+    def __init__(self, runtime_arn: str, region: str):
+        self.runtime_arn = runtime_arn
+        self.region = region
+        self.client = AgentCoreRuntimeClient(region=region)
+        self.sessions: dict[str, ShellSession] = {}  # acp_session_id → ShellSession
+        self._next_id = 1000  # internal JSON-RPC ids for kiro-cli
 
-    def _get_session_lock(self, acp_sid: str) -> threading.Lock:
-        """Get or create a per-session lock for invoke serialization."""
-        with self._sessions_lock:
-            if acp_sid not in self._session_locks:
-                self._session_locks[acp_sid] = threading.Lock()
-            return self._session_locks[acp_sid]
+    def _alloc_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
 
-    def handle_session_new(self, id: int, params: dict):
+    async def _get_or_create_shell(self, acp_sid: str, blocks: list) -> ShellSession:
+        """Get existing shell session or create a new one."""
+        if acp_sid in self.sessions:
+            session = self.sessions[acp_sid]
+            if session._initialized:
+                return session
+
+        # Derive runtime session_id and shell_id from prompt context
+        runtime_sid = extract_session_id_from_prompt(blocks)
+        if not runtime_sid:
+            runtime_sid = f"oab-fallback-{acp_sid}"
+            if len(runtime_sid) < 33:
+                runtime_sid = runtime_sid + "0" * (33 - len(runtime_sid))
+        shell_id = derive_shell_id(runtime_sid)
+
+        session = ShellSession(self.client, self.runtime_arn, runtime_sid, shell_id)
+        self.sessions[acp_sid] = session
+        await session.connect()
+        return session
+
+    async def handle_session_new(self, id, params: dict):
+        import time
         acp_sid = f"agentcore-{int(time.time() * 1000)}"
-        with self._sessions_lock:
-            self.sessions[acp_sid] = ""  # runtime session ID determined on first prompt
+        self.sessions[acp_sid] = None  # placeholder until first prompt
         write_response(id, {"sessionId": acp_sid})
 
-    def handle_session_prompt(self, id: int, params: dict):
+    async def handle_session_prompt(self, id, params: dict):
         acp_sid = params.get("sessionId", "")
         blocks = params.get("prompt", [])
 
-        # Determine runtime session ID from sender_context
-        with self._sessions_lock:
-            runtime_sid = self.sessions.get(acp_sid, "")
-        if not runtime_sid:
-            runtime_sid = extract_session_id_from_prompt(blocks)
-            if not runtime_sid:
-                # Fallback: use ACP session ID padded to 33 chars
-                runtime_sid = f"oab-fallback-{acp_sid}"
-                if len(runtime_sid) < 33:
-                    runtime_sid = runtime_sid + "0" * (33 - len(runtime_sid))
-            with self._sessions_lock:
-                self.sessions[acp_sid] = runtime_sid
+        # Cold-start notification
+        cold_start_task = None
+        if acp_sid not in self.sessions or self.sessions[acp_sid] is None:
+            async def _cold_start():
+                await asyncio.sleep(3.0)
+                emit_text_chunk("⏳ Starting agent environment...")
+            cold_start_task = asyncio.create_task(_cold_start())
 
-        # Extract plain prompt text
-        prompt_text = strip_sender_context(blocks)
-        if not prompt_text:
-            prompt_text = "hello"
+        try:
+            session = await self._get_or_create_shell(acp_sid, blocks)
+        except Exception as e:
+            if cold_start_task:
+                cold_start_task.cancel()
+            write_response(id, error={"code": -32000, "message": f"shell connect failed: {e}"})
+            return
 
-        # Invoke with per-session serialization
-        session_lock = self._get_session_lock(acp_sid)
-        with session_lock:
-            first_chunk_received = threading.Event()
+        if cold_start_task:
+            cold_start_task.cancel()
 
-            # Cold start timer: if no chunk arrives within 3s, notify user
-            def _cold_start_timer():
-                if not first_chunk_received.wait(timeout=3.0):
-                    emit_text_chunk("⏳ Starting agent environment...")
+        # Forward prompt to kiro-cli as session/prompt
+        kiro_id = self._alloc_id()
+        kiro_msg = {
+            "jsonrpc": "2.0",
+            "id": kiro_id,
+            "method": "session/prompt",
+            "params": params,
+        }
+        resp = await session.send_and_wait(kiro_msg)
 
-            timer = threading.Thread(target=_cold_start_timer, daemon=True)
-            timer.start()
+        if resp is None:
+            write_response(id, error={"code": -32000, "message": "timeout waiting for agent response"})
+        elif "error" in resp:
+            write_response(id, error=resp["error"])
+        else:
+            write_response(id, resp.get("result", {"type": "success"}))
 
-            try:
-                for chunk in self.client.invoke_streaming(runtime_sid, prompt_text):
-                    first_chunk_received.set()
-                    emit_text_chunk(chunk)
-            except self.client.client.exceptions.ResourceNotFoundException:
-                first_chunk_received.set()
-                # Session expired — re-invoke (AgentCore auto-provisions new microVM)
-                try:
-                    for chunk in self.client.invoke_streaming(runtime_sid, prompt_text):
-                        emit_text_chunk(chunk)
-                except Exception as e:
-                    write_response(id, error={"code": -32603, "message": str(e)})
-                    return
-            except Exception as e:
-                error_code = -32000
-                msg = str(e)
-                if "Throttling" in msg:
-                    error_code = -32000
-                    msg = "rate limited, retry later"
-                elif "ValidationException" in msg:
-                    error_code = -32602
-                write_response(id, error={"code": error_code, "message": msg})
-                return
-
-        # Success response (marks end of turn)
-        write_response(id, {"type": "success"})
-
-    def handle_cancel(self, params: dict):
+    async def handle_session_load(self, id, params: dict):
         acp_sid = params.get("sessionId", "")
-        with self._sessions_lock:
-            runtime_sid = self.sessions.get(acp_sid, "")
-        if runtime_sid:
-            self.client.cancel(runtime_sid)
-
-    def handle_session_load(self, id: int, params: dict):
-        """Resume a session — with deterministic IDs, just store the mapping."""
-        acp_sid = params.get("sessionId", "")
-        with self._sessions_lock:
-            if acp_sid not in self.sessions:
-                self.sessions[acp_sid] = ""  # Will be resolved on next prompt
+        # Just store — actual connection happens on first prompt
+        if acp_sid not in self.sessions:
+            self.sessions[acp_sid] = None
         write_response(id, {"sessionId": acp_sid})
 
-    def run(self):
+    async def handle_cancel(self, params: dict):
+        acp_sid = params.get("sessionId", "")
+        session = self.sessions.get(acp_sid)
+        if session and session._initialized:
+            await session.send_notification({
+                "jsonrpc": "2.0",
+                "method": "session/cancel",
+                "params": params,
+            })
+
+    async def handle_request_permission(self, id, params: dict):
+        write_response(id, {"approved": True})
+
+    async def run(self):
         """Main loop: read JSON-RPC from stdin, dispatch."""
-        for line in sys.stdin:
-            line = line.strip()
+        loop = asyncio.get_event_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            line = line.decode().strip()
             if not line:
                 continue
             try:
@@ -320,22 +368,18 @@ class AcpAdapter:
             msg_id = msg.get("id")
 
             if method == "session/new":
-                self.handle_session_new(msg_id, params)
+                await self.handle_session_new(msg_id, params)
             elif method == "session/prompt":
-                self.handle_session_prompt(msg_id, params)
+                await self.handle_session_prompt(msg_id, params)
             elif method in ("session/cancel", "cancel"):
-                self.handle_cancel(params)
+                await self.handle_cancel(params)
             elif method == "session/load":
-                self.handle_session_load(msg_id, params)
+                await self.handle_session_load(msg_id, params)
             elif method == "session/request_permission":
-                # Auto-approve all tool calls (AgentCore agents run autonomously)
                 if msg_id is not None:
-                    write_response(msg_id, {"approved": True})
+                    await self.handle_request_permission(msg_id, params)
             elif msg_id is not None:
-                # Unknown method with id — respond with method not found
-                write_response(
-                    msg_id, error={"code": -32601, "message": f"unknown method: {method}"}
-                )
+                write_response(msg_id, error={"code": -32601, "message": f"unknown method: {method}"})
 
 
 # ---------------------------------------------------------------------------
@@ -344,24 +388,19 @@ class AcpAdapter:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ACP adapter for AgentCore Runtime")
+    parser = argparse.ArgumentParser(description="ACP↔WebSocket bridge for AgentCore Runtime")
     parser.add_argument("--runtime-arn", required=True, help="AgentCore Runtime ARN")
     parser.add_argument("--region", default="us-east-1", help="AWS region")
     parser.add_argument(
         "--cancel-strategy",
         choices=["noop", "stop"],
         default="stop",
-        help="Cancel behavior: noop (ignore) or stop (terminate session)",
+        help="(ignored, kept for CLI compat)",
     )
     args = parser.parse_args()
 
-    client = AgentCoreClient(
-        runtime_arn=args.runtime_arn,
-        region=args.region,
-        cancel_strategy=args.cancel_strategy,
-    )
-    adapter = AcpAdapter(client)
-    adapter.run()
+    adapter = AcpAdapter(runtime_arn=args.runtime_arn, region=args.region)
+    asyncio.run(adapter.run())
 
 
 if __name__ == "__main__":
