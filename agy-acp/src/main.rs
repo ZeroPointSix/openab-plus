@@ -126,48 +126,53 @@ impl Adapter {
     /// Hardcoded static fallback (last resort).
     fn static_fallback_models() -> Vec<String> {
         vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.0-flash".to_string(),
+            "Gemini 3.5 Flash (Medium)".to_string(),
+            "Gemini 3.5 Flash (High)".to_string(),
+            "Gemini 3.5 Flash (Low)".to_string(),
+            "Gemini 3.1 Pro (Low)".to_string(),
+            "Gemini 3.1 Pro (High)".to_string(),
         ]
     }
 
-    /// Run `agy models` with 5s timeout and parse the output.
-    fn fetch_available_models() -> Vec<String> {
-        use std::time::Instant;
-        let start = Instant::now();
-        let mut child = match std::process::Command::new("agy")
-            .arg("models")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() { return Vec::new(); }
-                    let stdout = child.stdout.take().unwrap();
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    let _ = std::io::BufReader::new(stdout).read_to_string(&mut buf);
-                    return buf.lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                }
-                Ok(None) => {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        let _ = child.kill();
-                        return Vec::new();
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(_) => return Vec::new(),
+    /// Resolve the `agy` binary: check PATH first, fall back to ~/.local/bin/agy.
+    fn agy_bin() -> &'static str {
+        use std::sync::OnceLock;
+        static BIN: OnceLock<&'static str> = OnceLock::new();
+        BIN.get_or_init(|| {
+            if std::process::Command::new("agy")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
+            {
+                return "agy";
             }
-        }
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
+            let fallback = Box::leak(format!("{home}/.local/bin/agy").into_boxed_str());
+            if std::path::Path::new(fallback).exists() {
+                return fallback;
+            }
+            "agy"
+        })
+    }
+
+    /// Run `agy models` and parse the output. Blocks until completion.
+    fn fetch_available_models() -> Vec<String> {
+        std::process::Command::new(Self::agy_bin())
+            .arg("models")
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Get available models — always attempts fresh fetch (5s timeout):
@@ -901,7 +906,7 @@ impl Adapter {
         cancelled: Arc<AtomicBool>,
         out_tx: mpsc::UnboundedSender<Option<String>>,
     ) -> PromptOutput {
-        let spawn_result = Command::new("agy")
+        let spawn_result = Command::new(Self::agy_bin())
             .args(&args)
             .current_dir(&working_dir)
             .stdin(std::process::Stdio::null())
