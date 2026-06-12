@@ -98,6 +98,10 @@ Recent local E2E testing found:
 
 - The bot can come online and reply when launched with `HOME=/sandbox` and a
   valid `openab-agent` auth file.
+- Host-local installs that place OpenAB under `/Users/<user>`, `~/.local/bin`,
+  or another normal user home are not OpenShell installs, even if they reuse the
+  same non-root layout. The OpenShell path must create and enter a real
+  OpenShell sandbox.
 - The running sandbox is not suitable for system package installation.
   Attempts to install tools into `/usr/local/bin` or use `apt` fail under the
   non-root sandbox user, and that is an intended boundary.

@@ -4,6 +4,20 @@ Run one OpenAB Discord bot inside an [NVIDIA OpenShell](https://github.com/NVIDI
 
 This guide optimizes for the normal OpenAB agent workflow: keep the image lean, make the agent home writable, and let the agent install extra tools at runtime into its own home directory.
 
+## Hard Requirements For Agents
+
+If a user asks to install OpenAB "with OpenShell structure" or "per docs/openshell.md", this guide means **real OpenShell**, not a host-local imitation.
+
+Agents must follow these rules:
+
+- Do not install OpenAB directly on the host as a substitute for OpenShell.
+- Do not claim that host paths such as `~/.local/bin`, `/Users/<user>`, or a normal shell environment "mimic" OpenShell.
+- Do not continue past missing prerequisites by changing the architecture. If `docker` or `openshell` is missing, install or ask the user to install that prerequisite, then resume this guide.
+- Do not run the long-lived bot from the host shell for this guide. The bot must run inside the OpenShell-created sandbox container.
+- `/sandbox` means the sandbox filesystem created by OpenShell. It does not mean an arbitrary directory on the host.
+
+Success requires `openshell sandbox list` to show the sandbox and `openshell sandbox connect <name>` to enter it.
+
 ## What You Will Get
 
 By the end, you should have:
@@ -23,6 +37,17 @@ Install-friendly does **not** mean root access or `apt-get` inside the running s
 - OpenShell CLI is installed
 - You have a Discord bot token
 - You have a ChatGPT account that can authenticate `openab-agent`
+
+Preflight check:
+
+```bash
+command -v docker
+docker info
+command -v openshell
+openshell sandbox list
+```
+
+If any command fails, stop here and fix that prerequisite. Do not install OpenAB directly on the host to work around the failure.
 
 Install OpenShell:
 
@@ -53,6 +78,8 @@ Build the OpenShell sandbox image from this repo:
 docker build -t oab-native-sandbox -f openshell/Dockerfile .
 ```
 
+Run this on the host, before creating the sandbox. Do not install OpenAB binaries into the host user's `~/.local/bin` for this guide.
+
 This image is intentionally small. It does not add Go, Node, Python, cloud CLIs, or every tool an agent might someday need. Extra tools should be installed later by the agent into `/sandbox`, following [Agent-Installable Tools](agent-installable-tools.md).
 
 Expected image contract:
@@ -82,6 +109,10 @@ openshell sandbox connect oab
 Inside the sandbox:
 
 ```bash
+test "$(pwd)" = "/sandbox" || cd /sandbox
+test -d /sandbox
+test "$(id -un)" = "sandbox"
+
 export HOME=/sandbox
 export PATH="/sandbox/bin:/sandbox/.local/bin:$PATH"
 export TMPDIR=/sandbox/tmp
@@ -104,7 +135,7 @@ Expected output:
 openab-local-install-ok
 ```
 
-This proves the agent can install standalone tools into `/sandbox/bin` at runtime. For real tools, use the same home-directory install pattern from [Agent-Installable Tools](agent-installable-tools.md).
+This proves the agent can install standalone tools into `/sandbox/bin` at runtime. For real tools, use the same sandbox-directory install pattern from [Agent-Installable Tools](agent-installable-tools.md).
 
 For a full build acceptance test, verify all of the following:
 
@@ -247,7 +278,7 @@ This still runs OpenAB in the OpenShell-created sandbox container. It only chang
 
 ## Installing Extra Tools At Runtime
 
-Use the OpenAB home-directory install pattern:
+Use the OpenAB sandbox-directory install pattern:
 
 ```bash
 mkdir -p /sandbox/bin
@@ -293,12 +324,15 @@ See [Agent-Installable Tools](agent-installable-tools.md) for the full pattern.
 | Network or model calls blocked | Discord connects, but model/tool calls fail | See the OpenShell preset ADR; broad policy recommendations are still testing in progress |
 | Tool install says `/usr/local/bin` or `apt` is not writable | The running sandbox user is non-root | Install to `/sandbox/bin` or another `/sandbox` path |
 | Tool requires system libraries not present in the image | Binary exists but fails at launch | Choose a static upstream binary, extract compatible `.deb` dependencies into `/sandbox`, or build a custom image only for that deployment |
+| Agent installed OpenAB into `/Users/<user>` or host `~/.local/bin` | The guide was not followed; this is a host-local install, not OpenShell | Stop that run. Install Docker/OpenShell if missing, create the sandbox with `openshell sandbox create --from`, then install/run only inside `/sandbox` |
 
 ## E2E Test Rules
 
 When testing this guide with an agent, keep the test honest:
 
 - Use `openshell/Dockerfile`.
+- Require real OpenShell evidence: `command -v openshell`, `openshell sandbox list`, and `openshell sandbox connect <name>` must work.
+- Treat missing `docker` or missing `openshell` as a blocker, not as permission to install OpenAB on the host.
 - Treat the guide author and the E2E test subject as separate roles.
 - If the test subject hits a build or setup failure, let the test subject diagnose, edit, rebuild, and report the fix. Do not patch the guide or image from outside the test and then count that run as one-shot success.
 - Do not rewrite OpenShell policy files to make the test pass.
@@ -307,6 +341,7 @@ When testing this guide with an agent, keep the test honest:
 - If auth is unavailable, stop at the auth step and report that browser login is required.
 - If a policy file fails to apply, report a docs/policy compatibility issue instead of generating a private fixed policy.
 - Prove runtime installability with at least one `/sandbox/bin` install test.
+- Fail the test if OpenAB, `openab-agent`, or workflow tools are installed into host paths such as `/Users/<user>/.local/bin`.
 - Always delete disposable test sandboxes and scratch files after the run.
 
 ## Optional: Restrict To One Discord Channel

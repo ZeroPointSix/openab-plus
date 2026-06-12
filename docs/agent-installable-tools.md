@@ -10,6 +10,14 @@ per docs/* from OpenAB GitHub repo, how to install <TOOL_NAME> for my OAB agent
 
 Your agent will query the relevant docs under `docs/`, find the recommended approach, and guide you through the entire installation — or just do it for you. That's it. One prompt, done.
 
+## Scope Guardrail
+
+This is **not** a host-machine install guide.
+
+For OpenShell setups, this document applies only after the agent is already inside the OpenShell-created sandbox. `/sandbox` must be the real sandbox filesystem. Do not install tools into `/Users/<user>/.local/bin`, the host user's home directory, or any host-local path and call that "OpenShell-compatible".
+
+If the OpenShell sandbox does not exist yet, follow [OpenShell Quick Start](openshell.md) first. Missing `docker` or `openshell` is a prerequisite failure; it is not permission to install OpenAB directly on the host.
+
 ## How It Works
 
 ```
@@ -21,17 +29,17 @@ Your agent will query the relevant docs under `docs/`, find the recommended appr
   │  agent"         │         │                  │          │  │ bootstrap/runtime  │  │
   │                  │         │ finds install    │          │  └────────────────────┘  │
   │                  │         │ steps for glab   │          │                          │
-  │                  │         │                  │          │  PVC (persistent ~/):    │
+  │                  │         │                  │          │  Persistent /sandbox:    │
   │                  │         │ executes:        │          │  ┌────────────────────┐  │
-  │                  │         │  curl ─► extract │─────────►│  │ ~/bin/             │  │
-  │                  │         │  ─► ~/bin/glab   │          │  │  ├── glab    ✅ new│  │
+  │                  │         │  curl ─► extract │─────────►│  │ /sandbox/bin/     │  │
+  │                  │         │  ─► /sandbox/bin │          │  │  ├── glab    ✅ new│  │
   │                  │         │  ─► verify       │          │  │  ├── aws          │  │
   │                  │         │                  │          │  │  ├── ssh          │  │
   │  "done! glab    │◄────────│ "glab v1.46      │          │  │  ├── terraform    │  │
   │   ready to use" │         │  installed ✅"    │          │  │  └── kubectl      │  │
   │                  │         │                  │          │  │                    │  │
-  └─────────────────┘         └──────────────────┘          │  │ ~/.ssh/  ~/.config/│  │
-                                                            │  │ ~/.kiro/ ~/aws-cli/│  │
+  └─────────────────┘         └──────────────────┘          │  │ .ssh/  .config/    │  │
+                                                            │  │ .kiro/ aws-cli/    │  │
                                                             │  └────────────────────┘  │
                                                             └──────────────────────────┘
 
@@ -40,11 +48,11 @@ Your agent will query the relevant docs under `docs/`, find the recommended appr
   │                                                                            │
   │  Old Cluster              PVC                    New Cluster               │
   │  ┌──────────┐     ┌────────────────┐     ┌──────────────┐                 │
-  │  │ Pod ──────┼────►│ ~/bin/         │────►│ New Pod      │                 │
-  │  │ (delete)  │     │ ~/.ssh/        │     │ (attach PVC) │                 │
-  │  └──────────┘     │ ~/.config/     │     │              │                 │
-  │                    │ ~/.kiro/       │     │ Everything   │                 │
-  │                    │ ~/aws-cli/     │     │ just works™  │                 │
+  │  │ Pod ──────┼────►│ /sandbox/bin/  │────►│ New Pod      │                 │
+  │  │ (delete)  │     │ /sandbox/.ssh/ │     │ (attach PVC) │                 │
+  │  └──────────┘     │ /sandbox/.config/│   │              │                 │
+  │                    │ /sandbox/.kiro/ │     │ Everything   │                 │
+  │                    │ /sandbox/aws-cli/│    │ just works™  │                 │
   │                    └────────────────┘     └──────────────┘                 │
   │                                                                            │
   │  Zero reinstallation. All tools, configs, keys, and agent memory persist. │
@@ -53,12 +61,12 @@ Your agent will query the relevant docs under `docs/`, find the recommended appr
 
 ## Why This Pattern
 
-OpenAB keeps its Docker image minimal — only bootstrap/runtime essentials and the selected agent runtime ship in the Dockerfile. Workflow tools are installed **at runtime by the agent** into the home directory (`~/bin/` or `/sandbox/bin/`). This is a deliberate design choice:
+OpenAB keeps its Docker image minimal — only bootstrap/runtime essentials and the selected agent runtime ship in the Dockerfile. Workflow tools are installed **at runtime by the agent** into the sandbox home directory (`/sandbox/bin/`). This is a deliberate design choice:
 
 - **Lean image, infinite extensibility** — the Dockerfile never grows. Need AWS CLI today, Terraform tomorrow, glab next week? Same image, same pattern. No rebuild, no redeploy.
 - **Doc-driven, AI-first** — documentation is written for agents to consume. Humans just say what they need; the agent reads the docs and executes.
 - **No gatekeeping** — adding a new tool doesn't require a PR to the Dockerfile, a new Docker build, or a Helm upgrade. Any agent can install any tool at any time.
-- **Full persistence on PVC** — everything installed to `~/bin/` and `~/` lives on the Persistent Volume Claim. This means:
+- **Full persistence on PVC / sandbox home** — everything installed to `/sandbox/bin/` and `/sandbox` lives on the Persistent Volume Claim or OpenShell sandbox home. This means:
   - **Pod restart** — tools are still there
   - **Helm upgrade** — tools are still there
   - **Migrate the PVC to a new node / new cluster** — tools, configs, credentials, SSH keys — everything moves with it. Your agent's entire environment is portable.
@@ -97,11 +105,11 @@ The following tools are commonly installed by agents. This doc does **not** hard
 When installing any tool, the agent **must** follow these rules:
 
 1. **No `sudo`** — the container has no root access and a read-only root filesystem
-2. **Install to `~/bin/` or `/sandbox/bin/`** (binaries) or `~/`/`/sandbox` (larger installs like `~/aws-cli/`) — never write to `/usr/`, `/opt/`, or other system paths
+2. **Install to `/sandbox/bin/`** (binaries) or `/sandbox` (larger installs like `/sandbox/aws-cli/`). Never write to `/usr/`, `/opt/`, host home directories, or other system paths.
 3. **Detect architecture** — the pod may be ARM64 (`aarch64`) or AMD64 (`x86_64`). Always check `uname -m` and download the correct binary.
-4. **Use `/tmp/` or `/sandbox/tmp` for scratch** — download and extract in scratch space, copy the final binary to `~/bin/` or `/sandbox/bin/`, then clean up
+4. **Use `/tmp/` or `/sandbox/tmp` for scratch** — download and extract in scratch space, copy the final binary to `/sandbox/bin/`, then clean up
 5. **Verify after install** — run `<tool> --version` or equivalent to confirm it works
-6. **`export PATH="$HOME/bin:/sandbox/bin:/sandbox/.local/bin:$PATH"`** — ensure user-local install paths are in PATH before verification
+6. **`export HOME=/sandbox` and `export PATH="/sandbox/bin:/sandbox/.local/bin:$PATH"`** — ensure sandbox-local install paths are in PATH before verification
 7. **Look up the latest version from upstream** — do not hardcode version numbers; always fetch the latest stable release
 
 ### `.deb` Package Pattern (for tools without standalone binaries)
@@ -109,12 +117,13 @@ When installing any tool, the agent **must** follow these rules:
 Some tools (like OpenSSH) are only distributed as `.deb` packages. Extract without `sudo`:
 
 ```bash
-mkdir -p ~/bin /tmp/deb-extract
+export HOME=/sandbox
+mkdir -p /sandbox/bin /sandbox/tmp/deb-extract
 curl -fsSL -o /tmp/package.deb "<deb-url>"
-dpkg-deb -x /tmp/package.deb /tmp/deb-extract
-cp /tmp/deb-extract/usr/bin/<binary> ~/bin/
-chmod +x ~/bin/<binary>
-rm -rf /tmp/package.deb /tmp/deb-extract
+dpkg-deb -x /tmp/package.deb /sandbox/tmp/deb-extract
+cp /sandbox/tmp/deb-extract/usr/bin/<binary> /sandbox/bin/
+chmod +x /sandbox/bin/<binary>
+rm -rf /tmp/package.deb /sandbox/tmp/deb-extract
 ```
 
 ## Build Test Objectives
@@ -159,16 +168,16 @@ Use these checks before declaring an OpenShell/OpenAB image ready:
 
 ## Persistence & Portability
 
-Everything under `~/` is mounted on a PVC — see the migration diagram above. Key directories that persist:
+Everything under `/sandbox` is mounted on a PVC or OpenShell sandbox home — see the migration diagram above. Key directories that persist:
 
 ```
-~/bin/           → all installed tool binaries
-~/.aws/          → AWS CLI config and credentials
-~/npm-global/    → npm-installed tools (wrangler, etc.)
-~/.ssh/          → SSH keys and config
-~/.config/       → tool configs (glab, wrangler, etc.)
-~/.kiro/         → agent steering docs and memory
-~/.openab/       → OpenAB runtime data (cronjobs, etc.)
+/sandbox/bin/           → all installed tool binaries
+/sandbox/.aws/          → AWS CLI config and credentials
+/sandbox/npm-global/    → npm-installed tools (wrangler, etc.)
+/sandbox/.ssh/          → SSH keys and config
+/sandbox/.config/       → tool configs (glab, wrangler, etc.)
+/sandbox/.kiro/         → agent steering docs and memory
+/sandbox/.openab/       → OpenAB runtime data (cronjobs, etc.)
 ```
 
 The only time tools are lost is if the PVC itself is deleted.
