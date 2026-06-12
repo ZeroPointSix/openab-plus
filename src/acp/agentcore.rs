@@ -198,8 +198,20 @@ where
                         .unwrap_or_default()
                         .as_millis();
                     let acp_sid = format!("agentcore-{ts}");
-                    self.write_response(&id, json!({"sessionId": acp_sid}))
-                        .await?;
+                    let runtime_sid = format!("oab-session-{ts}");
+
+                    // Eagerly open shell + initialize the agent
+                    match self.open_shell(&runtime_sid).await {
+                        Ok(handle) => {
+                            self.sessions.insert(acp_sid.clone(), handle);
+                            self.write_response(&id, json!({"sessionId": acp_sid}))
+                                .await?;
+                        }
+                        Err(e) => {
+                            self.write_error(&id, -32000, &format!("shell init failed: {e}"))
+                                .await?;
+                        }
+                    }
                 }
                 "session/load" => {
                     let acp_sid = params
@@ -250,19 +262,11 @@ where
             .unwrap_or("")
             .to_string();
 
-        // Ensure shell is connected
+        // Session must already exist (opened eagerly during session/new)
         if !self.sessions.contains_key(&acp_sid) {
-            let runtime_sid = self.derive_runtime_session_id(params);
-            match self.open_shell(&runtime_sid).await {
-                Ok(handle) => {
-                    self.sessions.insert(acp_sid.clone(), handle);
-                }
-                Err(e) => {
-                    self.write_error(id, -32000, &format!("shell connect failed: {e}"))
-                        .await?;
-                    return Ok(());
-                }
-            }
+            self.write_error(id, -32000, "no active session — call session/new first")
+                .await?;
+            return Ok(());
         }
 
         // Allocate ID before borrowing sessions
