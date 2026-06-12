@@ -19,6 +19,30 @@ Agents must follow these rules:
 
 Success requires `openshell sandbox list` to show the sandbox and `openshell sandbox connect <name>` to enter it.
 
+## Agent Execution Contract
+
+When an agent is asked to "install OpenAB with OpenShell" or "make an OpenAB native agent per docs/*", the agent must execute this guide as an OpenShell install.
+
+The user prompt does not need to restate these constraints. They are part of this guide:
+
+- Do not run `cargo build`.
+- Do not install `openab` or `openab-agent` into host `~/.local/bin`.
+- Do not codesign host-local OpenAB binaries.
+- Do not use native OpenAB as a fallback.
+- Do not continue after prerequisite failure by switching to a host-local architecture.
+
+The setup is not successful until all of these are true:
+
+- `docker info` works on the host.
+- `openshell sandbox list` works on the host.
+- `openshell sandbox create --from` creates the OpenAB sandbox.
+- `openshell sandbox connect <name>` enters the sandbox and lands in `/sandbox`.
+- `openab` and `openab-agent` exist inside the sandbox.
+- `gh` is missing in the clean sandbox image.
+- At least one runtime install into `/sandbox/bin` works.
+
+If any item fails, report that failed item and continue fixing the OpenShell path. Do not replace it with a native host install.
+
 ## What You Will Get
 
 By the end, you should have:
@@ -410,6 +434,7 @@ See [Agent-Installable Tools](agent-installable-tools.md) for the full pattern.
 When testing this guide with an agent, keep the test honest:
 
 - Use `openshell/Dockerfile`.
+- Enforce the [Agent Execution Contract](#agent-execution-contract) as the pass/fail checklist.
 - Require real OpenShell evidence: `command -v openshell`, `openshell sandbox list`, and `openshell sandbox connect <name>` must work.
 - Treat missing `docker` or missing `openshell` as a blocker, not as permission to install OpenAB on the host.
 - If the user asked the agent to proceed, missing `brew`, Docker, or OpenShell should trigger the prerequisite install section, not a native OpenAB install.
