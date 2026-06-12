@@ -714,20 +714,21 @@ impl Adapter {
         }
     }
 
-    async fn handle_session_prompt(
+    /// Gather session state needed for prompt execution (under lock),
+    /// returning extracted data so the lock can be released before subprocess spawn.
+    fn prepare_prompt_state(
         &mut self,
-        id: Value,
         params: &Value,
-        cancelled: Arc<AtomicBool>,
-    ) -> Vec<String> {
+    ) -> (String, String, Vec<String>, Option<HashSet<String>>, Option<String>, i64) {
         let session_id = params
             .get("sessionId")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
 
         // Restore evicted session from state file if needed
-        if !session_id.is_empty() && !self.sessions.contains_key(session_id) {
-            let _ = self.restore_session_state(session_id);
+        if !session_id.is_empty() && !self.sessions.contains_key(&session_id) {
+            let _ = self.restore_session_state(&session_id);
         }
 
         let prompt_text = params
@@ -740,12 +741,12 @@ impl Adapter {
                     .join("\n")
             })
             .unwrap_or_default();
-        let clean_prompt = prompt_text.trim();
+        let clean_prompt = prompt_text.trim().to_string();
 
         // Take snapshot before spawning agy if we need to bind a conversation
         let snapshot = if self
             .sessions
-            .get(session_id)
+            .get(&session_id)
             .map(|s| s.conversation_id.is_none())
             .unwrap_or(false)
         {
@@ -761,7 +762,7 @@ impl Adapter {
         if let Ok(extra) = std::env::var("AGY_EXTRA_ARGS") {
             args.extend(extra.split_whitespace().map(String::from));
         }
-        if let Some(session) = self.sessions.get(session_id) {
+        if let Some(session) = self.sessions.get(&session_id) {
             if let Some(conv_id) = &session.conversation_id {
                 args.push("--conversation".to_string());
                 args.push(conv_id.clone());
@@ -772,12 +773,40 @@ impl Adapter {
             }
         }
         args.push("-p".to_string());
-        args.push(clean_prompt.to_string());
+        args.push(clean_prompt.clone());
 
-        // Spawn agy as a child process (non-blocking)
+        let initial_conv_id = self
+            .sessions
+            .get(&session_id)
+            .and_then(|s| s.conversation_id.clone());
+        let initial_step_idx = self
+            .sessions
+            .get(&session_id)
+            .map(|s| s.last_step_idx)
+            .unwrap_or(-1);
+
+        (session_id, clean_prompt, args, snapshot, initial_conv_id, initial_step_idx)
+    }
+
+    async fn handle_session_prompt(
+        &mut self,
+        id: Value,
+        params: &Value,
+        cancelled: Arc<AtomicBool>,
+        out_tx: mpsc::UnboundedSender<Option<String>>,
+    ) -> Vec<String> {
+        // --- Phase 1: extract state under lock (lock released after this method returns to caller) ---
+        let (session_id, _clean_prompt, args, snapshot, initial_conv_id, initial_step_idx) =
+            self.prepare_prompt_state(params);
+        let working_dir = self.working_dir.clone();
+        let conversations_dir = self.conversations_dir.clone();
+
+        // --- Phase 2: subprocess execution (no adapter lock held) ---
+        // We drop &mut self usage here; the spawn + poll happens with extracted data only.
+
         let spawn_result = Command::new("agy")
             .args(&args)
-            .current_dir(&self.working_dir)
+            .current_dir(&working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -816,16 +845,6 @@ impl Adapter {
         });
 
         // Set up streaming state
-        let initial_conv_id = self
-            .sessions
-            .get(session_id)
-            .and_then(|s| s.conversation_id.clone());
-        let initial_step_idx = self
-            .sessions
-            .get(session_id)
-            .map(|s| s.last_step_idx)
-            .unwrap_or(-1);
-
         let streaming_state = Arc::new(Mutex::new(StreamingState {
             conversation_id: initial_conv_id,
             base_step_idx: initial_step_idx,
@@ -835,16 +854,16 @@ impl Adapter {
             had_updates: false,
         }));
 
-        // Start polling thread (1s interval)
+        // Start polling thread — 100ms interval (F2 fix), writes through channel (F3 fix)
         let stop_polling = Arc::new(AtomicBool::new(false));
-        let poll_conversations_dir = self.conversations_dir.clone();
+        let poll_conversations_dir = conversations_dir.clone();
         let poll_snapshot = snapshot.clone();
-        let poll_session_id = session_id.to_string();
+        let poll_session_id = session_id.clone();
         let poll_state = Arc::clone(&streaming_state);
         let poll_stop = Arc::clone(&stop_polling);
+        let poll_tx = out_tx.clone();
 
         let poller = std::thread::spawn(move || {
-            let mut stdout = io::stdout();
             while !poll_stop.load(Ordering::SeqCst) {
                 let lines = Self::poll_streaming_delta(
                     &poll_conversations_dir,
@@ -853,10 +872,9 @@ impl Adapter {
                     &poll_state,
                 );
                 for line in lines {
-                    let _ = writeln!(stdout, "{}", line);
+                    let _ = poll_tx.send(Some(line));
                 }
-                let _ = stdout.flush();
-                std::thread::sleep(Duration::from_secs(1));
+                std::thread::sleep(Duration::from_millis(100));
             }
         });
 
@@ -883,20 +901,16 @@ impl Adapter {
         stop_polling.store(true, Ordering::SeqCst);
         let _ = poller.join();
 
-        // Final poll to catch any last writes
+        // Final poll to catch any last writes — routed through channel (F3)
         {
             let lines = Self::poll_streaming_delta(
-                &self.conversations_dir,
+                &conversations_dir,
                 snapshot.as_ref(),
-                session_id,
+                &session_id,
                 &streaming_state,
             );
-            if !lines.is_empty() {
-                let mut stdout = io::stdout();
-                for line in &lines {
-                    let _ = writeln!(stdout, "{}", line);
-                }
-                let _ = stdout.flush();
+            for line in lines {
+                let _ = out_tx.send(Some(line));
             }
         }
 
@@ -910,8 +924,8 @@ impl Adapter {
             )
         };
 
-        // Update session state
-        if let Some(session) = self.sessions.get_mut(session_id) {
+        // --- Phase 3: update session state (re-acquire lock briefly) ---
+        if let Some(session) = self.sessions.get_mut(&session_id) {
             if session.conversation_id.is_none() {
                 session.conversation_id = bound_conv_id.clone();
             }
@@ -920,8 +934,8 @@ impl Adapter {
             }
         }
         if bound_conv_id.is_some() {
-            let model_id = self.sessions.get(session_id).and_then(|s| s.model_id.clone());
-            self.persist_session(session_id, bound_conv_id.as_deref(), new_step_idx, model_id.as_deref());
+            let model_id = self.sessions.get(&session_id).and_then(|s| s.model_id.clone());
+            self.persist_session(&session_id, bound_conv_id.as_deref(), new_step_idx, model_id.as_deref());
         }
 
         // Build final response
@@ -1144,7 +1158,7 @@ async fn main() {
                 tokio::spawn(async move {
                     let output = {
                         let mut adapter = adapter.lock().await;
-                        adapter.handle_session_prompt(id, &params, cancelled).await
+                        adapter.handle_session_prompt(id, &params, cancelled, out_tx.clone()).await
                     };
                     if !session_id.is_empty() {
                         active_cancellations.lock().unwrap().remove(&session_id);
