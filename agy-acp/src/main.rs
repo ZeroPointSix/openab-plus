@@ -102,12 +102,12 @@ impl Adapter {
     fn fetch_available_models() -> Vec<String> {
         use std::time::Instant;
         let start = Instant::now();
-        let child = std::process::Command::new("agy")
+        let mut child = match std::process::Command::new("agy")
             .arg("models")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .spawn();
-        let mut child = match child {
+            .spawn()
+        {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
@@ -116,7 +116,16 @@ impl Adapter {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     if !status.success() { return Vec::new(); }
-                    break;
+                    // Process exited successfully — read stdout
+                    let stdout = child.stdout.take().unwrap();
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    let mut reader = std::io::BufReader::new(stdout);
+                    let _ = reader.read_to_string(&mut buf);
+                    return buf.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
                 }
                 Ok(None) => {
                     if start.elapsed() > Duration::from_secs(5) {
@@ -128,16 +137,6 @@ impl Adapter {
                 Err(_) => return Vec::new(),
             }
         }
-        child.wait_with_output()
-            .ok()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Get available models, fetching lazily on first access.
