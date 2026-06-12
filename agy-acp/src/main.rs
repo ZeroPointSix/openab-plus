@@ -98,58 +98,23 @@ impl Adapter {
         }
     }
 
-    /// Run `agy models` with a 5s timeout and parse the output into a list of model names.
-    /// Falls back to a hardcoded list if `agy models` fails (e.g. auth not yet completed).
+    /// Run `agy models` and parse the output into a list of model names.
+    /// Blocks until completion. Returns empty if `agy models` fails.
     fn fetch_available_models() -> Vec<String> {
-        use std::time::Instant;
-        let start = Instant::now();
-        let mut child = match std::process::Command::new("agy")
+        std::process::Command::new("agy")
             .arg("models")
-            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return Self::fallback_models(),
-        };
-        // Poll with 5s timeout
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() { return Self::fallback_models(); }
-                    let stdout = child.stdout.take().unwrap();
-                    use std::io::Read;
-                    let mut buf = String::new();
-                    let mut reader = std::io::BufReader::new(stdout);
-                    let _ = reader.read_to_string(&mut buf);
-                    let models: Vec<String> = buf.lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                    if models.is_empty() {
-                        return Self::fallback_models();
-                    }
-                    return models;
-                }
-                Ok(None) => {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        let _ = child.kill();
-                        return Self::fallback_models();
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(_) => return Self::fallback_models(),
-            }
-        }
-    }
-
-    /// Hardcoded fallback models when `agy models` is unavailable (auth pending, timeout, etc.)
-    fn fallback_models() -> Vec<String> {
-        vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.0-flash".to_string(),
-        ]
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Get available models, fetching lazily on first access.
