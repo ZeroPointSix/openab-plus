@@ -219,6 +219,17 @@ where
                 "session/cancel" | "cancel" => {
                     self.handle_cancel(&params).await;
                 }
+                "session/destroy" | "session/stop" => {
+                    let acp_sid = params
+                        .get("sessionId")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.sessions.remove(&acp_sid);
+                    if id != Value::Null {
+                        self.write_response(&id, json!({})).await?;
+                    }
+                }
                 "session/request_permission" => {
                     if id != Value::Null {
                         self.write_response(&id, json!({"approved": true})).await?;
