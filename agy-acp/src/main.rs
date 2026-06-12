@@ -50,12 +50,17 @@ struct StoredSession {
     /// Last step idx read from SQLite; used for delta extraction.
     #[serde(default)]
     last_step_idx: i64,
+    /// Selected model ID for this session.
+    #[serde(default)]
+    model_id: Option<String>,
 }
 
 struct Session {
     conversation_id: Option<String>,
     /// Last step idx read from SQLite.
     last_step_idx: i64,
+    /// Selected model ID for this session.
+    model_id: Option<String>,
 }
 
 /// Tracks streaming poll state shared between the polling thread and main task.
@@ -73,6 +78,7 @@ struct Adapter {
     working_dir: String,
     conversations_dir: PathBuf,
     state_file: PathBuf,
+    available_models: Vec<String>,
 }
 
 impl Adapter {
@@ -86,7 +92,48 @@ impl Adapter {
                 .unwrap_or_else(|_| "/tmp".to_string()),
             conversations_dir: PathBuf::from(&home).join(".gemini/antigravity-cli/conversations"),
             state_file: state_dir.join("sessions.json"),
+            available_models: Self::fetch_available_models(),
         }
+    }
+
+    /// Run `agy models` and parse the output into a list of model names.
+    fn fetch_available_models() -> Vec<String> {
+        std::process::Command::new("agy")
+            .arg("models")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Build the ACP configOptions JSON for the model selector.
+    fn config_options_json(&self, model_id: Option<&str>) -> Value {
+        if self.available_models.is_empty() {
+            return json!([]);
+        }
+        let current = model_id
+            .or_else(|| self.available_models.first().map(|s| s.as_str()))
+            .unwrap_or("");
+        let options: Vec<Value> = self
+            .available_models
+            .iter()
+            .map(|name| json!({ "value": name, "name": name }))
+            .collect();
+        json!([{
+            "id": "model",
+            "name": "Model",
+            "category": "model",
+            "type": "select",
+            "currentValue": current,
+            "options": options,
+        }])
     }
 
     /// Acquire exclusive lock on a dedicated lock file for read-write mutual exclusion.
@@ -119,16 +166,16 @@ impl Adapter {
         self.load_store_inner()
     }
 
-    /// Try to restore conversation_id and last_step_idx from persisted state.
-    fn restore_session(&self, session_id: &str) -> Option<(String, i64)> {
+    /// Try to restore conversation_id, last_step_idx, and model_id from persisted state.
+    fn restore_session(&self, session_id: &str) -> Option<(String, i64, Option<String>)> {
         let store = self.load_store();
         store.sessions.get(session_id).and_then(|s| {
-            s.conversation_id.clone().map(|cid| (cid, s.last_step_idx))
+            s.conversation_id.clone().map(|cid| (cid, s.last_step_idx, s.model_id.clone()))
         })
     }
 
     /// Persist a session binding (read-modify-write under single lock).
-    fn persist_session(&self, session_id: &str, conversation_id: Option<&str>, last_step_idx: i64) {
+    fn persist_session(&self, session_id: &str, conversation_id: Option<&str>, last_step_idx: i64, model_id: Option<&str>) {
         let Some(_lock) = self.lock_state_file() else {
             return;
         };
@@ -138,6 +185,7 @@ impl Adapter {
             StoredSession {
                 conversation_id: conversation_id.map(String::from),
                 last_step_idx,
+                model_id: model_id.map(String::from),
             },
         );
         let tmp = self.state_file.with_extension("tmp");
@@ -447,7 +495,7 @@ impl Adapter {
     }
 
     fn restore_session_state(&mut self, session_id: &str) -> bool {
-        let Some((conversation_id, last_step_idx)) = self.restore_session(session_id) else {
+        let Some((conversation_id, last_step_idx, model_id)) = self.restore_session(session_id) else {
             return false;
         };
         if !self.sessions.contains_key(session_id) {
@@ -458,6 +506,7 @@ impl Adapter {
             Session {
                 conversation_id: Some(conversation_id),
                 last_step_idx,
+                model_id,
             },
         );
         true
@@ -484,12 +533,14 @@ impl Adapter {
             Session {
                 conversation_id: None,
                 last_step_idx: -1,
+                model_id: None,
             },
         );
+        let config_options = self.config_options_json(None);
         JsonRpcResponse {
             jsonrpc: "2.0",
             id,
-            result: Some(json!({ "sessionId": session_id })),
+            result: Some(json!({ "sessionId": session_id, "configOptions": config_options })),
             error: None,
         }
     }
@@ -526,6 +577,47 @@ impl Adapter {
                 "code": -32000,
                 "message": format!("unknown sessionId: {session_id}"),
             })),
+        }
+    }
+
+    fn handle_session_set_config_option(&mut self, id: Value, params: &Value) -> JsonRpcResponse {
+        let session_id = params.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+        let config_id = params.get("configId").and_then(|v| v.as_str()).unwrap_or("");
+        let value = params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+
+        if session_id.is_empty() || config_id != "model" || value.is_empty() {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32602,"message":"missing sessionId, configId, or value"})),
+            };
+        }
+
+        if !self.sessions.contains_key(session_id) {
+            let _ = self.restore_session_state(session_id);
+        }
+
+        let Some(session) = self.sessions.get_mut(session_id) else {
+            return JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(json!({"code":-32000,"message":format!("unknown sessionId: {session_id}")})),
+            };
+        };
+
+        session.model_id = Some(value.to_string());
+        let conv_id = session.conversation_id.clone();
+        let last_step_idx = session.last_step_idx;
+        self.persist_session(session_id, conv_id.as_deref(), last_step_idx, Some(value));
+
+        let config_options = self.config_options_json(Some(value));
+        JsonRpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(json!({ "configOptions": config_options })),
+            error: None,
         }
     }
 
@@ -580,6 +672,10 @@ impl Adapter {
             if let Some(conv_id) = &session.conversation_id {
                 args.push("--conversation".to_string());
                 args.push(conv_id.clone());
+            }
+            if let Some(model_id) = &session.model_id {
+                args.push("--model".to_string());
+                args.push(model_id.clone());
             }
         }
         args.push("-p".to_string());
@@ -730,7 +826,8 @@ impl Adapter {
             }
         }
         if bound_conv_id.is_some() {
-            self.persist_session(session_id, bound_conv_id.as_deref(), new_step_idx);
+            let model_id = self.sessions.get(session_id).and_then(|s| s.model_id.clone());
+            self.persist_session(session_id, bound_conv_id.as_deref(), new_step_idx, model_id.as_deref());
         }
 
         // Build final response
@@ -965,6 +1062,22 @@ async fn main() {
                 });
                 Vec::new()
             }
+            Some("session/setConfigOption") | Some("session/set_config_option") => {
+                let params = req.params.unwrap_or(json!({}));
+                let adapter = Arc::clone(&adapter);
+                let out_tx = out_tx.clone();
+                pending_prompts += 1;
+                tokio::spawn(async move {
+                    let mut adapter = adapter.lock().await;
+                    let line = serde_json::to_string(
+                        &adapter.handle_session_set_config_option(id, &params),
+                    )
+                    .unwrap();
+                    let _ = out_tx.send(Some(line));
+                    let _ = out_tx.send(None);
+                });
+                Vec::new()
+            }
             Some("session/cancel") => {
                 let params = req.params.unwrap_or(json!({}));
                 if let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) {
@@ -1079,8 +1192,9 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"),
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
-        adapter.persist_session("sess-1", Some("conv-abc"), 5);
+        adapter.persist_session("sess-1", Some("conv-abc"), 5, None);
 
         let response = adapter.handle_session_load(json!(7), &json!({"sessionId": "sess-1"}));
         assert!(response.error.is_none());
@@ -1107,6 +1221,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"),
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
         let response = adapter.handle_session_load(json!(9), &json!({"sessionId": "missing"}));
@@ -1132,6 +1247,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir.clone(),
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
         let before = adapter.conversation_snapshot();
@@ -1160,6 +1276,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir.clone(),
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
         let before = adapter.conversation_snapshot();
@@ -1181,11 +1298,12 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: root.join("conversations"),
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
-        adapter.persist_session("sess-1", Some("conv-abc"), 7);
+        adapter.persist_session("sess-1", Some("conv-abc"), 7, None);
         let restored = adapter.restore_session("sess-1");
-        assert_eq!(restored, Some(("conv-abc".to_string(), 7)));
+        assert_eq!(restored, Some(("conv-abc".to_string(), 7, None)));
 
         let missing = adapter.restore_session("sess-unknown");
         assert_eq!(missing, None);
@@ -1243,6 +1361,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir,
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
         let result = adapter.read_response_from_db("test-conv", -1);
@@ -1397,6 +1516,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir,
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
         let result = adapter.read_response_from_db("multi", -1);
@@ -1431,6 +1551,7 @@ mod tests {
             working_dir: root.to_string_lossy().to_string(),
             conversations_dir: conv_dir,
             state_file: root.join("sessions.json"),
+            available_models: vec![],
         };
 
         let result = adapter.read_response_from_db("empty", -1);
