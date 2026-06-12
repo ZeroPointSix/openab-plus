@@ -104,6 +104,10 @@ Recent local E2E testing found:
 - Most local users need an install-friendly sandbox. The recommended direction
   is runtime user-local installs under `/sandbox`, not a large image that
   preinstalls every possible tool.
+- The image should not pre-bake workflow CLIs such as `gh`, `aws`, `gcloud`,
+  `kubectl`, `terraform`, `wrangler`, or `gws`. The acceptance test should prove
+  that those tools are absent from a clean image and can be installed
+  user-locally when needed.
 - Small standalone binaries can be staged under `/sandbox/bin`; larger tool
   trees should live under `/sandbox`; scratch downloads should use
   `/sandbox/tmp`.
@@ -208,7 +212,7 @@ as a stable public contract.
 | Tier | Use case | Network posture | Install posture | Docs posture |
 |---|---|---|---|---|
 | `dev-agent` | First successful local OpenAB bot and normal developer use | Broad enough for model providers, Discord, GitHub, npm/PyPI, Google APIs as needed | Runtime user-local installs under `/sandbox`; no system package installs | `docs/openshell.md` quick start |
-| `web-agent` | Normal deployed OpenAB assistant with web/API tools | Broad HTTPS/WebSocket egress for selected providers and tools | Bootstrap tools in image; agent installs extras under `/sandbox` | Policy-specific docs after validation |
+| `web-agent` | Normal deployed OpenAB assistant with web/API tools | Broad HTTPS/WebSocket egress for selected providers and tools | Bootstrap/runtime tools and selected agent runtime in image; agent installs workflow tools under `/sandbox` | Policy-specific docs after validation |
 | `runtime-agent` | Smaller production-like bot | Only what the image and current OpenShell defaults require to connect Discord and model APIs | Minimal runtime image; optional user-local `/sandbox/bin` installs if policy permits | Advanced/runtime note |
 | `safe-agent` | Enterprise/security-sensitive deployment | Narrow endpoint allowlist per agent/provider | No runtime installs | Production hardening guide |
 
@@ -224,6 +228,12 @@ Policy implementation guidance:
 - Separate network policy from install policy. A sandbox can have broad egress
   and still be intentionally non-root while allowing user-local installs under
   `/sandbox`.
+- Treat "enable installs" as a runtime user-local capability, not as permission
+  to run `sudo`, `apt-get install`, `brew`, or writes into `/usr`, `/opt`, or
+  `/usr/local/bin`.
+- Test both halves of the contract: clean images should not contain pre-baked
+  workflow tools, and the sandbox should still be able to install a standalone
+  binary into `/sandbox/bin` at runtime.
 
 ## 7. Preset Responsibilities
 

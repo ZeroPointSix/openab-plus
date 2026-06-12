@@ -55,6 +55,12 @@ docker build -t oab-native-sandbox -f openshell/Dockerfile .
 
 This image is intentionally small. It does not add Go, Node, Python, cloud CLIs, or every tool an agent might someday need. Extra tools should be installed later by the agent into `/sandbox`, following [Agent-Installable Tools](agent-installable-tools.md).
 
+Expected image contract:
+
+- The image can start OpenAB and its selected agent runtime.
+- The image does not preinstall workflow CLIs such as `gh`, `aws`, `gcloud`, `kubectl`, `terraform`, `wrangler`, or `gws`.
+- The running sandbox stays non-root. Runtime installs go to `/sandbox/bin` or `/sandbox/.local/bin`, not `/usr`, `/opt`, or `/usr/local/bin`.
+
 ## 3. Create The Sandbox
 
 ```bash
@@ -88,6 +94,8 @@ openab-local-install-test
 
 command -v openab
 command -v openab-agent
+command -v gh && exit 1 || echo "gh missing as expected"
+test -w /usr/local/bin && exit 1 || echo "/usr/local/bin not writable as expected"
 ```
 
 Expected output:
@@ -97,6 +105,15 @@ openab-local-install-ok
 ```
 
 This proves the agent can install standalone tools into `/sandbox/bin` at runtime. For real tools, use the same home-directory install pattern from [Agent-Installable Tools](agent-installable-tools.md).
+
+For a full build acceptance test, verify all of the following:
+
+- `whoami` is the sandbox user, not `root`.
+- `/sandbox`, `/sandbox/bin`, `/sandbox/.local/bin`, and `/sandbox/tmp` are writable.
+- `/usr`, `/opt`, and `/usr/local/bin` are not runtime install targets.
+- `gh`, `aws`, `gcloud`, `kubectl`, `terraform`, `wrangler`, and `gws` are absent from a clean image unless a specific downstream image intentionally adds them.
+- A standalone binary can be downloaded to `/sandbox/tmp`, copied to `/sandbox/bin`, marked executable, and run from `PATH`.
+- The same tool is still present after a sandbox/container restart when `/sandbox` is persistent.
 
 ## 5. Create The OpenAB Config
 

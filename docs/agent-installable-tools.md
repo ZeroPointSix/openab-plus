@@ -17,8 +17,8 @@ Your agent will query the relevant docs under `docs/`, find the recommended appr
   ┌─────────────────┐         ┌──────────────────┐          ┌──────────────────────────┐
   │                  │         │                  │          │  Container (read-only)   │
   │ "install glab   │────────►│ reads docs/*     │          │  ┌────────────────────┐  │
-  │  for my OAB     │         │ from OpenAB repo │          │  │ curl, gh, rg, tini │  │
-  │  agent"         │         │                  │          │  │ (built-in, minimal)│  │
+  │  for my OAB     │         │ from OpenAB repo │          │  │ curl, unzip, tini  │  │
+  │  agent"         │         │                  │          │  │ bootstrap/runtime  │  │
   │                  │         │ finds install    │          │  └────────────────────┘  │
   │                  │         │ steps for glab   │          │                          │
   │                  │         │                  │          │  PVC (persistent ~/):    │
@@ -53,7 +53,7 @@ Your agent will query the relevant docs under `docs/`, find the recommended appr
 
 ## Why This Pattern
 
-OpenAB keeps its Docker image minimal — only the essentials ship in the Dockerfile. Everything else is installed **at runtime by the agent** into the home directory (`~/bin/`). This is a deliberate design choice:
+OpenAB keeps its Docker image minimal — only bootstrap/runtime essentials and the selected agent runtime ship in the Dockerfile. Workflow tools are installed **at runtime by the agent** into the home directory (`~/bin/` or `/sandbox/bin/`). This is a deliberate design choice:
 
 - **Lean image, infinite extensibility** — the Dockerfile never grows. Need AWS CLI today, Terraform tomorrow, glab next week? Same image, same pattern. No rebuild, no redeploy.
 - **Doc-driven, AI-first** — documentation is written for agents to consume. Humans just say what they need; the agent reads the docs and executes.
@@ -67,15 +67,14 @@ OpenAB keeps its Docker image minimal — only the essentials ship in the Docker
 
 ## What Ships in the Image
 
-| Tool | Why it's built-in |
-|------|-------------------|
-| `curl`, `unzip` | Bootstrap — needed to download everything else |
-| `gh` (GitHub CLI) | Core workflow — OpenAB repos are on GitHub; agents push reviews and PRs |
-| `ripgrep` | Core workflow — fast code search inside the pod |
-| `procps`, `tini` | Runtime — healthcheck and process management |
-| `kiro-cli` | Core workflow — the coding agent runtime |
+| Category | Examples | Why it's built-in |
+|---|---|---|
+| Bootstrap | `curl`, `unzip` | Needed to download and unpack runtime-installed tools |
+| Runtime | `procps`, `tini` | Healthcheck and process management |
+| Base workflow | `git`, `ripgrep` | Small, common primitives used by most coding agents |
+| Selected agent runtime | `openab-agent`, `kiro-cli`, `claude`, `codex`, etc. depending on image | The image must be able to start its intended agent |
 
-Everything else is **agent-installable**.
+Everything else is **agent-installable**. Cloud, SCM, admin, deployment, and workspace CLIs such as `gh`, `aws`, `gcloud`, `kubectl`, `terraform`, `wrangler`, and `gws` should not be pre-baked into the default agent images.
 
 ## Common Tools
 
@@ -83,6 +82,7 @@ The following tools are commonly installed by agents. This doc does **not** hard
 
 | Tool | Upstream Install Docs |
 |------|----------------------|
+| **GitHub CLI** (`gh`) | [cli.github.com/manual/installation](https://cli.github.com/manual/installation) — use the release tarball or `.deb` extract pattern for runtime installs. |
 | **OpenSSH** (`ssh`, `scp`, `ssh-keygen`) | [packages.debian.org/bookworm/openssh-client](https://packages.debian.org/bookworm/amd64/openssh-client/download) — use `.deb` extract pattern. Also see [remote-ssh-debugging.md](refarch/remote-ssh-debugging.md) for SSH key setup. |
 | **AWS CLI v2** (`aws`) | [docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2-linux.html) |
 | **GitLab CLI** (`glab`) | [gitlab.com/gitlab-org/cli/-/releases](https://gitlab.com/gitlab-org/cli/-/releases) |
@@ -97,11 +97,11 @@ The following tools are commonly installed by agents. This doc does **not** hard
 When installing any tool, the agent **must** follow these rules:
 
 1. **No `sudo`** — the container has no root access and a read-only root filesystem
-2. **Install to `~/bin/`** (binaries) or `~/` (larger installs like `~/aws-cli/`) — never write to `/usr/`, `/opt/`, or other system paths
+2. **Install to `~/bin/` or `/sandbox/bin/`** (binaries) or `~/`/`/sandbox` (larger installs like `~/aws-cli/`) — never write to `/usr/`, `/opt/`, or other system paths
 3. **Detect architecture** — the pod may be ARM64 (`aarch64`) or AMD64 (`x86_64`). Always check `uname -m` and download the correct binary.
-4. **Use `/tmp/` for scratch** — download and extract in `/tmp/`, copy the final binary to `~/bin/`, then clean up `/tmp/`
+4. **Use `/tmp/` or `/sandbox/tmp` for scratch** — download and extract in scratch space, copy the final binary to `~/bin/` or `/sandbox/bin/`, then clean up
 5. **Verify after install** — run `<tool> --version` or equivalent to confirm it works
-6. **`export PATH="$HOME/bin:$PATH"`** — ensure `~/bin/` is in PATH before verification
+6. **`export PATH="$HOME/bin:/sandbox/bin:/sandbox/.local/bin:$PATH"`** — ensure user-local install paths are in PATH before verification
 7. **Look up the latest version from upstream** — do not hardcode version numbers; always fetch the latest stable release
 
 ### `.deb` Package Pattern (for tools without standalone binaries)
@@ -116,6 +116,46 @@ cp /tmp/deb-extract/usr/bin/<binary> ~/bin/
 chmod +x ~/bin/<binary>
 rm -rf /tmp/package.deb /tmp/deb-extract
 ```
+
+## Build Test Objectives
+
+Use these checks before declaring an OpenShell/OpenAB image ready:
+
+1. A clean image does not contain workflow CLIs that should be runtime-installed:
+
+   ```bash
+   command -v gh && exit 1 || echo "gh missing as expected"
+   command -v gcloud && exit 1 || echo "gcloud missing as expected"
+   command -v aws && exit 1 || echo "aws missing as expected"
+   ```
+
+2. The sandbox runs as the non-root agent user and keeps system paths non-writable:
+
+   ```bash
+   id -un
+   test -w /usr/local/bin && exit 1 || echo "/usr/local/bin not writable as expected"
+   ```
+
+3. The agent can install a standalone tool without `sudo`, `apt-get install`, `brew`, or writes to `/usr`:
+
+   ```bash
+   export HOME=/sandbox
+   export PATH="/sandbox/bin:/sandbox/.local/bin:$PATH"
+   mkdir -p /sandbox/bin /sandbox/tmp
+   case "$(uname -m)" in
+     x86_64) yq_arch=amd64 ;;
+     aarch64|arm64) yq_arch=arm64 ;;
+     *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+   esac
+   curl -fsSL -o /sandbox/tmp/yq.tar.gz \
+     "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${yq_arch}.tar.gz"
+   tar -xzf /sandbox/tmp/yq.tar.gz -C /sandbox/tmp
+   cp "/sandbox/tmp/yq_linux_${yq_arch}" /sandbox/bin/yq
+   chmod +x /sandbox/bin/yq
+   yq --version
+   ```
+
+4. The installed tool remains available after the sandbox/container is restarted, assuming `/sandbox` is persistent.
 
 ## Persistence & Portability
 

@@ -29,14 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 ARG OPENCODE_VERSION=1.16.2
 RUN npm install -g opencode-ai@${OPENCODE_VERSION} --retry 3
 
-# Install gh CLI (matches Dockerfile.claude / Dockerfile.gemini / Dockerfile.codex)
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && apt-get install -y --no-install-recommends gh && \
-    rm -rf /var/lib/apt/lists/*
-
 ENV HOME=/home/node
 WORKDIR /home/node
 
