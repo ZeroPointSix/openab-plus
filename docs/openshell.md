@@ -11,8 +11,9 @@ If a user asks to install OpenAB "with OpenShell structure" or "per docs/openshe
 Agents must follow these rules:
 
 - Do not install OpenAB directly on the host as a substitute for OpenShell.
+- Do not run `cargo build`, copy `openab` or `openab-agent` into host `~/.local/bin`, or codesign host binaries for this guide. The OpenAB binaries are provided by the sandbox image built with `docker build`.
 - Do not claim that host paths such as `~/.local/bin`, `/Users/<user>`, or a normal shell environment "mimic" OpenShell.
-- Do not continue past missing prerequisites by changing the architecture. If `docker` or `openshell` is missing, install or ask the user to install that prerequisite, then resume this guide.
+- Do not continue past missing prerequisites by changing the architecture. If `docker`, `brew` on macOS, or `openshell` is missing, install that prerequisite when the user has asked you to proceed, then resume this guide. Ask the user only when a GUI approval, password prompt, or browser login is required.
 - Do not run the long-lived bot from the host shell for this guide. The bot must run inside the OpenShell-created sandbox container.
 - `/sandbox` means the sandbox filesystem created by OpenShell. It does not mean an arbitrary directory on the host.
 
@@ -47,20 +48,96 @@ command -v openshell
 openshell sandbox list
 ```
 
-If any command fails, stop here and fix that prerequisite. Do not install OpenAB directly on the host to work around the failure.
+If any command fails, stop here and fix that prerequisite using [Install Host Prerequisites](#0-install-host-prerequisites). If the user has asked you to proceed, run the relevant prerequisite commands yourself until a GUI approval, password prompt, logout, or browser login requires the user. Do not install OpenAB directly on the host to work around the failure.
+
+## 0. Install Host Prerequisites
+
+Use this section only when the preflight check fails.
+
+OpenShell's official installer uses Homebrew on macOS and requires a compute driver such as Docker. The OpenAB OpenShell path therefore needs both Docker and OpenShell available on the host before the sandbox can be created.
+
+### macOS
+
+If Homebrew is missing, install it first:
+
+```bash
+command -v brew || /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Load Homebrew into the current shell if needed:
+
+```bash
+if [ -x /opt/homebrew/bin/brew ]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [ -x /usr/local/bin/brew ]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
+```
+
+Install Docker Desktop if the Docker CLI or daemon is missing:
+
+```bash
+command -v docker || brew install --cask docker
+docker info >/dev/null 2>&1 || open -a Docker
+```
+
+After opening Docker Desktop, wait for the user to finish any macOS approval dialogs, then verify:
+
+```bash
+until docker info >/dev/null 2>&1; do
+  echo "waiting for Docker Desktop..."
+  sleep 5
+done
+```
 
 Install OpenShell:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+command -v openshell || curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
 ```
 
-If OpenShell cannot talk to Docker, add your user to the `docker` group and start a new login session:
+Verify:
 
 ```bash
-sudo usermod -aG docker "$USER"
-# Log out and back in, or run: loginctl terminate-user "$USER"
+command -v docker
+docker info
+command -v openshell
+openshell sandbox list
 ```
+
+### Linux
+
+Install Docker using the platform package manager, start it, and make sure the current user can use it. On Debian/Ubuntu-style systems:
+
+```bash
+command -v docker || {
+  sudo apt-get update
+  sudo apt-get install -y docker.io
+}
+sudo systemctl enable --now docker
+docker info || {
+  sudo usermod -aG docker "$USER"
+  echo "Log out and back in, then rerun this guide."
+  exit 1
+}
+```
+
+Install OpenShell:
+
+```bash
+command -v openshell || curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+```
+
+Verify:
+
+```bash
+command -v docker
+docker info
+command -v openshell
+openshell sandbox list
+```
+
+Only continue to the next section after these verification commands pass.
 
 ## 1. Set Your Discord Token On The Host
 
@@ -318,6 +395,8 @@ See [Agent-Installable Tools](agent-installable-tools.md) for the full pattern.
 | Symptom | Check | Fix |
 | --- | --- | --- |
 | `failed to query Docker daemon version` | Docker access | Add user to `docker` group and start a new login session |
+| `openshell: error: Homebrew is required for macOS installs` | macOS OpenShell installer needs Homebrew | Install Homebrew, load `brew shellenv`, then rerun the OpenShell installer |
+| `docker: command not found` or `Cannot connect to the Docker daemon` | Docker CLI or daemon missing | On macOS install/open Docker Desktop; on Linux install/start Docker Engine; then rerun preflight |
 | Bot token error | `test -n "$DISCORD_BOT_TOKEN" && echo set` | Re-export the token in the shell that starts OpenAB |
 | Auth file searched under `/root` | Log says `/root/.openab/...` | Run with `HOME=/sandbox` |
 | Bot online but no reply | `openab-agent auth status` | Re-run `openab-agent auth codex-oauth --no-browser` |
@@ -333,6 +412,7 @@ When testing this guide with an agent, keep the test honest:
 - Use `openshell/Dockerfile`.
 - Require real OpenShell evidence: `command -v openshell`, `openshell sandbox list`, and `openshell sandbox connect <name>` must work.
 - Treat missing `docker` or missing `openshell` as a blocker, not as permission to install OpenAB on the host.
+- If the user asked the agent to proceed, missing `brew`, Docker, or OpenShell should trigger the prerequisite install section, not a native OpenAB install.
 - Treat the guide author and the E2E test subject as separate roles.
 - If the test subject hits a build or setup failure, let the test subject diagnose, edit, rebuild, and report the fix. Do not patch the guide or image from outside the test and then count that run as one-shot success.
 - Do not rewrite OpenShell policy files to make the test pass.
