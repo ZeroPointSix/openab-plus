@@ -1775,12 +1775,14 @@ dependencies = [
  "regex",
  "reqwest",
  "rpassword",
+ "rustls 0.22.4",
  "serde",
  "serde_json",
  "serenity",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.25.0",
  "tokio-tungstenite",
  "toml",
  "toml_edit",
@@ -1789,6 +1791,7 @@ dependencies = [
  "unicode-width",
  "urlencoding",
  "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

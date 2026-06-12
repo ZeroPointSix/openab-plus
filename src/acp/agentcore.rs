@@ -108,7 +108,7 @@ struct ShellHandle {
 }
 
 type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
@@ -198,7 +198,7 @@ where
                         .unwrap_or_default()
                         .as_millis();
                     let acp_sid = format!("agentcore-{ts}");
-                    let runtime_sid = format!("oab-session-{ts}");
+                    let runtime_sid = format!("oab-session-{ts:020}-{ts:013x}");
 
                     // Eagerly open shell + initialize the agent
                     match self.open_shell(&runtime_sid).await {
@@ -376,6 +376,7 @@ where
         }
     }
 
+    #[allow(dead_code)]
     fn derive_runtime_session_id(&self, params: &Value) -> String {
         // Try to extract from sender_context in prompt blocks
         if let Some(blocks) = params.get("prompt").and_then(|p| p.as_array()) {
@@ -414,11 +415,38 @@ where
     }
 
     async fn open_shell(&self, session_id: &str) -> Result<ShellHandle> {
-        let request = build_signed_request(&self.runtime_arn, session_id, &self.region).await?;
+        let (request, host) = build_signed_request(&self.runtime_arn, session_id, &self.region).await?;
 
-        let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+        // Manual TLS connection — gives us full control, avoids connect_async host override
+        let tcp = tokio::net::TcpStream::connect(format!("{host}:443"))
             .await
-            .map_err(|e| anyhow!("WebSocket connect failed: {e}"))?;
+            .map_err(|e| anyhow!("TCP connect to {host}:443 failed: {e}"))?;
+
+        let connector = tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(rustls::RootCertStore {
+                    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+                })
+                .with_no_client_auth(),
+        ));
+
+        let tls_stream = match connector {
+            tokio_tungstenite::Connector::Rustls(cfg) => {
+                let domain = rustls::pki_types::ServerName::try_from(host.as_str())
+                    .map_err(|e| anyhow!("bad DNS: {e}"))?
+                    .to_owned();
+                tokio_rustls::TlsConnector::from(cfg)
+                    .connect(domain, tcp)
+                    .await
+                    .map_err(|e| anyhow!("TLS failed: {e}"))?
+            }
+            _ => unreachable!(),
+        };
+
+        // client_async performs the WebSocket upgrade using our exact request
+        let (ws_stream, _) = tokio_tungstenite::client_async(request, tls_stream)
+            .await
+            .map_err(|e| anyhow!("WebSocket upgrade failed: {e}"))?;
 
         info!(session_id, "AgentCore shell connected");
 
@@ -571,7 +599,7 @@ async fn build_signed_request(
     arn: &str,
     session_id: &str,
     region: &str,
-) -> Result<http::Request<()>> {
+) -> Result<(http::Request<()>, String)> {
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(region.to_string()))
         .load()
@@ -594,15 +622,14 @@ async fn build_signed_request(
     let hash = Sha256::digest(session_id.as_bytes());
     let shell_id = format!("oab-{}", hex::encode(&hash[..8]));
 
-    let query = format!(
-        "shellId={shell_id}&X-Amzn-Bedrock-AgentCore-Runtime-Session-Id={}",
-        urlencoding::encode(session_id),
-    );
-
+    let query = format!("qualifier=DEFAULT&shellId={shell_id}");
     let uri = format!("https://{host}{path}?{query}");
 
+    // Header-based SigV4 auth
     let mut settings = SigningSettings::default();
-    settings.expires_in = Some(std::time::Duration::from_secs(300));
+    settings.expires_in = None;
+    settings.uri_path_normalization_mode =
+        aws_sigv4::http_request::UriPathNormalizationMode::Enabled;
 
     let signing_params = v4::SigningParams::builder()
         .identity(&identity)
@@ -612,31 +639,31 @@ async fn build_signed_request(
         .settings(settings)
         .build()?;
 
-    let headers = [("host", host.as_str())];
-
+    let headers = [
+        ("host", host.as_str()),
+        ("x-amzn-bedrock-agentcore-runtime-session-id", session_id),
+    ];
     let signable = SignableRequest::new("GET", &uri, headers.into_iter(), SignableBody::empty())?;
-
     let (instructions, _sig) = sign(signable, &signing_params.into())?.into_parts();
 
-    // Build presigned URL with auth in query params
-    let mut signed_query = query.clone();
-    let (_headers, params) = instructions.into_parts();
-    for (name, value) in params {
-        signed_query.push_str(&format!("&{name}={value}"));
-    }
-    let wss_uri = format!("wss://{host}{path}?{signed_query}");
+    let wss_uri = format!("wss://{host}{path}?{query}");
 
-    let builder = http::Request::builder()
+    // Build request with auth headers + WebSocket headers
+    let mut builder = http::Request::builder()
         .method("GET")
         .uri(&wss_uri)
         .header("host", &host)
+        .header("x-amzn-bedrock-agentcore-runtime-session-id", session_id)
         .header("connection", "Upgrade")
         .header("upgrade", "websocket")
         .header("sec-websocket-version", "13")
-        .header(
-            "sec-websocket-key",
-            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
-        );
+        .header("sec-websocket-key", tokio_tungstenite::tungstenite::handshake::client::generate_key());
 
-    Ok(builder.body(())?)
+    // Add SigV4 auth headers (x-amz-date, authorization)
+    for (name, value) in instructions.headers() {
+        builder = builder.header(name, value);
+    }
+
+    let request = builder.body(())?;
+    Ok((request, host))
 }
