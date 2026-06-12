@@ -1168,7 +1168,13 @@ mod tests {
 
     #[test]
     fn test_initialize_advertises_load_session_support() {
-        let adapter = Adapter::new();
+        let adapter = Adapter {
+            sessions: HashMap::new(),
+            working_dir: "/tmp".to_string(),
+            conversations_dir: PathBuf::from("/tmp"),
+            state_file: PathBuf::from("/tmp/sessions.json"),
+            available_models: vec![],
+        };
         let response = adapter.handle_initialize(json!(1));
         assert_eq!(
             response
