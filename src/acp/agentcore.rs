@@ -513,6 +513,7 @@ where
         });
 
         // Send ACP initialize to the agent (it will respond once booted)
+
         let init_msg = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 0,
@@ -525,32 +526,37 @@ where
         });
         let init_data = format!("{}\n", serde_json::to_string(&init_msg)?);
 
-        // Retry sending initialize — the agent may need a moment to start
-        for attempt in 0..3 {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
-            let mut w = ws_write.lock().await;
-            let mut frame = Vec::with_capacity(1 + init_data.len());
-            frame.push(CHANNEL_STDIN);
-            frame.extend_from_slice(init_data.as_bytes());
-            match w.send(Message::Binary(frame)).await {
-                Ok(_) => break,
-                Err(e) if attempt < 2 => {
-                    info!(attempt, "initialize send failed, retrying: {e}");
-                    continue;
+        // Send initialize and wait for response (retry if agent hasn't booted yet)
+        let mut initialized = false;
+        for attempt in 0..5 {
+            {
+                let mut w = ws_write.lock().await;
+                let mut frame = Vec::with_capacity(1 + init_data.len());
+                frame.push(CHANNEL_STDIN);
+                frame.extend_from_slice(init_data.as_bytes());
+                if let Err(e) = w.send(Message::Binary(frame)).await {
+                    if attempt < 4 {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    return Err(anyhow!("failed to send initialize: {e}"));
                 }
-                Err(e) => return Err(anyhow!("failed to send initialize after retries: {e}")),
+            }
+            // Wait up to 10s for response
+            match tokio::time::timeout(std::time::Duration::from_secs(10), line_rx.recv()).await {
+                Ok(Some(line)) => {
+                    info!(attempt, len = line.len(), "agent initialized");
+                    initialized = true;
+                    break;
+                }
+                Ok(None) => return Err(anyhow!("agent closed before initialize response")),
+                Err(_) => {
+                    info!(attempt, "no initialize response, retrying...");
+                }
             }
         }
-
-        // Wait for initialize response (consume it — don't forward)
-        match tokio::time::timeout(std::time::Duration::from_secs(30), line_rx.recv()).await {
-            Ok(Some(line)) => {
-                info!("kiro-cli initialized: received {} bytes", line.len());
-            }
-            Ok(None) => return Err(anyhow!("kiro-cli closed before initialize response")),
-            Err(_) => return Err(anyhow!("kiro-cli initialize timed out (30s)")),
+        if !initialized {
+            return Err(anyhow!("agent failed to respond to initialize after 5 attempts"));
         }
 
         // Send session/new to kiro-cli to create a session
