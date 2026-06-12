@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import hashlib
+import time
 
 from bedrock_agentcore.runtime import AgentCoreRuntimeClient, ReconnectConfig, ShellChannel
 
@@ -291,7 +292,6 @@ class AcpAdapter:
         return session
 
     async def handle_session_new(self, id, params: dict):
-        import time
         acp_sid = f"agentcore-{int(time.time() * 1000)}"
         self.sessions[acp_sid] = None  # placeholder until first prompt
         write_response(id, {"sessionId": acp_sid})
