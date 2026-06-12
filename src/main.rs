@@ -87,6 +87,9 @@ enum Commands {
         /// AWS region
         #[arg(long, default_value = "us-east-1")]
         region: String,
+        /// ACP agent command to run in the PTY (default: kiro-cli acp --trust-all-tools)
+        #[arg(long, default_value = "kiro-cli acp --trust-all-tools")]
+        command: String,
     },
 }
 
@@ -109,8 +112,8 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         #[cfg(feature = "agentcore")]
-        Commands::AgentcoreBridge { runtime_arn, region } => {
-            return acp::agentcore::run_bridge(&runtime_arn, &region).await;
+        Commands::AgentcoreBridge { runtime_arn, region, command } => {
+            return acp::agentcore::run_bridge(&runtime_arn, &region, &command).await;
         }
         Commands::Run { config } => config,
     };

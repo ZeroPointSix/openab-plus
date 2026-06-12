@@ -69,10 +69,17 @@ impl<'de> Deserialize<'de> for AllowBots {
 pub struct AgentCoreConfig {
     /// AgentCore Runtime ARN (required)
     pub runtime_arn: String,
+    /// ACP agent command to run in the PTY shell (default: kiro-cli acp --trust-all-tools)
+    #[serde(default = "default_agentcore_shell_command")]
+    pub shell_command: String,
     /// Cancel strategy: "noop" or "stop" (default: stop)
     #[serde(default = "default_agentcore_cancel_strategy")]
     #[allow(dead_code)]
     pub cancel_strategy: AgentCoreCancelStrategy,
+}
+
+fn default_agentcore_shell_command() -> String {
+    "kiro-cli acp --trust-all-tools".to_string()
 }
 
 impl AgentCoreConfig {
@@ -945,6 +952,8 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
                         ac.runtime_arn.clone(),
                         "--region".into(),
                         ac.region(),
+                        "--command".into(),
+                        ac.shell_command.clone(),
                     ],
                 )
             };

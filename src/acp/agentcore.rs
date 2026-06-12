@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::info;
 
-const KIRO_ACP_CMD: &str = "stty -echo 2>/dev/null; exec kiro-cli acp --trust-all-tools\n";
+const AGENT_CMD_PREFIX: &str = "stty -echo 2>/dev/null; exec ";
 
 /// WebSocket binary frame channel bytes (1-byte prefix protocol).
 const CHANNEL_STDIN: u8 = 0x00;
@@ -75,17 +75,18 @@ fn extract_json_object(line: &str) -> Option<String> {
 }
 
 /// Entry point for the agentcore bridge subprocess.
-pub async fn run_bridge(runtime_arn: &str, region: &str) -> Result<()> {
+pub async fn run_bridge(runtime_arn: &str, region: &str, agent_command: &str) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
     let stdout = tokio::io::stdout();
 
-    let mut bridge = Bridge::new(runtime_arn, region, stdin, stdout);
+    let mut bridge = Bridge::new(runtime_arn, region, agent_command, stdin, stdout);
     bridge.run().await
 }
 
 struct Bridge<R, W> {
     runtime_arn: String,
     region: String,
+    agent_command: String,
     stdin: R,
     stdout: W,
     sessions: HashMap<String, ShellHandle>,
@@ -116,10 +117,11 @@ where
     R: AsyncBufReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    fn new(runtime_arn: &str, region: &str, stdin: R, stdout: W) -> Self {
+    fn new(runtime_arn: &str, region: &str, agent_command: &str, stdin: R, stdout: W) -> Self {
         Self {
             runtime_arn: runtime_arn.to_string(),
             region: region.to_string(),
+            agent_command: agent_command.to_string(),
             stdin,
             stdout,
             sessions: HashMap::new(),
@@ -419,11 +421,12 @@ where
         let (ws_write, mut ws_read) = ws_stream.split();
         let ws_write = Arc::new(Mutex::new(ws_write));
 
-        // Send kiro-cli launch command
+        // Send agent launch command
+        let shell_cmd = format!("{}{}\n", AGENT_CMD_PREFIX, self.agent_command);
         {
-            let mut frame = Vec::with_capacity(1 + KIRO_ACP_CMD.len());
+            let mut frame = Vec::with_capacity(1 + shell_cmd.len());
             frame.push(CHANNEL_STDIN);
-            frame.extend_from_slice(KIRO_ACP_CMD.as_bytes());
+            frame.extend_from_slice(shell_cmd.as_bytes());
             let mut w = ws_write.lock().await;
             w.send(Message::Binary(frame))
                 .await
