@@ -102,6 +102,15 @@ Recent local E2E testing found:
   or another normal user home are not OpenShell installs, even if they reuse the
   same non-root layout. The OpenShell path must create and enter a real
   OpenShell sandbox.
+- Manual OpenShell installs assembled from GitHub release artifacts under
+  `~/.local/bin` are not a valid quick-start path. They bypass the
+  package-managed gateway setup, mTLS/bootstrap conventions, and service
+  ownership expected by the official installer.
+- For the quick start, prefer the Docker-driver path. If an E2E agent switches
+  to MicroVM, downloads `openshell-driver-vm`, compiles filesystem utilities,
+  wraps `debugfs`, patches OpenShell helper binaries, or edits ext4 cache/state
+  by hand, the test should be treated as failed and out of scope for this
+  guide.
 - The running sandbox is not suitable for system package installation.
   Attempts to install tools into `/usr/local/bin` or use `apt` fail under the
   non-root sandbox user, and that is an intended boundary.

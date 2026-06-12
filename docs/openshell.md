@@ -14,6 +14,9 @@ Agents must follow these rules:
 - Do not run `cargo build`, copy `openab` or `openab-agent` into host `~/.local/bin`, or codesign host binaries for this guide. The OpenAB binaries are provided by the sandbox image built with `docker build`.
 - Do not claim that host paths such as `~/.local/bin`, `/Users/<user>`, or a normal shell environment "mimic" OpenShell.
 - Do not continue past missing prerequisites by changing the architecture. If `docker`, `brew` on macOS, or `openshell` is missing, install that prerequisite when the user has asked you to proceed, then resume this guide. Ask the user only when a GUI approval, password prompt, or browser login is required.
+- Do not manually download OpenShell release binaries into `~/.local/bin` for this guide. Use the official installer so the CLI, gateway, mTLS bundle, and service are installed consistently.
+- Do not force the MicroVM driver, download `openshell-driver-vm`, compile `e2fsprogs`, wrap `debugfs`, wrap `openshell-driver-vm`, codesign OpenShell binaries, or edit cached ext4 images. This quick start uses the Docker compute driver path.
+- Do not edit or delete `~/.local/state/openshell` directly. Manage sandboxes with `openshell sandbox ...` commands and manage the package-installed gateway with the platform service manager.
 - Do not run the long-lived bot from the host shell for this guide. The bot must run inside the OpenShell-created sandbox container.
 - `/sandbox` means the sandbox filesystem created by OpenShell. It does not mean an arbitrary directory on the host.
 
@@ -30,11 +33,16 @@ The user prompt does not need to restate these constraints. They are part of thi
 - Do not codesign host-local OpenAB binaries.
 - Do not use native OpenAB as a fallback.
 - Do not continue after prerequisite failure by switching to a host-local architecture.
+- Do not install OpenShell by copying GitHub release artifacts into `~/.local/bin`.
+- Do not start `openshell-gateway --drivers vm` or otherwise force MicroVM for this guide.
+- Do not patch OpenShell helper binaries or filesystem tools.
+- Do not mutate OpenShell state/cache directories by hand.
 
 The setup is not successful until all of these are true:
 
 - `docker info` works on the host.
 - `openshell sandbox list` works on the host.
+- OpenShell was installed by the official installer or package manager, not by manually copied release binaries.
 - `openshell sandbox create --from` creates the OpenAB sandbox.
 - `openshell sandbox connect <name>` enters the sandbox and lands in `/sandbox`.
 - `openab` and `openab-agent` exist inside the sandbox.
@@ -80,6 +88,8 @@ Use this section only when the preflight check fails.
 
 OpenShell's official installer uses Homebrew on macOS and requires a compute driver such as Docker. The OpenAB OpenShell path therefore needs both Docker and OpenShell available on the host before the sandbox can be created.
 
+Use the package-managed OpenShell install path only. Do not manually install `openshell`, `openshell-gateway`, `openshell-driver-vm`, or other OpenShell release artifacts into `~/.local/bin`.
+
 ### macOS
 
 If Homebrew is missing, install it first:
@@ -120,6 +130,8 @@ Install OpenShell:
 command -v openshell || curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
 ```
 
+Do not replace this with a manual download from GitHub Releases. On macOS, the installer uses Homebrew and starts the Homebrew-managed gateway service.
+
 Verify:
 
 ```bash
@@ -128,6 +140,8 @@ docker info
 command -v openshell
 openshell sandbox list
 ```
+
+If `openshell sandbox list` fails because no compute driver is configured, fix Docker Desktop/Engine first and rerun the package-managed gateway. Do not switch to the VM driver for this quick start.
 
 ### Linux
 
@@ -421,6 +435,10 @@ See [Agent-Installable Tools](agent-installable-tools.md) for the full pattern.
 | `failed to query Docker daemon version` | Docker access | Add user to `docker` group and start a new login session |
 | `openshell: error: Homebrew is required for macOS installs` | macOS OpenShell installer needs Homebrew | Install Homebrew, load `brew shellenv`, then rerun the OpenShell installer |
 | `docker: command not found` or `Cannot connect to the Docker daemon` | Docker CLI or daemon missing | On macOS install/open Docker Desktop; on Linux install/start Docker Engine; then rerun preflight |
+| Agent copied `openshell`, `openshell-gateway`, or `openshell-driver-vm` into `~/.local/bin` | Manual release artifact install was used | Stop that run. Remove the manual binaries if appropriate, install OpenShell with the official installer/package manager, then rerun preflight |
+| Agent started `openshell-gateway --drivers vm` or downloaded `openshell-driver-vm` | The test switched to MicroVM instead of Docker | Stop that run. Use Docker Desktop/Engine for this quick start and let the package-managed gateway auto-detect Docker |
+| Agent compiled `e2fsprogs`, wrapped `debugfs`, patched `openshell-driver-vm`, or edited ext4 images | The test is repairing OpenShell internals instead of following the quick start | Stop that run. Treat this as an OpenShell VM-driver issue outside this guide, reset the local OpenShell install/state, and retry with Docker |
+| Agent deleted or edited `~/.local/state/openshell` directly | Manual state mutation can corrupt future runs | Stop that run. Use `openshell sandbox delete <name>` for sandbox cleanup and reinstall/restart OpenShell if state is corrupted |
 | Bot token error | `test -n "$DISCORD_BOT_TOKEN" && echo set` | Re-export the token in the shell that starts OpenAB |
 | Auth file searched under `/root` | Log says `/root/.openab/...` | Run with `HOME=/sandbox` |
 | Bot online but no reply | `openab-agent auth status` | Re-run `openab-agent auth codex-oauth --no-browser` |
@@ -438,6 +456,9 @@ When testing this guide with an agent, keep the test honest:
 - Require real OpenShell evidence: `command -v openshell`, `openshell sandbox list`, and `openshell sandbox connect <name>` must work.
 - Treat missing `docker` or missing `openshell` as a blocker, not as permission to install OpenAB on the host.
 - If the user asked the agent to proceed, missing `brew`, Docker, or OpenShell should trigger the prerequisite install section, not a native OpenAB install.
+- Fail the test if the agent manually installs OpenShell release binaries into `~/.local/bin`.
+- Fail the test if the agent starts or patches the MicroVM driver for this quick start.
+- Fail the test if the agent compiles filesystem utilities or mutates OpenShell ext4/cache/state internals.
 - Treat the guide author and the E2E test subject as separate roles.
 - If the test subject hits a build or setup failure, let the test subject diagnose, edit, rebuild, and report the fix. Do not patch the guide or image from outside the test and then count that run as one-shot success.
 - Do not rewrite OpenShell policy files to make the test pass.
