@@ -70,6 +70,8 @@ struct StreamingState {
     last_step_idx: i64,
     /// Tracks how many bytes of text we've already emitted per step idx.
     emitted_len: HashMap<i64, usize>,
+    /// Tracks which tool steps we've already emitted notifications for.
+    emitted_tool_steps: HashSet<i64>,
     had_updates: bool,
 }
 
@@ -281,6 +283,57 @@ impl Adapter {
         None
     }
 
+    /// Get a text (UTF-8 string) from a protobuf field.
+    fn get_proto_text(blob: &[u8], target: u64) -> Option<String> {
+        let bytes = Self::get_proto_field(blob, target)?;
+        String::from_utf8(bytes).ok()
+    }
+
+    /// Check if a step_type represents a tool call.
+    fn is_tool_step_type(step_type: i64) -> bool {
+        matches!(step_type, 5 | 7 | 8 | 9 | 17 | 21 | 33 | 101 | 138)
+    }
+
+    /// Extract tool name and input from a tool step payload.
+    /// Parses: field 5 (tool sub-message) → field 4 (call) → field 2 or 9 (name), field 3 (input JSON).
+    fn extract_tool_from_step_payload(blob: &[u8]) -> Option<(String, Option<Value>)> {
+        let tool = Self::get_proto_field(blob, 5)?;
+        let call = Self::get_proto_field(&tool, 4)?;
+        let name = Self::get_proto_text(&call, 2)
+            .or_else(|| Self::get_proto_text(&call, 9))
+            .filter(|n| !n.is_empty())?;
+        let input = Self::get_proto_text(&call, 3)
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+        Some((name, input))
+    }
+
+    /// Derive a short title for a tool call based on name and input.
+    fn tool_call_title(name: &str, input: &Option<Value>) -> String {
+        if let Some(input) = input {
+            // Try common path fields
+            for key in ["path", "file", "AbsolutePath", "FilePath"] {
+                if let Some(path) = input.get(key).and_then(|v| v.as_str()) {
+                    return format!("{}: {}", name, path);
+                }
+            }
+            // Try query/command fields
+            for key in ["query", "command", "text"] {
+                if let Some(val) = input.get(key).and_then(|v| v.as_str()) {
+                    let truncated: String = val.chars().take(60).collect();
+                    return format!("{}: {}", name, truncated);
+                }
+            }
+        }
+        name.to_string()
+    }
+
+    /// Check if narration should be shown (opt-in via OPENAB_SHOW_NARRATION=1).
+    fn show_narration() -> bool {
+        std::env::var("OPENAB_SHOW_NARRATION")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(false)
+    }
+
     /// Read the latest response from the SQLite conversation DB.
     /// Returns (response_text, max_step_idx) or None if reading fails.
     fn read_response_from_db(&self, conversation_id: &str, after_step_idx: i64) -> Option<(String, i64)> {
@@ -390,14 +443,14 @@ impl Adapter {
         };
 
         let mut stmt = match conn.prepare(
-            "SELECT idx, step_payload FROM steps WHERE idx > ?1 AND step_type = 15 ORDER BY idx"
+            "SELECT idx, step_type, step_payload FROM steps WHERE idx > ?1 AND (step_type = 15 OR step_type IN (5,7,8,9,17,21,33,101,138)) ORDER BY idx"
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
 
-        let rows: Vec<(i64, Vec<u8>)> = stmt
-            .query_map([base_step_idx], |row| Ok((row.get(0)?, row.get(1)?)))
+        let rows: Vec<(i64, i64, Vec<u8>)> = stmt
+            .query_map([base_step_idx], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .ok()
             .map(|iter| iter.filter_map(|r| r.ok()).collect())
             .unwrap_or_default();
@@ -405,42 +458,72 @@ impl Adapter {
         let mut guard = state.lock().unwrap();
         let mut notifications = Vec::new();
 
-        for (idx, payload) in rows {
+        for (idx, step_type, payload) in rows {
             guard.last_step_idx = guard.last_step_idx.max(idx);
 
-            let Some(text) = Self::extract_text_from_step_payload(&payload) else {
-                continue;
-            };
+            if step_type == 15 {
+                // Text response
+                let Some(text) = Self::extract_text_from_step_payload(&payload) else {
+                    continue;
+                };
 
-            let emitted = guard.emitted_len.get(&idx).copied().unwrap_or(0);
-            if text.len() <= emitted {
-                continue;
-            }
+                let emitted = guard.emitted_len.get(&idx).copied().unwrap_or(0);
+                if text.len() <= emitted {
+                    continue;
+                }
 
-            // Skip narration-only text if OPENAB_TOOL_DISPLAY filtering is active
-            if Self::should_filter_narration() && Self::is_narration(&text) {
+                // Skip narration by default (unless OPENAB_SHOW_NARRATION=1)
+                if !Self::show_narration() && Self::is_narration(&text) {
+                    guard.emitted_len.insert(idx, text.len());
+                    continue;
+                }
+
+                let new_text = &text[emitted..];
                 guard.emitted_len.insert(idx, text.len());
-                continue;
-            }
 
-            let new_text = &text[emitted..];
-            guard.emitted_len.insert(idx, text.len());
-
-            if !new_text.is_empty() {
-                notifications.push(
-                    serde_json::to_string(&JsonRpcNotification {
-                        jsonrpc: "2.0",
-                        method: "session/update".to_string(),
-                        params: json!({
-                            "sessionId": session_id,
-                            "update": {
-                                "sessionUpdate": "agent_message_chunk",
-                                "content": { "type": "text", "text": new_text },
-                            },
-                        }),
-                    })
-                    .unwrap(),
-                );
+                if !new_text.is_empty() {
+                    notifications.push(
+                        serde_json::to_string(&JsonRpcNotification {
+                            jsonrpc: "2.0",
+                            method: "session/update".to_string(),
+                            params: json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": { "type": "text", "text": new_text },
+                                },
+                            }),
+                        })
+                        .unwrap(),
+                    );
+                }
+            } else if Self::is_tool_step_type(step_type) && !guard.emitted_tool_steps.contains(&idx) {
+                // Tool call
+                if let Some((name, input)) = Self::extract_tool_from_step_payload(&payload) {
+                    guard.emitted_tool_steps.insert(idx);
+                    let title = Self::tool_call_title(&name, &input);
+                    let tool_call_id = format!("agy-{}-{}", idx, step_type);
+                    let mut update = json!({
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": tool_call_id,
+                        "title": title,
+                        "status": "completed",
+                    });
+                    if let Some(input) = &input {
+                        update["rawInput"] = input.clone();
+                    }
+                    notifications.push(
+                        serde_json::to_string(&JsonRpcNotification {
+                            jsonrpc: "2.0",
+                            method: "session/update".to_string(),
+                            params: json!({
+                                "sessionId": session_id,
+                                "update": update,
+                            }),
+                        })
+                        .unwrap(),
+                    );
+                }
             }
         }
 
@@ -448,17 +531,10 @@ impl Adapter {
         notifications
     }
 
-    /// Filter out leading narration ("I will ...") from response parts based on
-    /// the OPENAB_TOOL_DISPLAY environment variable.
+    /// Filter out leading narration ("I will ...") from response parts.
+    /// Narration is skipped by default; set OPENAB_SHOW_NARRATION=1 to keep it.
     fn filter_narration(parts: &[String]) -> String {
-        let should_filter = std::env::var("OPENAB_TOOL_DISPLAY")
-            .map(|v| {
-                let lower = v.to_lowercase();
-                lower == "compact" || lower == "none" || lower == "off"
-            })
-            .unwrap_or(false);
-
-        if !should_filter || parts.len() <= 1 {
+        if Self::show_narration() || parts.len() <= 1 {
             return parts.join("\n");
         }
 
@@ -473,16 +549,6 @@ impl Adapter {
             return false;
         }
         lines.iter().all(|l| l.trim_start().starts_with("I will"))
-    }
-
-    /// Check if narration filtering is enabled via OPENAB_TOOL_DISPLAY.
-    fn should_filter_narration() -> bool {
-        std::env::var("OPENAB_TOOL_DISPLAY")
-            .map(|v| {
-                let lower = v.to_lowercase();
-                lower == "compact" || lower == "none" || lower == "off"
-            })
-            .unwrap_or(false)
     }
 
     fn evict_if_needed(&mut self) {
@@ -738,6 +804,7 @@ impl Adapter {
             base_step_idx: initial_step_idx,
             last_step_idx: initial_step_idx,
             emitted_len: HashMap::new(),
+            emitted_tool_steps: HashSet::new(),
             had_updates: false,
         }));
 
@@ -1431,6 +1498,7 @@ mod tests {
             base_step_idx: -1,
             last_step_idx: -1,
             emitted_len: HashMap::new(),
+            emitted_tool_steps: HashSet::new(),
             had_updates: false,
         }));
 
@@ -1582,7 +1650,8 @@ mod tests {
 
     #[test]
     fn test_filter_narration_drops_leading_narration() {
-        std::env::set_var("OPENAB_TOOL_DISPLAY", "compact");
+        // Narration is now skipped by default
+        std::env::remove_var("OPENAB_SHOW_NARRATION");
         let parts = vec![
             "I will fetch the latest commits.\nI will check the diff.".to_string(),
             "I will read the file.".to_string(),
@@ -1590,12 +1659,11 @@ mod tests {
         ];
         let result = Adapter::filter_narration(&parts);
         assert_eq!(result, "The fix is confirmed! LGTM ✅");
-        std::env::remove_var("OPENAB_TOOL_DISPLAY");
     }
 
     #[test]
     fn test_filter_narration_preserves_content_after_first_non_narration() {
-        std::env::set_var("OPENAB_TOOL_DISPLAY", "none");
+        std::env::remove_var("OPENAB_SHOW_NARRATION");
         let parts = vec![
             "I will check things.".to_string(),
             "Here is my analysis.".to_string(),
@@ -1603,42 +1671,42 @@ mod tests {
         ];
         let result = Adapter::filter_narration(&parts);
         assert_eq!(result, "Here is my analysis.\nI will also note this is fine.");
-        std::env::remove_var("OPENAB_TOOL_DISPLAY");
     }
 
     #[test]
-    fn test_filter_narration_full_mode() {
-        std::env::set_var("OPENAB_TOOL_DISPLAY", "full");
+    fn test_filter_narration_show_mode() {
+        std::env::set_var("OPENAB_SHOW_NARRATION", "1");
         let parts = vec![
             "I will fetch commits.".to_string(),
             "Final answer here.".to_string(),
         ];
         let result = Adapter::filter_narration(&parts);
         assert_eq!(result, "I will fetch commits.\nFinal answer here.");
-        std::env::remove_var("OPENAB_TOOL_DISPLAY");
+        std::env::remove_var("OPENAB_SHOW_NARRATION");
     }
 
     #[test]
-    fn test_filter_narration_unset_defaults_to_full() {
-        std::env::remove_var("OPENAB_TOOL_DISPLAY");
+    fn test_filter_narration_default_skips() {
+        std::env::remove_var("OPENAB_SHOW_NARRATION");
         let parts = vec![
             "I will fetch commits.".to_string(),
             "Final answer here.".to_string(),
         ];
         let result = Adapter::filter_narration(&parts);
-        assert_eq!(result, "I will fetch commits.\nFinal answer here.");
+        assert_eq!(result, "Final answer here.");
     }
 
     #[test]
     fn test_filter_narration_single_part_unchanged() {
         let parts = vec!["I will do something.".to_string()];
         let result = Adapter::filter_narration(&parts);
+        // Single part is never filtered (would leave nothing)
         assert_eq!(result, "I will do something.");
     }
 
     #[test]
     fn test_filter_narration_all_narration_keeps_last() {
-        std::env::set_var("OPENAB_TOOL_DISPLAY", "compact");
+        std::env::remove_var("OPENAB_SHOW_NARRATION");
         let parts = vec![
             "I will fetch the file.".to_string(),
             "I will check the output.".to_string(),
@@ -1646,7 +1714,6 @@ mod tests {
         ];
         let result = Adapter::filter_narration(&parts);
         assert_eq!(result, "I will verify the fix.");
-        std::env::remove_var("OPENAB_TOOL_DISPLAY");
     }
 
     #[test]
