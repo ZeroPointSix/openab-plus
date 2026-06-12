@@ -211,9 +211,7 @@ class ShellSession:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            # Log to stderr so OAB operator can see it; don't crash the adapter
-            import sys as _sys
-            print(f"[agentcore-acp] shell reader error: {e}", file=_sys.stderr, flush=True)
+            print(f"[agentcore-acp] shell reader error: {e}", file=sys.stderr, flush=True)
 
     async def send_and_wait(self, msg: dict, timeout: float = 300.0) -> dict | None:
         """Send a JSON-RPC request to kiro-cli and wait for the response."""
