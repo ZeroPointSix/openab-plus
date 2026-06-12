@@ -814,22 +814,30 @@ impl Adapter {
         (session_id, clean_prompt, args, snapshot, initial_conv_id, initial_step_idx)
     }
 
-    async fn handle_session_prompt(
-        &mut self,
+}
+
+/// Output from prompt execution (used to separate lock-free execution from state update).
+struct PromptOutput {
+    response_lines: Vec<String>,
+    /// If Some, contains (bound_conv_id, new_step_idx) for session state update.
+    session_update: Option<(Option<String>, i64)>,
+}
+
+impl Adapter {
+    /// Execute prompt subprocess without holding any adapter lock.
+    /// This is a static method — all needed state is passed in as parameters.
+    async fn execute_prompt(
         id: Value,
-        params: &Value,
+        session_id: &str,
+        args: Vec<String>,
+        snapshot: Option<HashSet<String>>,
+        initial_conv_id: Option<String>,
+        initial_step_idx: i64,
+        working_dir: String,
+        conversations_dir: PathBuf,
         cancelled: Arc<AtomicBool>,
         out_tx: mpsc::UnboundedSender<Option<String>>,
-    ) -> Vec<String> {
-        // --- Phase 1: extract state under lock (lock released after this method returns to caller) ---
-        let (session_id, _clean_prompt, args, snapshot, initial_conv_id, initial_step_idx) =
-            self.prepare_prompt_state(params);
-        let working_dir = self.working_dir.clone();
-        let conversations_dir = self.conversations_dir.clone();
-
-        // --- Phase 2: subprocess execution (no adapter lock held) ---
-        // We drop &mut self usage here; the spawn + poll happens with extracted data only.
-
+    ) -> PromptOutput {
         let spawn_result = Command::new("agy")
             .args(&args)
             .current_dir(&working_dir)
@@ -841,13 +849,15 @@ impl Adapter {
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(e) => {
-                return vec![serde_json::to_string(&JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: None,
-                    error: Some(json!({"code":-32000,"message":format!("failed to run agy: {e}")})),
-                })
-                .unwrap()];
+                return PromptOutput {
+                    response_lines: vec![serde_json::to_string(&JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(json!({"code":-32000,"message":format!("failed to run agy: {e}")})),
+                    }).unwrap()],
+                    session_update: None,
+                };
             }
         };
 
@@ -880,11 +890,11 @@ impl Adapter {
             had_updates: false,
         }));
 
-        // Start polling thread — 100ms interval (F2 fix), writes through channel (F3 fix)
+        // Start polling thread — 100ms interval, writes through channel
         let stop_polling = Arc::new(AtomicBool::new(false));
         let poll_conversations_dir = conversations_dir.clone();
         let poll_snapshot = snapshot.clone();
-        let poll_session_id = session_id.clone();
+        let poll_session_id = session_id.to_string();
         let poll_state = Arc::clone(&streaming_state);
         let poll_stop = Arc::clone(&stop_polling);
         let poll_tx = out_tx.clone();
@@ -927,12 +937,12 @@ impl Adapter {
         stop_polling.store(true, Ordering::SeqCst);
         let _ = poller.join();
 
-        // Final poll to catch any last writes — routed through channel (F3)
+        // Final poll to catch any last writes
         {
             let lines = Self::poll_streaming_delta(
                 &conversations_dir,
                 snapshot.as_ref(),
-                &session_id,
+                session_id,
                 &streaming_state,
             );
             for line in lines {
@@ -950,19 +960,7 @@ impl Adapter {
             )
         };
 
-        // --- Phase 3: update session state (re-acquire lock briefly) ---
-        if let Some(session) = self.sessions.get_mut(&session_id) {
-            if session.conversation_id.is_none() {
-                session.conversation_id = bound_conv_id.clone();
-            }
-            if bound_conv_id.is_some() {
-                session.last_step_idx = new_step_idx;
-            }
-        }
-        if bound_conv_id.is_some() {
-            let model_id = self.sessions.get(&session_id).and_then(|s| s.model_id.clone());
-            self.persist_session(&session_id, bound_conv_id.as_deref(), new_step_idx, model_id.as_deref());
-        }
+        let session_update = Some((bound_conv_id.clone(), new_step_idx));
 
         // Build final response
         let stop_reason = if was_cancelled {
@@ -987,34 +985,40 @@ impl Adapter {
                         } else {
                             format!("agy failed: {}", stderr_text.trim_end())
                         };
-                        return vec![serde_json::to_string(&JsonRpcResponse {
-                            jsonrpc: "2.0",
-                            id,
-                            result: None,
-                            error: Some(json!({"code":-32000,"message":msg})),
-                        })
-                        .unwrap()];
+                        return PromptOutput {
+                            response_lines: vec![serde_json::to_string(&JsonRpcResponse {
+                                jsonrpc: "2.0",
+                                id,
+                                result: None,
+                                error: Some(json!({"code":-32000,"message":msg})),
+                            }).unwrap()],
+                            session_update,
+                        };
                     }
                 }
             }
             Err(e) => {
-                return vec![serde_json::to_string(&JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: None,
-                    error: Some(json!({"code":-32000,"message":format!("failed to wait for agy: {e}")})),
-                })
-                .unwrap()];
+                return PromptOutput {
+                    response_lines: vec![serde_json::to_string(&JsonRpcResponse {
+                        jsonrpc: "2.0",
+                        id,
+                        result: None,
+                        error: Some(json!({"code":-32000,"message":format!("failed to wait for agy: {e}")})),
+                    }).unwrap()],
+                    session_update,
+                };
             }
         }
 
-        vec![serde_json::to_string(&JsonRpcResponse {
-            jsonrpc: "2.0",
-            id,
-            result: Some(json!({ "stopReason": stop_reason })),
-            error: None,
-        })
-        .unwrap()]
+        PromptOutput {
+            response_lines: vec![serde_json::to_string(&JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: Some(json!({ "stopReason": stop_reason })),
+                error: None,
+            }).unwrap()],
+            session_update,
+        }
     }
 }
 
@@ -1182,14 +1186,42 @@ async fn main() {
                 pending_prompts += 1;
 
                 tokio::spawn(async move {
-                    let output = {
+                    // Phase 1: acquire lock briefly to prepare state
+                    let (session_id_inner, args, snapshot, initial_conv_id, initial_step_idx, working_dir, conversations_dir) = {
                         let mut adapter = adapter.lock().await;
-                        adapter.handle_session_prompt(id, &params, cancelled, out_tx.clone()).await
+                        let (sid, _prompt, args, snapshot, init_conv, init_idx) =
+                            adapter.prepare_prompt_state(&params);
+                        let wd = adapter.working_dir.clone();
+                        let cd = adapter.conversations_dir.clone();
+                        (sid, args, snapshot, init_conv, init_idx, wd, cd)
                     };
+                    // Lock released — Phase 2: run subprocess without holding lock
+                    let output = Adapter::execute_prompt(
+                        id, &session_id_inner, args, snapshot, initial_conv_id, initial_step_idx,
+                        working_dir, conversations_dir, cancelled, out_tx.clone(),
+                    ).await;
+
+                    // Phase 3: acquire lock briefly to update session state
+                    if let Some((bound_conv_id, new_step_idx)) = output.session_update {
+                        let mut adapter = adapter.lock().await;
+                        if let Some(session) = adapter.sessions.get_mut(&session_id_inner) {
+                            if session.conversation_id.is_none() {
+                                session.conversation_id = bound_conv_id.clone();
+                            }
+                            if bound_conv_id.is_some() {
+                                session.last_step_idx = new_step_idx;
+                            }
+                        }
+                        if bound_conv_id.is_some() {
+                            let model_id = adapter.sessions.get(&session_id_inner).and_then(|s| s.model_id.clone());
+                            adapter.persist_session(&session_id_inner, bound_conv_id.as_deref(), new_step_idx, model_id.as_deref());
+                        }
+                    }
+
                     if !session_id.is_empty() {
                         active_cancellations.lock().unwrap().remove(&session_id);
                     }
-                    for line in output {
+                    for line in output.response_lines {
                         let _ = out_tx.send(Some(line));
                     }
                     let _ = out_tx.send(None);
