@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
 use uuid::Uuid;
 
 use crate::types::*;
@@ -57,47 +56,39 @@ impl Adapter {
 
     pub fn static_fallback_models() -> Vec<String> {
         vec![
-            "gemini-2.5-pro".to_string(),
-            "gemini-2.5-flash".to_string(),
-            "gemini-2.0-flash".to_string(),
+            "Gemini 3.5 Flash (Medium)".to_string(),
+            "Gemini 3.5 Flash (High)".to_string(),
+            "Gemini 3.5 Flash (Low)".to_string(),
+            "Gemini 3.1 Pro (Low)".to_string(),
+            "Gemini 3.1 Pro (High)".to_string(),
         ]
     }
 
+    /// Resolve the `agy` binary path.
+    pub fn agy_bin() -> &'static str {
+        use std::sync::OnceLock;
+        static BIN: OnceLock<String> = OnceLock::new();
+        BIN.get_or_init(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
+            format!("{home}/.local/bin/agy")
+        })
+    }
+
     pub fn fetch_available_models() -> Vec<String> {
-        use std::io::Read;
-        use std::time::Instant;
-        let start = Instant::now();
-        let mut child = match std::process::Command::new("agy")
+        std::process::Command::new(Self::agy_bin())
             .arg("models")
-            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    if !status.success() { return Vec::new(); }
-                    let stdout = child.stdout.take().unwrap();
-                    let mut buf = String::new();
-                    let _ = std::io::BufReader::new(stdout).read_to_string(&mut buf);
-                    return buf.lines()
-                        .map(|l| l.trim().to_string())
-                        .filter(|l| !l.is_empty())
-                        .collect();
-                }
-                Ok(None) => {
-                    if start.elapsed() > Duration::from_secs(5) {
-                        let _ = child.kill();
-                        return Vec::new();
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(_) => return Vec::new(),
-            }
-        }
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn get_available_models(&mut self) -> &[String] {

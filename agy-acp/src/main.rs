@@ -31,7 +31,7 @@ impl Adapter {
         cancelled: Arc<AtomicBool>,
         out_tx: mpsc::UnboundedSender<Option<String>>,
     ) -> PromptOutput {
-        let spawn_result = Command::new("agy")
+        let spawn_result = Command::new(Adapter::agy_bin())
             .args(&args)
             .current_dir(&working_dir)
             .stdin(std::process::Stdio::null())
