@@ -319,7 +319,9 @@ class AcpAdapter:
             params = msg.get("params", {})
             msg_id = msg.get("id")
 
-            if method == "session/new":
+            if method == "initialize":
+                write_response(msg_id, {"capabilities": {}})
+            elif method == "session/new":
                 self.handle_session_new(msg_id, params)
             elif method == "session/prompt":
                 self.handle_session_prompt(msg_id, params)
