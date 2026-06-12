@@ -327,11 +327,19 @@ impl Adapter {
         name.to_string()
     }
 
-    /// Check if narration should be shown (opt-in via OPENAB_SHOW_NARRATION=1).
+    /// Check if narration should be shown.
+    /// - OPENAB_SHOW_NARRATION=1 → show (opt-in)
+    /// - OPENAB_TOOL_DISPLAY=full → show (backward compat)
+    /// - Default (neither set) → skip narration
     fn show_narration() -> bool {
-        std::env::var("OPENAB_SHOW_NARRATION")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(false)
+        if let Ok(v) = std::env::var("OPENAB_SHOW_NARRATION") {
+            return v == "1" || v.to_lowercase() == "true";
+        }
+        // Backward compat: OPENAB_TOOL_DISPLAY=full means show everything
+        if let Ok(v) = std::env::var("OPENAB_TOOL_DISPLAY") {
+            return v.to_lowercase() == "full";
+        }
+        false
     }
 
     /// Read the latest response from the SQLite conversation DB.
@@ -503,14 +511,15 @@ impl Adapter {
                     guard.emitted_tool_steps.insert(idx);
                     let title = Self::tool_call_title(&name, &input);
                     let tool_call_id = format!("agy-{}-{}", idx, step_type);
-                    let mut update = json!({
+
+                    // Emit tool_call (start)
+                    let mut start_update = json!({
                         "sessionUpdate": "tool_call",
                         "toolCallId": tool_call_id,
                         "title": title,
-                        "status": "completed",
                     });
                     if let Some(input) = &input {
-                        update["rawInput"] = input.clone();
+                        start_update["rawInput"] = input.clone();
                     }
                     notifications.push(
                         serde_json::to_string(&JsonRpcNotification {
@@ -518,7 +527,25 @@ impl Adapter {
                             method: "session/update".to_string(),
                             params: json!({
                                 "sessionId": session_id,
-                                "update": update,
+                                "update": start_update,
+                            }),
+                        })
+                        .unwrap(),
+                    );
+
+                    // Emit tool_call_update (completed)
+                    notifications.push(
+                        serde_json::to_string(&JsonRpcNotification {
+                            jsonrpc: "2.0",
+                            method: "session/update".to_string(),
+                            params: json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call_update",
+                                    "toolCallId": tool_call_id,
+                                    "title": title,
+                                    "status": "completed",
+                                },
                             }),
                         })
                         .unwrap(),
