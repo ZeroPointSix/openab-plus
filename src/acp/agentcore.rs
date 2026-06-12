@@ -595,13 +595,14 @@ async fn build_signed_request(
     let shell_id = format!("oab-{}", hex::encode(&hash[..8]));
 
     let query = format!(
-        "shellId={shell_id}",
+        "shellId={shell_id}&X-Amzn-Bedrock-AgentCore-Runtime-Session-Id={}",
+        urlencoding::encode(session_id),
     );
 
     let uri = format!("https://{host}{path}?{query}");
 
     let mut settings = SigningSettings::default();
-    settings.expires_in = None;
+    settings.expires_in = Some(std::time::Duration::from_secs(300));
 
     let signing_params = v4::SigningParams::builder()
         .identity(&identity)
@@ -611,21 +612,24 @@ async fn build_signed_request(
         .settings(settings)
         .build()?;
 
-    let headers = [
-        ("host", host.as_str()),
-        ("x-amzn-bedrock-agentcore-runtime-session-id", session_id),
-    ];
+    let headers = [("host", host.as_str())];
 
     let signable = SignableRequest::new("GET", &uri, headers.into_iter(), SignableBody::empty())?;
 
     let (instructions, _sig) = sign(signable, &signing_params.into())?.into_parts();
 
-    let wss_uri = format!("wss://{host}{path}?{query}");
-    let mut builder = http::Request::builder()
+    // Build presigned URL with auth in query params
+    let mut signed_query = query.clone();
+    let (_headers, params) = instructions.into_parts();
+    for (name, value) in params {
+        signed_query.push_str(&format!("&{name}={value}"));
+    }
+    let wss_uri = format!("wss://{host}{path}?{signed_query}");
+
+    let builder = http::Request::builder()
         .method("GET")
         .uri(&wss_uri)
         .header("host", &host)
-        .header("x-amzn-bedrock-agentcore-runtime-session-id", session_id)
         .header("connection", "Upgrade")
         .header("upgrade", "websocket")
         .header("sec-websocket-version", "13")
@@ -633,10 +637,6 @@ async fn build_signed_request(
             "sec-websocket-key",
             tokio_tungstenite::tungstenite::handshake::client::generate_key(),
         );
-
-    for (name, value) in instructions.headers() {
-        builder = builder.header(name, value);
-    }
 
     Ok(builder.body(())?)
 }
