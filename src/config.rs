@@ -930,9 +930,27 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
         );
 
         if !config.agent.command_explicit {
-            config.agent = AgentConfig {
-                command: "uv".into(),
-                args: vec![
+            // Use native Rust bridge (agentcore feature) or fall back to Python adapter
+            #[cfg(feature = "agentcore")]
+            let (cmd, args) = {
+                let self_exe = std::env::current_exe()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "openab".to_string());
+                (
+                    self_exe,
+                    vec![
+                        "agentcore-bridge".into(),
+                        "--runtime-arn".into(),
+                        ac.runtime_arn.clone(),
+                        "--region".into(),
+                        ac.region(),
+                    ],
+                )
+            };
+            #[cfg(not(feature = "agentcore"))]
+            let (cmd, args) = (
+                "uv".to_string(),
+                vec![
                     "run".into(),
                     "--script".into(),
                     "/opt/agentcore/acp/agentcore_acp.py".into(),
@@ -943,6 +961,10 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
                     "--cancel-strategy".into(),
                     ac.cancel_strategy.to_string(),
                 ],
+            );
+            config.agent = AgentConfig {
+                command: cmd,
+                args,
                 working_dir: config.agent.working_dir.clone(),
                 env: config.agent.env.clone(),
                 inherit_env: config.agent.inherit_env.clone(),

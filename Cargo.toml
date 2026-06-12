@@ -34,10 +34,16 @@ sha2 = "0.10"
 tempfile = "3.27.0"
 aws-sdk-secretsmanager = { version = "1", optional = true }
 aws-config = { version = "1", optional = true }
+aws-sigv4 = { version = "1", optional = true }
+aws-credential-types = { version = "1", optional = true }
+urlencoding = { version = "2", optional = true }
+hex = { version = "0.4", optional = true }
+http = { version = "1", optional = true }
 
 [features]
-default = ["secrets-aws"]
+default = ["secrets-aws", "agentcore"]
 secrets-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
+agentcore = ["dep:aws-config", "dep:aws-sigv4", "dep:aws-credential-types", "dep:urlencoding", "dep:hex", "dep:http"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
