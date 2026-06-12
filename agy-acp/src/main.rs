@@ -134,26 +134,13 @@ impl Adapter {
         ]
     }
 
-    /// Resolve the `agy` binary: check PATH first, fall back to ~/.local/bin/agy.
+    /// Resolve the `agy` binary path.
     fn agy_bin() -> &'static str {
         use std::sync::OnceLock;
-        static BIN: OnceLock<&'static str> = OnceLock::new();
+        static BIN: OnceLock<String> = OnceLock::new();
         BIN.get_or_init(|| {
-            if std::process::Command::new("agy")
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok()
-            {
-                return "agy";
-            }
             let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
-            let fallback = Box::leak(format!("{home}/.local/bin/agy").into_boxed_str());
-            if std::path::Path::new(fallback).exists() {
-                return fallback;
-            }
-            "agy"
+            format!("{home}/.local/bin/agy")
         })
     }
 
