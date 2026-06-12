@@ -99,10 +99,11 @@ struct ShellHandle {
     line_rx: tokio::sync::mpsc::UnboundedReceiver<String>,
     /// Pump task handle
     _pump: tokio::task::JoinHandle<()>,
-    /// Runtime session ID used for this shell
     /// Runtime session ID (for future reconnect support).
     #[allow(dead_code)]
     runtime_session_id: String,
+    /// kiro-cli's internal ACP session ID
+    kiro_session_id: String,
 }
 
 type WsSink = futures_util::stream::SplitSink<
@@ -264,11 +265,18 @@ where
 
         // Allocate ID before borrowing sessions
         let kiro_id = self.alloc_id();
+        let kiro_sid = self.sessions.get(&acp_sid)
+            .map(|s| s.kiro_session_id.clone())
+            .unwrap_or_default();
+        let mut fwd_params = params.clone();
+        if let Some(obj) = fwd_params.as_object_mut() {
+            obj.insert("sessionId".to_string(), json!(kiro_sid));
+        }
         let kiro_msg = json!({
             "jsonrpc": "2.0",
             "id": kiro_id,
             "method": "session/prompt",
-            "params": params,
+            "params": fwd_params,
         });
         let data = format!("{}\n", serde_json::to_string(&kiro_msg)?);
 
@@ -423,7 +431,7 @@ where
         }
 
         // Channel for forwarding parsed JSON-RPC lines
-        let (line_tx, line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
         // Spawn reader pump
         let pump = tokio::spawn(async move {
@@ -469,11 +477,74 @@ where
             }
         });
 
+        // Wait for kiro-cli to boot, then send ACP initialize handshake
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let init_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "openab-agentcore-bridge", "version": env!("CARGO_PKG_VERSION")}
+            }
+        });
+        let init_data = format!("{}\n", serde_json::to_string(&init_msg)?);
+        {
+            let mut w = ws_write.lock().await;
+            let mut frame = Vec::with_capacity(1 + init_data.len());
+            frame.push(CHANNEL_STDIN);
+            frame.extend_from_slice(init_data.as_bytes());
+            w.send(Message::Binary(frame)).await?;
+        }
+
+        // Wait for initialize response (consume it — don't forward)
+        match tokio::time::timeout(std::time::Duration::from_secs(30), line_rx.recv()).await {
+            Ok(Some(line)) => {
+                info!("kiro-cli initialized: received {} bytes", line.len());
+            }
+            Ok(None) => return Err(anyhow!("kiro-cli closed before initialize response")),
+            Err(_) => return Err(anyhow!("kiro-cli initialize timed out (30s)")),
+        }
+
+        // Send session/new to kiro-cli to create a session
+        let sess_msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "session/new",
+            "params": {}
+        });
+        let sess_data = format!("{}\n", serde_json::to_string(&sess_msg)?);
+        {
+            let mut w = ws_write.lock().await;
+            let mut frame = Vec::with_capacity(1 + sess_data.len());
+            frame.push(CHANNEL_STDIN);
+            frame.extend_from_slice(sess_data.as_bytes());
+            w.send(Message::Binary(frame)).await?;
+        }
+
+        // Wait for session/new response (extract kiro's sessionId)
+        let kiro_session_id = match tokio::time::timeout(std::time::Duration::from_secs(30), line_rx.recv()).await {
+            Ok(Some(line)) => {
+                let v: Value = serde_json::from_str(&line).unwrap_or_default();
+                let sid = v.pointer("/result/sessionId")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("default")
+                    .to_string();
+                info!(kiro_session_id = %sid, "kiro-cli session created");
+                sid
+            }
+            Ok(None) => return Err(anyhow!("kiro-cli closed before session/new response")),
+            Err(_) => return Err(anyhow!("kiro-cli session/new timed out (30s)")),
+        };
+
         Ok(ShellHandle {
             ws_write,
             line_rx,
             _pump: pump,
             runtime_session_id: session_id.to_string(),
+            kiro_session_id,
         })
     }
 }
