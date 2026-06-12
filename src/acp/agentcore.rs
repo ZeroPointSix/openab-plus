@@ -24,6 +24,64 @@ use tracing::{debug, error, info, warn};
 
 const KIRO_ACP_CMD: &str = "stty -echo 2>/dev/null; exec kiro-cli acp --trust-all-tools\n";
 
+/// WebSocket binary frame channel bytes (1-byte prefix protocol).
+const CHANNEL_STDIN: u8 = 0x00;
+const CHANNEL_STDOUT: u8 = 0x01;
+const CHANNEL_STDERR: u8 = 0x02;
+
+/// Extract a complete JSON object from a line that may have PTY prefix noise.
+/// Uses brace-counting to find matching `{}` pairs, robust against partial JSON
+/// or embedded `{` in prompt text.
+fn extract_json_object(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut start = None;
+    for i in 0..bytes.len() {
+        if bytes[i] == b'{' {
+            start = Some(i);
+            break;
+        }
+    }
+    let start = start?;
+
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for i in start..bytes.len() {
+        let c = bytes[i];
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == b'\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if c == b'"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if c == b'{' {
+            depth += 1;
+        } else if c == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                let candidate = &line[start..=i];
+                // Validate it's actually valid JSON
+                if serde_json::from_str::<Value>(candidate).is_ok() {
+                    return Some(candidate.to_string());
+                }
+                // Not valid — try next `{`
+                return extract_json_object(&line[start + 1..]);
+            }
+        }
+    }
+    None
+}
+
 /// Entry point for the agentcore bridge subprocess.
 pub async fn run_bridge(runtime_arn: &str, region: &str) -> Result<()> {
     let stdin = BufReader::new(tokio::io::stdin());
@@ -213,7 +271,7 @@ where
         {
             let mut w = shell.ws_write.lock().await;
             let mut frame = Vec::with_capacity(1 + data.len());
-            frame.push(0x00);
+            frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(data.as_bytes());
             let _ = w.send(Message::Binary(frame.into())).await;
         }
@@ -280,7 +338,7 @@ where
                 serde_json::to_string(&cancel_msg).unwrap_or_default()
             );
             let mut frame = Vec::with_capacity(1 + data.len());
-            frame.push(0x00);
+            frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(data.as_bytes());
             let mut w = shell.ws_write.lock().await;
             let _ = w.send(Message::Binary(frame.into())).await;
@@ -339,7 +397,7 @@ where
         // Send kiro-cli launch command
         {
             let mut frame = Vec::with_capacity(1 + KIRO_ACP_CMD.len());
-            frame.push(0x00);
+            frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(KIRO_ACP_CMD.as_bytes());
             let mut w = ws_write.lock().await;
             w.send(Message::Binary(frame.into()))
@@ -359,7 +417,7 @@ where
                         if data.len() < 2 {
                             continue;
                         }
-                        if data[0] == 0x01 {
+                        if data[0] == CHANNEL_STDOUT {
                             // stdout
                             if let Ok(s) = std::str::from_utf8(&data[1..]) {
                                 buf.push_str(s);
@@ -370,16 +428,13 @@ where
                                     if trimmed.is_empty() {
                                         continue;
                                     }
-                                    // Extract JSON object even if prefixed with PTY garbage
-                                    if let Some(json_start) = trimmed.find('{') {
-                                        let candidate = &trimmed[json_start..];
-                                        if serde_json::from_str::<Value>(candidate).is_ok() {
-                                            let _ = line_tx.send(candidate.to_string());
-                                        }
+                                    // Extract JSON object using brace-counting (handles PTY prefix noise)
+                                    if let Some(json_str) = extract_json_object(&trimmed) {
+                                        let _ = line_tx.send(json_str);
                                     }
                                 }
                             }
-                        } else if data[0] == 0x02 {
+                        } else if data[0] == CHANNEL_STDERR {
                             // stderr — log
                             if let Ok(s) = std::str::from_utf8(&data[1..]) {
                                 let t = s.trim();
