@@ -66,17 +66,12 @@ impl Adapter {
 
     /// Resolve the `agy` binary path.
     pub fn agy_bin() -> &'static str {
-        use std::sync::OnceLock;
-        static BIN: OnceLock<String> = OnceLock::new();
-        BIN.get_or_init(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/agent".to_string());
-            format!("{home}/.local/bin/agy")
-        })
+        "/usr/local/bin/agy"
     }
 
     pub fn fetch_available_models() -> Vec<String> {
-        std::process::Command::new(Self::agy_bin())
-            .arg("models")
+        std::process::Command::new("bash")
+            .args(["-lc", &format!("{} models", Self::agy_bin())])
             .stderr(std::process::Stdio::null())
             .output()
             .ok()

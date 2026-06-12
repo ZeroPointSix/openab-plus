@@ -31,8 +31,12 @@ impl Adapter {
         cancelled: Arc<AtomicBool>,
         out_tx: mpsc::UnboundedSender<Option<String>>,
     ) -> PromptOutput {
-        let spawn_result = Command::new(Adapter::agy_bin())
-            .args(&args)
+        let agy_cmd = std::iter::once(Adapter::agy_bin().to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let spawn_result = Command::new("bash")
+            .args(["-lc", &agy_cmd])
             .current_dir(&working_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
