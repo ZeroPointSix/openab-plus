@@ -268,9 +268,7 @@ where
             }
         }
 
-        let shell = self.sessions.get_mut(&acp_sid).unwrap();
-
-        // Forward prompt to kiro-cli as JSON-RPC
+        // Allocate ID before borrowing sessions
         let kiro_id = self.alloc_id();
         let kiro_msg = json!({
             "jsonrpc": "2.0",
@@ -279,7 +277,10 @@ where
             "params": params,
         });
         let data = format!("{}\n", serde_json::to_string(&kiro_msg)?);
+
+        // Send prompt to kiro-cli
         {
+            let shell = self.sessions.get_mut(&acp_sid).unwrap();
             let mut w = shell.ws_write.lock().await;
             let mut frame = Vec::with_capacity(1 + data.len());
             frame.push(CHANNEL_STDIN);
@@ -287,32 +288,36 @@ where
             let _ = w.send(Message::Binary(frame.into())).await;
         }
 
-        // Read responses/notifications from kiro-cli until we get the response for our id
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(300), shell.line_rx.recv())
-                .await
-            {
+        // Read responses/notifications from kiro-cli until we get the response for our id.
+        // We take line_rx out of the session to avoid holding &mut self across await points.
+        let mut line_rx = match self.sessions.get_mut(&acp_sid) {
+            Some(s) => std::mem::replace(&mut s.line_rx, tokio::sync::mpsc::unbounded_channel().1),
+            None => {
+                self.write_error(id, -32000, "session lost").await?;
+                return Ok(());
+            }
+        };
+
+        let result = loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(300), line_rx.recv()).await {
                 Ok(Some(line)) => {
                     let msg: Value = match serde_json::from_str(&line) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    // Check if it's a response to our request
                     if msg.get("id").and_then(|i| i.as_u64()) == Some(kiro_id) {
-                        // Forward as our response
                         if let Some(err) = msg.get("error") {
                             self.write_msg(&json!({"jsonrpc": "2.0", "id": id, "error": err}))
                                 .await?;
                         } else {
-                            let result = msg
+                            let r = msg
                                 .get("result")
                                 .cloned()
                                 .unwrap_or(json!({"type": "success"}));
-                            self.write_response(id, result).await?;
+                            self.write_response(id, r).await?;
                         }
-                        break;
+                        break Some(line_rx);
                     }
-                    // It's a notification — forward directly to OAB
                     if msg.get("method").is_some() {
                         self.write_msg(&msg).await?;
                     }
@@ -321,13 +326,20 @@ where
                     self.write_error(id, -32000, "shell connection closed")
                         .await?;
                     self.sessions.remove(&acp_sid);
-                    break;
+                    break None;
                 }
                 Err(_) => {
                     self.write_error(id, -32000, "timeout waiting for agent response")
                         .await?;
-                    break;
+                    break Some(line_rx);
                 }
+            }
+        };
+
+        // Put line_rx back
+        if let Some(rx) = result {
+            if let Some(s) = self.sessions.get_mut(&acp_sid) {
+                s.line_rx = rx;
             }
         }
         Ok(())
@@ -478,7 +490,7 @@ async fn build_signed_request(
     session_id: &str,
     region: &str,
 ) -> Result<http::Request<()>> {
-    let config = aws_config::from_env()
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(region.to_string()))
         .load()
         .await;
