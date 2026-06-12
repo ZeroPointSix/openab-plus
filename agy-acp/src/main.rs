@@ -118,9 +118,21 @@ impl Adapter {
     }
 
     /// Get available models, fetching lazily on first access.
+    /// Falls back to a static list if `agy models` returns empty.
     fn get_available_models(&mut self) -> &[String] {
         if self.available_models.is_none() {
-            self.available_models = Some(Self::fetch_available_models());
+            let models = Self::fetch_available_models();
+            self.available_models = Some(if models.is_empty() {
+                vec![
+                    "Gemini 3.5 Flash (Medium)".to_string(),
+                    "Gemini 3.5 Flash (High)".to_string(),
+                    "Gemini 3.5 Flash (Low)".to_string(),
+                    "Gemini 3.1 Pro (Low)".to_string(),
+                    "Gemini 3.1 Pro (High)".to_string(),
+                ]
+            } else {
+                models
+            });
         }
         self.available_models.as_ref().unwrap()
     }
