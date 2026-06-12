@@ -131,7 +131,10 @@ def strip_sender_context(blocks: list) -> str:
 # Shell session manager
 # ---------------------------------------------------------------------------
 
-KIRO_ACP_CMD = "kiro-cli acp --trust-all-tools\n"
+KIRO_ACP_CMD = "stty -echo 2>/dev/null; kiro-cli acp --trust-all-tools\n"
+
+# Regex to strip ANSI escape sequences from PTY output
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[^[\]].?")
 class ShellSession:
     """Manages a persistent shell connection to a microVM running kiro-cli ACP."""
 
@@ -193,11 +196,18 @@ class ShellSession:
                         line = line.strip()
                         if not line:
                             continue
-                        # Try to parse as JSON-RPC
+                        # Strip ANSI escape sequences that PTY may inject
+                        line = ANSI_ESCAPE_RE.sub("", line)
+                        # Only attempt parse if line looks like JSON
+                        if not line.startswith("{"):
+                            continue
                         try:
                             msg = json.loads(line)
                         except json.JSONDecodeError:
-                            continue  # skip non-JSON PTY output (prompts, ANSI, etc.)
+                            continue
+
+                        if not isinstance(msg, dict) or "jsonrpc" not in msg:
+                            continue  # not a valid JSON-RPC message
 
                         if not self._ready.is_set():
                             self._ready.set()
@@ -380,6 +390,11 @@ class AcpAdapter:
             method = msg.get("method")
             params = msg.get("params", {})
             msg_id = msg.get("id")
+
+            # Only dispatch messages that have a "method" field (requests/notifications).
+            # Messages without "method" (e.g. stray responses) are ignored.
+            if not method:
+                continue
 
             if method == "session/new":
                 await self.handle_session_new(msg_id, params)
