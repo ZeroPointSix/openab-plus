@@ -71,6 +71,7 @@ pub struct AgentCoreConfig {
     pub runtime_arn: String,
     /// Cancel strategy: "noop" or "stop" (default: stop)
     #[serde(default = "default_agentcore_cancel_strategy")]
+    #[allow(dead_code)]
     pub cancel_strategy: AgentCoreCancelStrategy,
 }
 

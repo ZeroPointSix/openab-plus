@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 const KIRO_ACP_CMD: &str = "stty -echo 2>/dev/null; exec kiro-cli acp --trust-all-tools\n";
 
@@ -34,21 +34,13 @@ const CHANNEL_STDERR: u8 = 0x02;
 /// or embedded `{` in prompt text.
 fn extract_json_object(line: &str) -> Option<String> {
     let bytes = line.as_bytes();
-    let mut start = None;
-    for i in 0..bytes.len() {
-        if bytes[i] == b'{' {
-            start = Some(i);
-            break;
-        }
-    }
-    let start = start?;
+    let start = bytes.iter().position(|&b| b == b'{')?;
 
     let mut depth: i32 = 0;
     let mut in_string = false;
     let mut escape = false;
 
-    for i in start..bytes.len() {
-        let c = bytes[i];
+    for (i, &c) in bytes.iter().enumerate().skip(start) {
         if escape {
             escape = false;
             continue;
@@ -108,6 +100,8 @@ struct ShellHandle {
     /// Pump task handle
     _pump: tokio::task::JoinHandle<()>,
     /// Runtime session ID used for this shell
+    /// Runtime session ID (for future reconnect support).
+    #[allow(dead_code)]
     runtime_session_id: String,
 }
 
@@ -285,7 +279,7 @@ where
             let mut frame = Vec::with_capacity(1 + data.len());
             frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(data.as_bytes());
-            let _ = w.send(Message::Binary(frame.into())).await;
+            let _ = w.send(Message::Binary(frame)).await;
         }
 
         // Read responses/notifications from kiro-cli until we get the response for our id.
@@ -364,7 +358,7 @@ where
             frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(data.as_bytes());
             let mut w = shell.ws_write.lock().await;
-            let _ = w.send(Message::Binary(frame.into())).await;
+            let _ = w.send(Message::Binary(frame)).await;
         }
     }
 
@@ -423,7 +417,7 @@ where
             frame.push(CHANNEL_STDIN);
             frame.extend_from_slice(KIRO_ACP_CMD.as_bytes());
             let mut w = ws_write.lock().await;
-            w.send(Message::Binary(frame.into()))
+            w.send(Message::Binary(frame))
                 .await
                 .map_err(|e| anyhow!("failed to send launch cmd: {e}"))?;
         }
