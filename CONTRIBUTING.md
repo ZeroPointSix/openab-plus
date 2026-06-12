@@ -114,7 +114,7 @@ gh run view <run_id> --repo openabdev/openab --json conclusion -q .conclusion
 
 # 4. Deploy and test (depends on your environment)
 #    - Kubernetes: kubectl rollout restart deployment/<name>
-#    - ECS Fargate (OAB fleet): ecsctl restart <bot> --wait
+#    - ECS Fargate (OAB fleet): [ecsctl](https://github.com/oablab/ecsctl) restart <bot> --wait
 #    - Local: docker run with the PR image tag
 ```
 
