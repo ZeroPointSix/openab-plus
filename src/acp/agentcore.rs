@@ -344,7 +344,7 @@ where
             .get("sessionId")
             .and_then(|s| s.as_str())
             .unwrap_or("");
-        if let Some(shell) = self.sessions.get(&acp_sid.to_string()) {
+        if let Some(shell) = self.sessions.get(acp_sid) {
             let cancel_msg = json!({
                 "jsonrpc": "2.0",
                 "method": "session/cancel",
