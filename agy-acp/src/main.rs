@@ -98,41 +98,96 @@ impl Adapter {
         }
     }
 
-    /// Run `agy models` and parse the output into a list of model names.
-    /// Blocks until completion. Returns empty if `agy models` fails.
-    fn fetch_available_models() -> Vec<String> {
-        std::process::Command::new("agy")
-            .arg("models")
-            .stderr(std::process::Stdio::null())
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .map(|l| l.trim().to_string())
-                    .filter(|l| !l.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Cache file path for model list.
+    fn models_cache_path(&self) -> PathBuf {
+        self.state_file.with_file_name("models_cache.json")
     }
 
-    /// Get available models, fetching lazily on first access.
-    /// Falls back to a static list if `agy models` returns empty.
+    /// Load cached models (any age — cache is never deleted).
+    fn load_cached_models(&self) -> Option<Vec<String>> {
+        let path = self.models_cache_path();
+        let content = fs::read_to_string(&path).ok()?;
+        serde_json::from_str::<Vec<String>>(&content).ok().filter(|v| !v.is_empty())
+    }
+
+    /// Persist model list to cache file.
+    fn save_models_cache(&self, models: &[String]) {
+        if let Some(parent) = self.models_cache_path().parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(models) {
+            let tmp = self.models_cache_path().with_extension("tmp");
+            if fs::write(&tmp, &json).is_ok() {
+                let _ = fs::rename(&tmp, self.models_cache_path());
+            }
+        }
+    }
+
+    /// Hardcoded static fallback (last resort).
+    fn static_fallback_models() -> Vec<String> {
+        vec![
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.0-flash".to_string(),
+        ]
+    }
+
+    /// Run `agy models` with 5s timeout and parse the output.
+    fn fetch_available_models() -> Vec<String> {
+        use std::time::Instant;
+        let start = Instant::now();
+        let mut child = match std::process::Command::new("agy")
+            .arg("models")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() { return Vec::new(); }
+                    let stdout = child.stdout.take().unwrap();
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    let _ = std::io::BufReader::new(stdout).read_to_string(&mut buf);
+                    return buf.lines()
+                        .map(|l| l.trim().to_string())
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                }
+                Ok(None) => {
+                    if start.elapsed() > Duration::from_secs(5) {
+                        let _ = child.kill();
+                        return Vec::new();
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => return Vec::new(),
+            }
+        }
+    }
+
+    /// Get available models — always attempts fresh fetch (5s timeout):
+    /// 1. Fetch `agy models` → success → use + always update cache
+    /// 2. Fetch failed → cache (any age, never deleted) → use
+    /// 3. No cache → static hardcoded list (last resort)
     fn get_available_models(&mut self) -> &[String] {
         if self.available_models.is_none() {
             let models = Self::fetch_available_models();
-            self.available_models = Some(if models.is_empty() {
-                vec![
-                    "Gemini 3.5 Flash (Medium)".to_string(),
-                    "Gemini 3.5 Flash (High)".to_string(),
-                    "Gemini 3.5 Flash (Low)".to_string(),
-                    "Gemini 3.1 Pro (Low)".to_string(),
-                    "Gemini 3.1 Pro (High)".to_string(),
-                ]
+            if !models.is_empty() {
+                eprintln!("[agy-acp] fetched {} models from `agy models`, updating cache", models.len());
+                self.save_models_cache(&models);
+                self.available_models = Some(models);
+            } else if let Some(cached) = self.load_cached_models() {
+                eprintln!("[agy-acp] `agy models` failed, using cached model list ({} models)", cached.len());
+                self.available_models = Some(cached);
             } else {
-                models
-            });
+                eprintln!("[agy-acp] `agy models` failed and no cache found, using hardcoded fallback");
+                self.available_models = Some(Self::static_fallback_models());
+            }
         }
         self.available_models.as_ref().unwrap()
     }
@@ -1038,7 +1093,27 @@ impl Adapter {
 
 #[tokio::main]
 async fn main() {
+    // Prefetch models in background to avoid blocking tokio worker on first session/new
+    let prefetch = tokio::task::spawn_blocking(Adapter::fetch_available_models);
+
     let adapter = Arc::new(tokio::sync::Mutex::new(Adapter::new()));
+
+    // Apply prefetched models
+    if let Ok(models) = prefetch.await {
+        let mut guard = adapter.lock().await;
+        if !models.is_empty() {
+            eprintln!("[agy-acp] fetched {} models from `agy models`, updating cache", models.len());
+            guard.save_models_cache(&models);
+            guard.available_models = Some(models);
+        } else if let Some(cached) = guard.load_cached_models() {
+            eprintln!("[agy-acp] `agy models` failed, using cached model list ({} models)", cached.len());
+            guard.available_models = Some(cached);
+        } else {
+            eprintln!("[agy-acp] `agy models` failed and no cache found, using hardcoded fallback");
+            guard.available_models = Some(Adapter::static_fallback_models());
+        }
+    }
+
     let active_cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
