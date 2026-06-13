@@ -69,9 +69,17 @@ impl<'de> Deserialize<'de> for AllowBots {
 pub struct AgentCoreConfig {
     /// AgentCore Runtime ARN (required)
     pub runtime_arn: String,
+    /// ACP agent command to run in the PTY shell (default: kiro-cli acp --trust-all-tools)
+    #[serde(default = "default_agentcore_shell_command")]
+    pub shell_command: String,
     /// Cancel strategy: "noop" or "stop" (default: stop)
     #[serde(default = "default_agentcore_cancel_strategy")]
+    #[allow(dead_code)]
     pub cancel_strategy: AgentCoreCancelStrategy,
+}
+
+fn default_agentcore_shell_command() -> String {
+    "kiro-cli acp --trust-all-tools".to_string()
 }
 
 impl AgentCoreConfig {
@@ -930,9 +938,29 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
         );
 
         if !config.agent.command_explicit {
-            config.agent = AgentConfig {
-                command: "uv".into(),
-                args: vec![
+            // Use native Rust bridge (agentcore feature) or fall back to Python adapter
+            #[cfg(feature = "agentcore")]
+            let (cmd, args) = {
+                let self_exe = std::env::current_exe()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "openab".to_string());
+                (
+                    self_exe,
+                    vec![
+                        "agentcore-bridge".into(),
+                        "--runtime-arn".into(),
+                        ac.runtime_arn.clone(),
+                        "--region".into(),
+                        ac.region(),
+                        "--command".into(),
+                        ac.shell_command.clone(),
+                    ],
+                )
+            };
+            #[cfg(not(feature = "agentcore"))]
+            let (cmd, args) = (
+                "uv".to_string(),
+                vec![
                     "run".into(),
                     "--script".into(),
                     "/opt/agentcore/acp/agentcore_acp.py".into(),
@@ -943,6 +971,10 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
                     "--cancel-strategy".into(),
                     ac.cancel_strategy.to_string(),
                 ],
+            );
+            config.agent = AgentConfig {
+                command: cmd,
+                args,
                 working_dir: config.agent.working_dir.clone(),
                 env: config.agent.env.clone(),
                 inherit_env: config.agent.inherit_env.clone(),
@@ -1335,13 +1367,20 @@ bot_token = "t"
 runtime_arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"
 "#;
         let cfg = parse_config(toml, "test").unwrap();
-        assert_eq!(cfg.agent.command, "uv");
+        #[cfg(feature = "agentcore")]
+        {
+            // With agentcore feature, spawns self with agentcore-bridge subcommand
+            assert!(cfg.agent.args.contains(&"agentcore-bridge".to_string()));
+        }
+        #[cfg(not(feature = "agentcore"))]
+        {
+            assert_eq!(cfg.agent.command, "uv");
+        }
         assert!(cfg.agent.args.contains(&"--runtime-arn".to_string()));
         assert!(cfg
             .agent
             .args
             .contains(&"arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent".to_string()));
-        assert!(cfg.agent.args.contains(&"us-east-1".to_string()));
     }
 
     #[test]

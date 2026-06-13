@@ -78,6 +78,19 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Internal: AgentCore WebSocket shell bridge (ACP↔WebSocket)
+    #[cfg(feature = "agentcore")]
+    AgentcoreBridge {
+        /// AgentCore Runtime ARN
+        #[arg(long)]
+        runtime_arn: String,
+        /// AWS region
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        /// ACP agent command to run in the PTY (default: kiro-cli acp --trust-all-tools)
+        #[arg(long, default_value = "kiro-cli acp --trust-all-tools")]
+        command: String,
+    },
 }
 
 #[tokio::main]
@@ -97,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
         Commands::Setup { output } => {
             setup::run_setup(output.map(PathBuf::from))?;
             return Ok(());
+        }
+        #[cfg(feature = "agentcore")]
+        Commands::AgentcoreBridge { runtime_arn, region, command } => {
+            return acp::agentcore::run_bridge(&runtime_arn, &region, &command).await;
         }
         Commands::Run { config } => config,
     };
