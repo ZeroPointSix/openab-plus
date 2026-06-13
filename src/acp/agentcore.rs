@@ -542,18 +542,35 @@ where
                     return Err(anyhow!("failed to send initialize: {e}"));
                 }
             }
-            // Wait up to 10s for response
-            match tokio::time::timeout(std::time::Duration::from_secs(10), line_rx.recv()).await {
-                Ok(Some(line)) => {
-                    info!(attempt, len = line.len(), "agent initialized");
-                    initialized = true;
+            // Wait up to 10s for response — skip notifications (lines without "id":0)
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    info!(attempt, "no initialize response, retrying...");
                     break;
                 }
-                Ok(None) => return Err(anyhow!("agent closed before initialize response")),
-                Err(_) => {
-                    info!(attempt, "no initialize response, retrying...");
+                match tokio::time::timeout(remaining, line_rx.recv()).await {
+                    Ok(Some(line)) => {
+                        // Check if this is the initialize response (has "id":0 or "id": 0)
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            if v.get("id").and_then(|i| i.as_u64()) == Some(0) && v.get("result").is_some() {
+                                info!(attempt, "agent initialized");
+                                initialized = true;
+                                break;
+                            }
+                        }
+                        // Skip notifications and other non-response lines
+                        continue;
+                    }
+                    Ok(None) => return Err(anyhow!("agent closed before initialize response")),
+                    Err(_) => {
+                        info!(attempt, "no initialize response, retrying...");
+                        break;
+                    }
                 }
             }
+            if initialized { break; }
         }
         if !initialized {
             return Err(anyhow!("agent failed to respond to initialize after 5 attempts"));
@@ -562,9 +579,9 @@ where
         // Send session/new to kiro-cli to create a session
         let sess_msg = serde_json::json!({
             "jsonrpc": "2.0",
-            "id": 0,
+            "id": 1,
             "method": "session/new",
-            "params": {}
+            "params": {"cwd": "/home/agent", "mcpServers": []}
         });
         let sess_data = format!("{}\n", serde_json::to_string(&sess_msg)?);
         {
@@ -575,19 +592,39 @@ where
             w.send(Message::Binary(frame)).await?;
         }
 
-        // Wait for session/new response (extract kiro's sessionId)
-        let kiro_session_id = match tokio::time::timeout(std::time::Duration::from_secs(30), line_rx.recv()).await {
-            Ok(Some(line)) => {
-                let v: Value = serde_json::from_str(&line).unwrap_or_default();
-                let sid = v.pointer("/result/sessionId")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("default")
-                    .to_string();
-                info!(kiro_session_id = %sid, "kiro-cli session created");
-                sid
+        // Wait for session/new response — skip notifications (up to 120s)
+        let kiro_session_id = {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+            let mut sid = String::from("default");
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    info!("session/new timed out, using default session");
+                    break;
+                }
+                match tokio::time::timeout(remaining, line_rx.recv()).await {
+                    Ok(Some(line)) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                            if v.get("id").and_then(|i| i.as_u64()) == Some(1) {
+                                sid = v.pointer("/result/sessionId")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("default")
+                                    .to_string();
+                                info!(kiro_session_id = %sid, "agent session created");
+                                break;
+                            }
+                        }
+                        // Skip notifications
+                        continue;
+                    }
+                    Ok(None) => return Err(anyhow!("agent closed before session/new response")),
+                    Err(_) => {
+                        info!("session/new timed out, using default session");
+                        break;
+                    }
+                }
             }
-            Ok(None) => return Err(anyhow!("kiro-cli closed before session/new response")),
-            Err(_) => return Err(anyhow!("kiro-cli session/new timed out (30s)")),
+            sid
         };
 
         Ok(ShellHandle {
