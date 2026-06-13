@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::http;
 use tokio_tungstenite::tungstenite::protocol::Message;
 use tracing::info;
 
-const AGENT_CMD_PREFIX: &str = "stty -echo 2>/dev/null; exec ";
+const AGENT_CMD_PREFIX: &str = "stty -echo 2>/dev/null; mkdir -p /tmp/kiro-cli && cp -n /mnt/agent/.local/share/kiro-cli/data.sqlite3 /tmp/kiro-cli/ 2>/dev/null; export XDG_DATA_HOME=/tmp; exec ";
 
 /// WebSocket binary frame channel bytes (1-byte prefix protocol).
 const CHANNEL_STDIN: u8 = 0x00;
