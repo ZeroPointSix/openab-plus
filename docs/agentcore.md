@@ -29,17 +29,43 @@ That's it. OAB auto-spawns the native AgentCore bridge.
 2. **AWS credentials** on the OAB pod with `bedrock-agentcore:InvokeAgentRuntimeCommandShell` permission
 3. **Runtime deployed after June 5, 2026** (interactive shells support required)
 
+## Architecture
+
+```
+┌─ ECS / Kubernetes Pod ────────────────────────────────────────┐
+│  openab (PID 1)                                               │
+│    └─ openab agentcore-bridge (child process)                 │
+│         ├─ stdin  ◄── JSON-RPC from OAB                       │
+│         ├─ stdout ──► JSON-RPC to OAB                         │
+│         └─ WebSocket ──► AgentCore (SigV4 signed)             │
+└───────────────────────────────────────────────────────────────┘
+          │ InvokeAgentRuntimeCommandShell (wss://)
+          ▼
+┌─ AgentCore MicroVM ───────────────────────────────────────────┐
+│  PTY shell (persistent per shellId)                           │
+│    └─ kiro-cli acp --trust-all-tools (long-lived)             │
+│         ├─ stdin  ◄── JSON-RPC (initialize, session/prompt)   │
+│         └─ stdout ──► JSON-RPC (responses, notifications)     │
+│                                                               │
+│  /mnt/agent (14-day persistent storage)                       │
+│    └─ .local/share/kiro-cli/data.sqlite3 (OAuth)              │
+│  /tmp/kiro-cli/data.sqlite3 (local copy — SQLite locks work)  │
+└───────────────────────────────────────────────────────────────┘
+```
+
 ## Config Reference
 
 ```toml
 [agentcore]
 runtime_arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"  # required
+shell_command = "kiro-cli acp --trust-all-tools"  # default; any ACP agent
 cancel_strategy = "stop"       # "stop" (default) or "noop"
 ```
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `runtime_arn` | yes | — | AgentCore Runtime ARN (region is extracted from it) |
+| `shell_command` | no | `kiro-cli acp --trust-all-tools` | ACP agent command to run in the PTY |
 | `cancel_strategy` | no | `stop` | What to do on cancel: `stop` terminates the session, `noop` ignores |
 
 If you need full control, use `[agent]` directly:
