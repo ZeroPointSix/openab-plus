@@ -245,8 +245,8 @@ async fn main() -> Result<()> {
     let telegram_bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
     let telegram_secret_token = std::env::var("TELEGRAM_SECRET_TOKEN").ok();
     let telegram_rich_messages = std::env::var("TELEGRAM_RICH_MESSAGES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true);
     if telegram_bot_token.is_some() {
         let webhook_path =
             std::env::var("TELEGRAM_WEBHOOK_PATH").unwrap_or_else(|_| "/webhook/telegram".into());
