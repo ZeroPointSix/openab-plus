@@ -915,10 +915,13 @@ impl AdapterRouter {
                                     tracing::warn!(error = ?e, "delete placeholder failed; placeholder will remain visible");
                                 }
                             }
-                        } else if contains_bot_mention(&final_content) {
-                            // Bot mention detected: delete placeholder and send as
-                            // new message so Discord emits MESSAGE_CREATE — otherwise
-                            // the mentioned bot won't receive the gateway event (#1110).
+                        } else if adapter.platform() == "discord"
+                            && contains_bot_mention(&final_content)
+                        {
+                            // Discord-specific: bot mention detected. Delete placeholder
+                            // and send as new message so Discord emits MESSAGE_CREATE —
+                            // otherwise the mentioned bot won't receive the gateway
+                            // event since MESSAGE_UPDATE skips notifications (#1110).
                             let mut send_ok = false;
                             if let Some(first) = chunks.first() {
                                 if adapter.send_message(&thread_channel, first).await.is_ok() {
@@ -969,7 +972,7 @@ impl AdapterRouter {
     }
 }
 
-/// Returns true if `content` contains a Discord user/bot mention (`<@123>`).
+/// Returns true if `content` contains a Discord user/bot mention (`<@123>` or `<@!123>`).
 /// Used to detect cross-bot mentions so the streaming path can switch from
 /// edit (MESSAGE_UPDATE, no mention notification) to delete+send (MESSAGE_CREATE).
 fn contains_bot_mention(content: &str) -> bool {
@@ -977,8 +980,12 @@ fn contains_bot_mention(content: &str) -> bool {
     let bytes = content.as_bytes();
     while i + 2 < bytes.len() {
         if bytes[i] == b'<' && bytes[i + 1] == b'@' {
-            // skip optional '!' for role mentions — we only care about user mentions
-            let start = i + 2;
+            // Skip optional '!' for nickname-style mentions (<@!UID>)
+            let start = if i + 2 < bytes.len() && bytes[i + 2] == b'!' {
+                i + 3
+            } else {
+                i + 2
+            };
             if start < bytes.len() && bytes[start].is_ascii_digit() {
                 if let Some(end) = content[start..].find('>') {
                     if content[start..start + end].chars().all(|c| c.is_ascii_digit()) {
