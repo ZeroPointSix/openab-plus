@@ -408,7 +408,13 @@ pub async fn handle_reply(
 
     // Try sendRichMessage for complex content when enabled
     if rich_messages && is_complex_markdown(&reply.content.text) {
-        match send_rich_message(client, bot_token, &reply.channel.id, &reply.channel.thread_id, &reply.content.text).await {
+        // Bot API limit: 32768 UTF-8 chars for rich messages
+        let rich_text = if reply.content.text.len() > 32768 {
+            &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
+        } else {
+            &reply.content.text
+        };
+        match send_rich_message(client, bot_token, &reply.channel.id, &reply.channel.thread_id, rich_text).await {
             Ok(_) => return,
             Err(e) => warn!("sendRichMessage failed ({e}), falling back to sendMessage"),
         }
