@@ -1310,6 +1310,34 @@ mod tests {
         let out = compose_display(&tools, "response text", false, ToolDisplay::None);
         assert_eq!(out, "response text");
     }
+
+    #[test]
+    fn contains_bot_mention_user() {
+        assert!(contains_bot_mention("hello <@1234567890> world"));
+    }
+
+    #[test]
+    fn contains_bot_mention_nickname() {
+        assert!(contains_bot_mention("hey <@!9876543210>"));
+    }
+
+    #[test]
+    fn contains_bot_mention_role() {
+        assert!(contains_bot_mention("calling <@&1496247626675257384>"));
+    }
+
+    #[test]
+    fn contains_bot_mention_no_match() {
+        assert!(!contains_bot_mention("hello world"));
+        assert!(!contains_bot_mention("email user@example.com"));
+        assert!(!contains_bot_mention("<@not_a_number>"));
+        assert!(!contains_bot_mention("<#123456>")); // channel mention
+    }
+
+    #[test]
+    fn contains_bot_mention_embedded() {
+        assert!(contains_bot_mention("請問 <@1501788608439386172> 1+1=?"));
+    }
 }
 
 #[cfg(test)]
