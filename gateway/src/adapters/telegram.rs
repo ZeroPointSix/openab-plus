@@ -222,18 +222,32 @@ fn is_markdown_parse_error(description: &str) -> bool {
 
 /// Returns true if the content is complex enough to benefit from sendRichMessage.
 fn is_complex_markdown(text: &str) -> bool {
-    if text.contains("|---|") || text.contains("```") || text.len() > 4096 {
+    if text.contains("```") || text.len() > 4096 {
         return true;
     }
-    // Check for ATX headings (# through ######) at line start
     text.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("# ")
+        // ATX headings
+        if trimmed.starts_with("# ")
             || trimmed.starts_with("## ")
             || trimmed.starts_with("### ")
             || trimmed.starts_with("#### ")
             || trimmed.starts_with("##### ")
             || trimmed.starts_with("###### ")
+        {
+            return true;
+        }
+        // Table separator row: |---|, |:---|, |---:|, | :---: |, etc.
+        if trimmed.starts_with('|') && trimmed.ends_with('|') {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if inner.split('|').all(|cell| {
+                let c = cell.trim().trim_matches(':');
+                !c.is_empty() && c.chars().all(|ch| ch == '-')
+            }) {
+                return true;
+            }
+        }
+        false
     })
 }
 
@@ -626,17 +640,25 @@ mod tests {
 
     #[test]
     fn test_is_complex_markdown() {
+        // Tables
         assert!(is_complex_markdown("| Col1 | Col2 |\n|---|---|\n| a | b |"));
+        assert!(is_complex_markdown("| Col1 | Col2 |\n| :--- | ---: |\n| a | b |"));
+        assert!(is_complex_markdown("| A | B |\n| :---: | :---: |\n| x | y |"));
+        // Code blocks
         assert!(is_complex_markdown("```rust\nfn main() {}\n```"));
+        // Headings
         assert!(is_complex_markdown("# Heading\n\nSome text"));
         assert!(is_complex_markdown("## Heading 2 at start"));
         assert!(is_complex_markdown("### Heading 3 at start"));
         assert!(is_complex_markdown("#### Heading 4"));
         assert!(is_complex_markdown("text\n##### Heading 5"));
         assert!(is_complex_markdown("  ## Indented heading"));
+        // Size
         assert!(is_complex_markdown(&"x".repeat(4097)));
+        // Negatives
         assert!(!is_complex_markdown("Hello world"));
         assert!(!is_complex_markdown("*bold* and _italic_"));
         assert!(!is_complex_markdown("#hashtag no space"));
+        assert!(!is_complex_markdown("| just | pipes |"));
     }
 }
