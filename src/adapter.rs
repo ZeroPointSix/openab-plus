@@ -972,7 +972,8 @@ impl AdapterRouter {
     }
 }
 
-/// Returns true if `content` contains a Discord user/bot mention (`<@123>` or `<@!123>`).
+/// Returns true if `content` contains a Discord user/bot mention (`<@123>`, `<@!123>`)
+/// or a role mention (`<@&123>`).
 /// Used to detect cross-bot mentions so the streaming path can switch from
 /// edit (MESSAGE_UPDATE, no mention notification) to delete+send (MESSAGE_CREATE).
 fn contains_bot_mention(content: &str) -> bool {
@@ -980,8 +981,10 @@ fn contains_bot_mention(content: &str) -> bool {
     let bytes = content.as_bytes();
     while i + 2 < bytes.len() {
         if bytes[i] == b'<' && bytes[i + 1] == b'@' {
-            // Skip optional '!' for nickname-style mentions (<@!UID>)
-            let start = if i + 2 < bytes.len() && bytes[i + 2] == b'!' {
+            // Skip optional '!' (nickname mention) or '&' (role mention)
+            let start = if i + 2 < bytes.len()
+                && (bytes[i + 2] == b'!' || bytes[i + 2] == b'&')
+            {
                 i + 3
             } else {
                 i + 2
