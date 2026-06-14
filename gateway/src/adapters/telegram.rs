@@ -221,13 +221,28 @@ fn is_markdown_parse_error(description: &str) -> bool {
 }
 
 /// Returns true if the content is complex enough to benefit from sendRichMessage.
+///
+/// Design decisions:
+/// - We classify at the adapter layer (not agent) so agents don't need prompt changes.
+/// - Conservative: only route to rich when legacy sendMessage would visibly break.
+/// - False positives are acceptable (rich renders simple text fine too), but we avoid
+///   unnecessary API switches for plain prose to reduce risk surface.
+/// - LaTeX and blockquotes are intentionally omitted for now (Phase 2).
 fn is_complex_markdown(text: &str) -> bool {
-    if text.contains("```") || text.contains("~~~") || text.len() > 4096 {
+    // Fenced code blocks (backtick or tilde) — sendMessage can't syntax-highlight.
+    // We check both ``` and ~~~ since LLM outputs vary.
+    if text.contains("```") || text.contains("~~~") {
+        return true;
+    }
+    // sendMessage hard limit is 4096 chars. Rich messages support 32768.
+    // Rather than chunking (which breaks tables/code mid-block), prefer rich.
+    if text.len() > 4096 {
         return true;
     }
     text.lines().any(|line| {
         let trimmed = line.trim_start();
-        // ATX headings
+        // ATX headings (h1-h6): sendMessage has zero heading support.
+        // We require "# " (with space) to avoid matching "#hashtag".
         if trimmed.starts_with("# ")
             || trimmed.starts_with("## ")
             || trimmed.starts_with("### ")
@@ -237,7 +252,10 @@ fn is_complex_markdown(text: &str) -> bool {
         {
             return true;
         }
-        // Table separator row: |---|, |:---|, |---:|, | :---: |, etc.
+        // GFM table separator row detection.
+        // Must start and end with |, and every cell between pipes must be
+        // only dashes (optionally wrapped in colons for alignment).
+        // This avoids false positives on lines like "| just | pipes |".
         if trimmed.starts_with('|') && trimmed.ends_with('|') {
             let inner = &trimmed[1..trimmed.len() - 1];
             if inner.split('|').all(|cell| {
@@ -252,6 +270,10 @@ fn is_complex_markdown(text: &str) -> bool {
 }
 
 /// Send a rich message via Bot API 10.1 sendRichMessage.
+///
+/// Design: we pass agent markdown directly via InputRichMessage.markdown.
+/// Rich Markdown is GFM-compatible, so no conversion layer is needed.
+/// The API handles rendering (tables, syntax highlighting, headings, etc.)
 async fn send_rich_message(
     client: &reqwest::Client,
     bot_token: &str,
@@ -275,6 +297,10 @@ async fn send_rich_message(
 }
 
 /// Stream a partial rich message via sendRichMessageDraft.
+///
+/// Design: ephemeral 30-second preview. Caller must follow up with
+/// sendRichMessage to persist. Same draft_id = animated transition.
+/// Wired but unused until gateway streaming infrastructure integrates.
 #[allow(dead_code)]
 async fn send_rich_message_draft(
     client: &reqwest::Client,
@@ -420,9 +446,14 @@ pub async fn handle_reply(
         "gateway → telegram"
     );
 
-    // Try sendRichMessage for complex content when enabled
+    // --- Rich Message routing ---
+    // Design: try sendRichMessage first for complex content. On ANY failure
+    // (unsupported client, API version mismatch, network error), fall back to
+    // legacy sendMessage. This ensures zero-downtime rollout — the worst case
+    // is one extra round-trip, not a failed delivery.
     if rich_messages && is_complex_markdown(&reply.content.text) {
-        // Bot API limit: 32768 UTF-8 chars for rich messages
+        // Bot API limit: 32768 UTF-8 chars for rich messages.
+        // Truncate here to avoid sending oversized payloads that will always fail.
         let rich_text = if reply.content.text.len() > 32768 {
             &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
         } else {
