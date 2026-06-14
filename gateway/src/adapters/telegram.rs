@@ -220,6 +220,66 @@ fn is_markdown_parse_error(description: &str) -> bool {
         || desc_lower.contains("parse entities")
 }
 
+/// Returns true if the content is complex enough to benefit from sendRichMessage.
+fn is_complex_markdown(text: &str) -> bool {
+    text.contains("|---|")
+        || text.contains("```")
+        || text.starts_with("# ")
+        || text.contains("\n# ")
+        || text.contains("\n## ")
+        || text.contains("\n### ")
+        || text.len() > 4096
+}
+
+/// Send a rich message via Bot API 10.1 sendRichMessage.
+async fn send_rich_message(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    thread_id: &Option<String>,
+    text: &str,
+) -> Result<serde_json::Value, String> {
+    let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendRichMessage");
+    let body = serde_json::json!({
+        "chat_id": chat_id,
+        "message_thread_id": thread_id,
+        "rich_message": { "markdown": text },
+    });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if json["ok"].as_bool() == Some(true) {
+        Ok(json)
+    } else {
+        Err(json["description"].as_str().unwrap_or("unknown error").to_string())
+    }
+}
+
+/// Stream a partial rich message via sendRichMessageDraft.
+#[allow(dead_code)]
+async fn send_rich_message_draft(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    thread_id: &Option<String>,
+    draft_id: i64,
+    text: &str,
+) -> Result<(), String> {
+    let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendRichMessageDraft");
+    let body = serde_json::json!({
+        "chat_id": chat_id,
+        "message_thread_id": thread_id,
+        "draft_id": draft_id,
+        "rich_message": { "markdown": text },
+    });
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if json["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(json["description"].as_str().unwrap_or("unknown error").to_string())
+    }
+}
+
 // --- Reply handler ---
 
 pub async fn handle_reply(
@@ -228,6 +288,7 @@ pub async fn handle_reply(
     client: &reqwest::Client,
     event_tx: &tokio::sync::broadcast::Sender<String>,
     reaction_state: &Arc<Mutex<HashMap<String, Vec<String>>>>,
+    rich_messages: bool,
 ) {
     // Handle create_topic command
     if reply.command.as_deref() == Some("create_topic") {
@@ -338,6 +399,15 @@ pub async fn handle_reply(
         thread_id = ?reply.channel.thread_id,
         "gateway → telegram"
     );
+
+    // Try sendRichMessage for complex content when enabled
+    if rich_messages && is_complex_markdown(&reply.content.text) {
+        match send_rich_message(client, bot_token, &reply.channel.id, &reply.channel.thread_id, &reply.content.text).await {
+            Ok(_) => return,
+            Err(e) => warn!("sendRichMessage failed ({e}), falling back to sendMessage"),
+        }
+    }
+
     let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage");
     let resp = client
         .post(&url)
@@ -540,5 +610,15 @@ mod tests {
         assert!(is_markdown_parse_error("can't parse entities in message text"));
         assert!(!is_markdown_parse_error("Unauthorized"));
         assert!(!is_markdown_parse_error("Bad Request: chat not found"));
+    }
+
+    #[test]
+    fn test_is_complex_markdown() {
+        assert!(is_complex_markdown("| Col1 | Col2 |\n|---|---|\n| a | b |"));
+        assert!(is_complex_markdown("```rust\nfn main() {}\n```"));
+        assert!(is_complex_markdown("# Heading\n\nSome text"));
+        assert!(is_complex_markdown(&"x".repeat(4097)));
+        assert!(!is_complex_markdown("Hello world"));
+        assert!(!is_complex_markdown("*bold* and _italic_"));
     }
 }
