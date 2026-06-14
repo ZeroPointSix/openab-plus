@@ -22,7 +22,7 @@ openshell sandbox create --name oab --from oab-native-sandbox:latest -- bash
 openshell sandbox connect oab
 ```
 
-Then inside the sandbox:
+Then inside the sandbox, for an interactive human run:
 
 ```bash
 export DISCORD_BOT_TOKEN="your-discord-bot-token"
@@ -30,6 +30,8 @@ cd /sandbox
 openab-agent auth codex-oauth --no-browser
 openab run -c /sandbox/config.toml
 ```
+
+For automation and E2E tests, do not use `openshell sandbox connect`. Use `openshell sandbox exec -n oab --no-tty -- ...` for setup commands so the test does not get stuck inside an interactive shell.
 
 The full commands below include the config file and the Day 1 network policy.
 
@@ -114,6 +116,24 @@ openshell sandbox list
 
 If either command fails, finish the Linux or macOS host path above before continuing.
 
+## Automation Contract
+
+If an agent is asked to test this guide, this section is part of the pass/fail contract.
+
+- Use real OpenShell. Do not replace this with a native host install, plain `docker run`, Kubernetes, or a host-local OpenAB process.
+- Build from `openshell/Dockerfile`.
+- Create a real OpenShell sandbox named `oab`.
+- Use `openshell sandbox exec -n oab --no-tty -- ...` for automated commands. Avoid `openshell sandbox connect oab` unless a human explicitly wants an interactive shell.
+- Do not install OpenAB binaries into host paths such as `~/.local/bin`.
+- Do not edit `/etc/sudoers.d`, runner permissions, OpenShell cache/state internals, or OpenShell generated container files to make a test pass.
+- Do not print secrets. Read `DISCORD_BOT_TOKEN` and optional `DISCORD_CHANNEL_ID` from the environment or a local secret file, then keep command output redacted.
+- If `DISCORD_CHANNEL_ID` is set, configure OpenAB for only that channel.
+- Stop at `openab-agent auth codex-oauth --no-browser` when browser approval is required. Print the auth URL and ask for the full redirected `http://localhost:1455/auth/callback?...` URL.
+- After auth succeeds, restart `openab run` if it was already started before auth.
+- Success requires logs showing `discord bot connected user=...`.
+- A bot token can post a readiness message, but it cannot prove user mention/reply behavior. Ask a human to mention the bot in the allowed channel for the final reply test.
+- Report exact commands, redacted outputs, sandbox/process state, policy/auth steps, and remaining human actions.
+
 ## 1. Build The Sandbox Image
 
 From the OpenAB repo root:
@@ -138,7 +158,19 @@ Connect:
 openshell sandbox connect oab
 ```
 
-Inside the sandbox, verify the basic shape:
+For automation, verify the same shape without entering an interactive shell:
+
+```bash
+openshell sandbox exec -n oab --no-tty -- sh -lc '
+  cd /sandbox
+  whoami
+  command -v openab
+  command -v openab-agent
+  test -w /sandbox && echo "/sandbox writable"
+'
+```
+
+For a human interactive run, connect and run:
 
 ```bash
 cd /sandbox
@@ -196,7 +228,7 @@ Durable logs also exist inside the sandbox under `/var/log/openshell.*.log`.
 
 ## 4. Create The OpenAB Config
 
-Inside the sandbox:
+For a human interactive run, enter the sandbox and create `/sandbox/config.toml`:
 
 ```bash
 export DISCORD_BOT_TOKEN="your-discord-bot-token"
@@ -231,9 +263,60 @@ remove_after_reply = false
 EOF
 ```
 
+For an automation/E2E run from the host, use `sandbox exec` and keep secrets out of logs:
+
+```bash
+: "${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN first}"
+
+if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
+  ALLOW_ALL_CHANNELS=false
+  ALLOWED_CHANNELS="allowed_channels = [\"${DISCORD_CHANNEL_ID}\"]"
+else
+  ALLOW_ALL_CHANNELS=true
+  ALLOWED_CHANNELS="allowed_channels = []"
+fi
+
+cat > /tmp/openab-openshell-config.toml <<EOF
+[discord]
+bot_token = "\${DISCORD_BOT_TOKEN}"
+allow_all_channels = ${ALLOW_ALL_CHANNELS}
+${ALLOWED_CHANNELS}
+allow_all_users = true
+allow_dm = false
+message_processing_mode = "per-thread"
+
+[agent]
+command = "openab-agent"
+working_dir = "/sandbox"
+
+[agent.env]
+HOME = "/sandbox"
+PATH = "/sandbox/bin:/sandbox/.local/bin:/usr/local/bin:/usr/bin:/bin"
+TMPDIR = "/sandbox/tmp"
+OPENAB_AGENT_OPENAI_MODEL = "gpt-5.4-mini"
+
+[pool]
+max_sessions = 1
+session_ttl_hours = 1
+
+[reactions]
+enabled = true
+remove_after_reply = false
+EOF
+
+openshell sandbox exec -n oab --no-tty -- sh -lc '
+  cd /sandbox
+  mkdir -p /sandbox/bin /sandbox/.local/bin /sandbox/tmp
+  cat > /sandbox/config.toml
+  chmod 600 /sandbox/config.toml
+' < /tmp/openab-openshell-config.toml
+
+rm -f /tmp/openab-openshell-config.toml
+```
+
 ## 5. Authenticate The Agent
 
-Inside the sandbox:
+For a human interactive run, run this inside the sandbox:
 
 ```bash
 HOME=/sandbox openab-agent auth codex-oauth --no-browser
@@ -247,9 +330,37 @@ Verify:
 HOME=/sandbox openab-agent auth status
 ```
 
+For automation, prefer a direct non-interactive command only when the harness can keep stdin open for the callback paste:
+
+```bash
+openshell sandbox exec -n oab --env HOME=/sandbox -- openab-agent auth codex-oauth --no-browser
+```
+
+If the exec transport cannot keep stdin open, attach to the OpenShell-created container only after proving the sandbox exists. This still runs inside the OpenShell sandbox container:
+
+```bash
+CONTAINER_ID="$(docker ps \
+  --filter 'label=openshell.ai/sandbox-name=oab' \
+  --format '{{.ID}}' \
+  | head -n 1)"
+: "${CONTAINER_ID:?could not find OpenShell container for sandbox oab}"
+
+docker exec -i \
+  -u sandbox \
+  -e HOME=/sandbox \
+  "$CONTAINER_ID" \
+  openab-agent auth codex-oauth --no-browser
+```
+
+After the user pastes the callback URL, verify:
+
+```bash
+openshell sandbox exec -n oab --no-tty --env HOME=/sandbox -- openab-agent auth status
+```
+
 ## 6. Run OpenAB
 
-Inside the sandbox:
+For a human interactive run, run inside the sandbox:
 
 ```bash
 export HOME=/sandbox
@@ -260,12 +371,60 @@ export TMPDIR=/sandbox/tmp
 openab run -c /sandbox/config.toml
 ```
 
+For automation/E2E, start it in the background inside the OpenShell-created sandbox container after auth succeeds:
+
+```bash
+: "${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN first}"
+
+CONTAINER_ID="$(docker ps \
+  --filter 'label=openshell.ai/sandbox-name=oab' \
+  --format '{{.ID}}' \
+  | head -n 1)"
+: "${CONTAINER_ID:?could not find OpenShell container for sandbox oab}"
+
+docker exec -u 0 "$CONTAINER_ID" sh -lc \
+  "pkill -f 'openab run -c /sandbox/config.toml' 2>/dev/null || true"
+
+docker exec -d \
+  -u sandbox \
+  -e DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
+  -e HOME=/sandbox \
+  -e PATH=/sandbox/bin:/sandbox/.local/bin:/usr/local/bin:/usr/bin:/bin \
+  -e TMPDIR=/sandbox/tmp \
+  "$CONTAINER_ID" \
+  sh -lc 'cd /sandbox && openab run -c /sandbox/config.toml > /sandbox/openab.log 2>&1'
+
+sleep 8
+
+docker exec -u sandbox "$CONTAINER_ID" sh -lc \
+  "ps -ef | grep -E '[o]penab run|PID'; tail -n 160 /sandbox/openab.log"
+```
+
 Expected result:
 
 - OpenAB loads the config.
 - The Discord bot connects.
 - Mention the bot in Discord.
 - The bot replies through `openab-agent`.
+
+For automation/E2E, the readiness line to look for is:
+
+```text
+discord bot connected user=<bot-name>
+```
+
+Optionally post a readiness message to a test channel. This proves the bot token and channel ID are valid, but it does not prove OpenAB reply behavior:
+
+```bash
+: "${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN first}"
+: "${DISCORD_CHANNEL_ID:?set DISCORD_CHANNEL_ID first}"
+
+curl -fsS -X POST \
+  "https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages" \
+  -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data "$(jq -cn --arg content 'OpenAB OpenShell E2E is running. Mention this bot now for the human reply test.' '{content:$content}')"
+```
 
 ## Day 2 Boundary
 
