@@ -222,13 +222,19 @@ fn is_markdown_parse_error(description: &str) -> bool {
 
 /// Returns true if the content is complex enough to benefit from sendRichMessage.
 fn is_complex_markdown(text: &str) -> bool {
-    text.contains("|---|")
-        || text.contains("```")
-        || text.starts_with("# ")
-        || text.contains("\n# ")
-        || text.contains("\n## ")
-        || text.contains("\n### ")
-        || text.len() > 4096
+    if text.contains("|---|") || text.contains("```") || text.len() > 4096 {
+        return true;
+    }
+    // Check for ATX headings (# through ######) at line start
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("# ")
+            || trimmed.starts_with("## ")
+            || trimmed.starts_with("### ")
+            || trimmed.starts_with("#### ")
+            || trimmed.starts_with("##### ")
+            || trimmed.starts_with("###### ")
+    })
 }
 
 /// Send a rich message via Bot API 10.1 sendRichMessage.
@@ -617,8 +623,14 @@ mod tests {
         assert!(is_complex_markdown("| Col1 | Col2 |\n|---|---|\n| a | b |"));
         assert!(is_complex_markdown("```rust\nfn main() {}\n```"));
         assert!(is_complex_markdown("# Heading\n\nSome text"));
+        assert!(is_complex_markdown("## Heading 2 at start"));
+        assert!(is_complex_markdown("### Heading 3 at start"));
+        assert!(is_complex_markdown("#### Heading 4"));
+        assert!(is_complex_markdown("text\n##### Heading 5"));
+        assert!(is_complex_markdown("  ## Indented heading"));
         assert!(is_complex_markdown(&"x".repeat(4097)));
         assert!(!is_complex_markdown("Hello world"));
         assert!(!is_complex_markdown("*bold* and _italic_"));
+        assert!(!is_complex_markdown("#hashtag no space"));
     }
 }
