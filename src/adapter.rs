@@ -915,6 +915,22 @@ impl AdapterRouter {
                                     tracing::warn!(error = ?e, "delete placeholder failed; placeholder will remain visible");
                                 }
                             }
+                        } else if contains_bot_mention(&final_content) {
+                            // Bot mention detected: delete placeholder and send as
+                            // new message so Discord emits MESSAGE_CREATE — otherwise
+                            // the mentioned bot won't receive the gateway event (#1110).
+                            let mut send_ok = false;
+                            if let Some(first) = chunks.first() {
+                                if adapter.send_message(&thread_channel, first).await.is_ok() {
+                                    send_ok = true;
+                                }
+                            }
+                            for chunk in chunks.iter().skip(1) {
+                                let _ = adapter.send_message(&thread_channel, chunk).await;
+                            }
+                            if send_ok {
+                                let _ = adapter.delete_message(&msg).await;
+                            }
                         } else {
                             // Normal streaming: edit first chunk into placeholder, send rest
                             if let Some(first) = chunks.first() {
@@ -951,6 +967,31 @@ impl AdapterRouter {
             })
             .await
     }
+}
+
+/// Returns true if `content` contains a Discord user/bot mention (`<@123>`).
+/// Used to detect cross-bot mentions so the streaming path can switch from
+/// edit (MESSAGE_UPDATE, no mention notification) to delete+send (MESSAGE_CREATE).
+fn contains_bot_mention(content: &str) -> bool {
+    let mut i = 0;
+    let bytes = content.as_bytes();
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'@' {
+            // skip optional '!' for role mentions — we only care about user mentions
+            let start = i + 2;
+            if start < bytes.len() && bytes[start].is_ascii_digit() {
+                if let Some(end) = content[start..].find('>') {
+                    if content[start..start + end].chars().all(|c| c.is_ascii_digit()) {
+                        return true;
+                    }
+                }
+            }
+            i = start;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }
 
 /// Flatten a tool-call title into a single line safe for inline-code spans.
