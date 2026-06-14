@@ -222,7 +222,7 @@ fn is_markdown_parse_error(description: &str) -> bool {
 
 /// Returns true if the content is complex enough to benefit from sendRichMessage.
 fn is_complex_markdown(text: &str) -> bool {
-    if text.contains("```") || text.len() > 4096 {
+    if text.contains("```") || text.contains("~~~") || text.len() > 4096 {
         return true;
     }
     text.lines().any(|line| {
@@ -646,6 +646,7 @@ mod tests {
         assert!(is_complex_markdown("| A | B |\n| :---: | :---: |\n| x | y |"));
         // Code blocks
         assert!(is_complex_markdown("```rust\nfn main() {}\n```"));
+        assert!(is_complex_markdown("~~~\ncode\n~~~"));
         // Headings
         assert!(is_complex_markdown("# Heading\n\nSome text"));
         assert!(is_complex_markdown("## Heading 2 at start"));
