@@ -315,7 +315,7 @@ async fn send_rich_message_draft(
         "chat_id": chat_id,
         "message_thread_id": thread_id,
         "draft_id": draft_id,
-        "rich_message": { "markdown": text },
+        "rich_message": if text.contains("<tg-") { serde_json::json!({ "html": text }) } else { serde_json::json!({ "markdown": text }) },
     });
     let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
     let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
