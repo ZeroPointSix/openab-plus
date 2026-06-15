@@ -213,6 +213,38 @@ pub async fn webhook(
     axum::http::StatusCode::OK
 }
 
+/// Split text into chunks of at most `limit` characters, breaking at newlines when possible.
+fn chunk_text(text: &str, limit: usize) -> Vec<String> {
+    if text.chars().count() <= limit {
+        return vec![text.to_string()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if !current.is_empty() && current.chars().count() + line.chars().count() + 1 > limit {
+            chunks.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push('\n');
+        }
+        if line.chars().count() > limit {
+            // Line itself exceeds limit — hard split
+            for ch in line.chars() {
+                current.push(ch);
+                if current.chars().count() >= limit {
+                    chunks.push(std::mem::take(&mut current));
+                }
+            }
+        } else {
+            current.push_str(line);
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
 fn is_markdown_parse_error(description: &str) -> bool {
     let desc_lower = description.to_lowercase();
     desc_lower.contains("can't find end")
@@ -229,20 +261,16 @@ fn is_markdown_parse_error(description: &str) -> bool {
 ///   unnecessary API switches for plain prose to reduce risk surface.
 /// - LaTeX and blockquotes are intentionally omitted for now (Phase 2).
 fn is_complex_markdown(text: &str) -> bool {
-    // Fenced code blocks (backtick or tilde) — sendMessage can't syntax-highlight.
-    // We check both ``` and ~~~ since LLM outputs vary.
-    if text.contains("```") || text.contains("~~~") {
-        return true;
-    }
+    // 🟡 Code blocks intentionally NOT routed to rich — sendMessage preserves
+    // syntax highlighting (language header + copy button) which RichBlockPreformatted lacks.
+
     // sendMessage hard limit is 4096 chars. Rich messages support 32768.
-    // Rather than chunking (which breaks tables/code mid-block), prefer rich.
-    if text.len() > 4096 {
+    if text.chars().count() > 4096 {
         return true;
     }
     text.lines().any(|line| {
         let trimmed = line.trim_start();
         // ATX headings (h1-h6): sendMessage has zero heading support.
-        // We require "# " (with space) to avoid matching "#hashtag".
         if trimmed.starts_with("# ")
             || trimmed.starts_with("## ")
             || trimmed.starts_with("### ")
@@ -253,9 +281,6 @@ fn is_complex_markdown(text: &str) -> bool {
             return true;
         }
         // GFM table separator row detection.
-        // Must start and end with |, and every cell between pipes must be
-        // only dashes (optionally wrapped in colons for alignment).
-        // This avoids false positives on lines like "| just | pipes |".
         if trimmed.starts_with('|') && trimmed.ends_with('|') {
             let inner = &trimmed[1..trimmed.len() - 1];
             if inner.split('|').all(|cell| {
@@ -483,71 +508,74 @@ pub async fn handle_reply(
     // --- Rich Message routing ---
     // Design: try sendRichMessage first for complex content. On ANY failure
     // (unsupported client, API version mismatch, network error), fall back to
-    // legacy sendMessage. This ensures zero-downtime rollout — the worst case
-    // is one extra round-trip, not a failed delivery.
+    // legacy sendMessage (chunked). This ensures zero-downtime rollout.
     if rich_messages && is_complex_markdown(&reply.content.text) {
-        // Bot API limit: 32768 UTF-8 chars for rich messages.
-        // Truncate here to avoid sending oversized payloads that will always fail.
-        let rich_text = if reply.content.text.len() > 32768 {
-            &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
+        // Bot API limit: 32768 UTF-8 characters (not bytes).
+        let text = &reply.content.text;
+        let rich_text: String = if text.chars().count() > 32768 {
+            text.chars().take(32768).collect()
         } else {
-            &reply.content.text
+            text.to_string()
         };
-        match send_rich_message(client, bot_token, &reply.channel.id, &reply.channel.thread_id, rich_text).await {
+        match send_rich_message(client, bot_token, &reply.channel.id, &reply.channel.thread_id, &rich_text).await {
             Ok(_) => return,
             Err(e) => warn!("sendRichMessage failed ({e}), falling back to sendMessage"),
         }
     }
 
-    let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage");
-    let resp = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "chat_id": reply.channel.id,
-            "text": &reply.content.text,
-            "message_thread_id": reply.channel.thread_id,
-            "parse_mode": "Markdown",
-        }))
-        .send()
-        .await;
+    // Legacy sendMessage — chunk at 4096 chars to avoid rejection.
+    let chunks = chunk_text(&reply.content.text, 4096);
+    for chunk in &chunks {
+        let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage");
+        let resp = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "chat_id": reply.channel.id,
+                "text": chunk,
+                "message_thread_id": reply.channel.thread_id,
+                "parse_mode": "Markdown",
+            }))
+            .send()
+            .await;
 
-    match resp {
-        Ok(r) => {
-            let body: serde_json::Value = r.json().await.unwrap_or_default();
-            if body["ok"].as_bool() != Some(true) {
-                let desc = body["description"].as_str().unwrap_or("unknown error");
-                if is_markdown_parse_error(desc) {
-                    warn!("Markdown send failed: {desc}, retrying as plain text");
-                    match client
-                        .post(&url)
-                        .json(&serde_json::json!({
-                            "chat_id": reply.channel.id,
-                            "text": &reply.content.text,
-                            "message_thread_id": reply.channel.thread_id,
-                        }))
-                        .send()
-                        .await
-                    {
-                        Ok(retry_r) => {
-                            let retry_body: serde_json::Value =
-                                retry_r.json().await.unwrap_or_default();
-                            if retry_body["ok"].as_bool() != Some(true) {
-                                error!(
-                                    "telegram plain-text retry failed: {}",
-                                    retry_body["description"]
-                                        .as_str()
-                                        .unwrap_or("unknown error")
-                                );
+        match resp {
+            Ok(r) => {
+                let body: serde_json::Value = r.json().await.unwrap_or_default();
+                if body["ok"].as_bool() != Some(true) {
+                    let desc = body["description"].as_str().unwrap_or("unknown error");
+                    if is_markdown_parse_error(desc) {
+                        warn!("Markdown send failed: {desc}, retrying as plain text");
+                        match client
+                            .post(&url)
+                            .json(&serde_json::json!({
+                                "chat_id": reply.channel.id,
+                                "text": chunk,
+                                "message_thread_id": reply.channel.thread_id,
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(retry_r) => {
+                                let retry_body: serde_json::Value =
+                                    retry_r.json().await.unwrap_or_default();
+                                if retry_body["ok"].as_bool() != Some(true) {
+                                    error!(
+                                        "telegram plain-text retry failed: {}",
+                                        retry_body["description"]
+                                            .as_str()
+                                            .unwrap_or("unknown error")
+                                    );
+                                }
                             }
+                            Err(e) => error!("telegram plain-text send error: {e}"),
                         }
-                        Err(e) => error!("telegram plain-text send error: {e}"),
+                    } else {
+                        error!("telegram send failed: {desc}");
                     }
-                } else {
-                    error!("telegram send failed: {desc}");
                 }
             }
+            Err(e) => error!("telegram send error: {e}"),
         }
-        Err(e) => error!("telegram send error: {e}"),
     }
 }
 
