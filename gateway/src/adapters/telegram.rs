@@ -409,21 +409,22 @@ pub async fn handle_reply(
     if reply.command.as_deref() == Some("add_reaction")
         || reply.command.as_deref() == Some("remove_reaction")
     {
-        // Send thinking draft on first reaction (👀 = processing started)
-        if rich_messages
-            && reply.command.as_deref() == Some("add_reaction")
-            && reply.content.text == "👀"
-        {
-            let draft_id: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs() % 1_000_000 + 1;
-            let _ = send_rich_message_draft(
-                client,
-                bot_token,
-                &reply.channel.id,
-                &reply.channel.thread_id,
-                draft_id,
-                "<tg-thinking>\u{200d}</tg-thinking>",
-            )
-            .await;
+        // Send thinking draft on reaction changes — reflects agent state
+        if rich_messages && reply.command.as_deref() == Some("add_reaction") {
+            let thinking_text = match reply.content.text.as_str() {
+                "👀" => Some("<tg-thinking><tg-emoji emoji-id=\"5535034915403333642\">\u{200d}</tg-emoji> Looking...</tg-thinking>"),
+                "🤔" => Some("<tg-thinking><tg-emoji emoji-id=\"5537353471893700616\">\u{200d}</tg-emoji> Thinking...</tg-thinking>"),
+                "👨\u{200d}💻" => Some("<tg-thinking><tg-emoji emoji-id=\"5537511986251694100\">\u{200d}</tg-emoji> Writing code...</tg-thinking>"),
+                "🔥" => Some("<tg-thinking><tg-emoji emoji-id=\"5537207975581581325\">\u{200d}</tg-emoji> Working...</tg-thinking>"),
+                "⚡" => Some("<tg-thinking><tg-emoji emoji-id=\"5537346136089559052\">\u{200d}</tg-emoji> Running tools...</tg-thinking>"),
+                _ => None,
+            };
+            if let Some(text) = thinking_text {
+                let draft_id: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs() % 1_000_000 + 1;
+                let _ = send_rich_message_draft(
+                    client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, text,
+                ).await;
+            }
         }
 
         let msg_key = format!("{}:{}", reply.channel.id, reply.reply_to);
