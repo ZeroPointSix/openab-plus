@@ -260,6 +260,13 @@ pub trait ChatAdapter: Send + Sync + 'static {
     /// not be detected until the next message. This is acceptable: the first
     /// response may stream, but subsequent ones will correctly use send-once.
     fn use_streaming(&self, other_bot_present: bool) -> bool;
+
+    /// Whether to send the "…" placeholder message before streaming starts.
+    /// Default: true. Platforms using drafts (e.g. Telegram Rich Messages) can
+    /// return false to suppress the placeholder.
+    fn show_streaming_placeholder(&self) -> bool {
+        true
+    }
 }
 
 // --- AdapterRouter ---
@@ -489,7 +496,15 @@ impl AdapterRouter {
                         } else {
                             "…".to_string()
                         };
-                        let msg = adapter.send_message(&thread_channel, &initial).await?;
+                        let msg = if adapter.show_streaming_placeholder() {
+                            adapter.send_message(&thread_channel, &initial).await?
+                        } else {
+                            // Dummy ref for edit loop — gateway uses drafts, doesn't need real msg_id
+                            MessageRef {
+                                id: "draft".to_string(),
+                                channel: thread_channel.clone(),
+                            }
+                        };
                         let (tx, rx) = tokio::sync::watch::channel(initial);
                         let edit_adapter = adapter.clone();
                         let edit_msg = msg.clone();
