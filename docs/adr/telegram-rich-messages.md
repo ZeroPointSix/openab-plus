@@ -1,6 +1,6 @@
 # ADR: Telegram Rich Messages Support
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Date:** 2026-06-14  
 **Author:** 超渡法師  
 **Bot API Version:** 10.1 (June 11, 2026)
@@ -9,7 +9,7 @@
 
 Telegram Bot API 10.1 introduced **Rich Messages** — a structured formatting system that allows bots to send highly formatted content (headings, tables, code blocks, collages, math formulas, etc.) and **stream AI-generated replies** with seamless rich formatting.
 
-Currently, the OAB Telegram adapter in `gateway/src/adapters/telegram.rs` uses `sendMessage` with `parse_mode: MarkdownV2` for all replies. This limits formatting to basic inline styles and has known escaping pain points.
+Currently, the OAB Telegram adapter in `gateway/src/adapters/telegram.rs` uses `sendMessage` with `parse_mode: Markdown` for all replies. This limits formatting to basic inline styles and lacks support for tables and headings.
 
 ## Decision
 
