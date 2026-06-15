@@ -17,7 +17,7 @@ Add Rich Message support to the Telegram gateway adapter with three capabilities
 
 ### 1. `sendRichMessage` for structured replies
 
-When the agent output contains complex formatting (tables, code blocks, headings, long-form content), use `sendRichMessage` with `InputRichMessage.markdown` instead of `sendMessage`.
+When the agent output contains complex formatting (tables, headings, long-form content), use `sendRichMessage` with `InputRichMessage.markdown` instead of `sendMessage`.
 
 ### 2. `sendRichMessageDraft` for AI streaming
 
@@ -53,11 +53,12 @@ Agent output (markdown)
 
 A reply is "complex" if it contains any of:
 - Markdown table (`|---|`)
-- Fenced code block (triple backtick)
 - ATX headings (`# `, `## `)
 - Content > 4096 chars (sendMessage limit)
 
-Otherwise, fall back to `sendMessage` with `MarkdownV2` for maximum client compatibility.
+Code blocks (triple backtick) are intentionally **not** classified as complex — `sendMessage` preserves syntax highlighting with language headers and copy buttons, which `RichBlockPreformatted` currently lacks.
+
+Otherwise, fall back to `sendMessage` with `Markdown` parse mode for maximum client compatibility.
 
 ### Rich Message Limits (from API docs)
 
@@ -86,7 +87,7 @@ Otherwise, fall back to `sendMessage` with `MarkdownV2` for maximum client compa
 ### Phase 3: Fallback & compatibility
 
 - Detect API errors (old clients / bot API version mismatch) and fall back to `sendMessage`
-- Feature-gate behind config: `[telegram] rich_messages = true`
+- Feature-gate behind env var: `TELEGRAM_RICH_MESSAGES=true` (default on, set `=false` to opt out)
 
 ## Consequences
 
