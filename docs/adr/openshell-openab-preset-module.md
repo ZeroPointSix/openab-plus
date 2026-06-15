@@ -143,7 +143,48 @@ Recommended docs stance while testing continues:
   Do not rewrite the policy in a private scratch file and call the guide
   successful.
 
-### 2.2 E2E and Automation Contract
+### 2.2 Credential Exposure Route
+
+The quick start should not ask users to paste raw long-lived tokens directly
+into `config.toml`. The preferred Day 1 shape is:
+
+```text
+host secret source or local .env
+  -> host shell environment
+  -> openshell provider create --credential DISCORD_BOT_TOKEN
+  -> openshell sandbox create --provider openab-discord
+  -> /sandbox/config.toml references ${DISCORD_BOT_TOKEN}
+```
+
+This keeps the config file reusable and avoids writing the raw Discord token
+into the sandbox config. The token is still available to the OpenAB process
+because OpenShell injects the provider credential into the sandbox environment,
+and OpenAB expands `${DISCORD_BOT_TOKEN}` when it reads `config.toml`.
+
+This follows the official OpenShell credential-provider shape:
+
+- [Providers](https://docs.nvidia.com/openshell/sandboxes/manage-providers):
+  lines 135-145 say providers can be created from local environment variables
+  and that `--from-existing` reads provider-specific keys from the current
+  environment.
+- [Providers](https://docs.nvidia.com/openshell/sandboxes/manage-providers):
+  lines 153-157 document the bare key form, where
+  `--credential API_KEY` looks up `$API_KEY` in the current shell and stores it
+  in the provider.
+- [GitHub sandbox tutorial](https://docs.nvidia.com/openshell/get-started/tutorials/github-sandbox):
+  lines 160-163 show the same operational pattern: a host environment token is
+  read by `openshell provider create`, then the sandbox is created with
+  `--provider`.
+- [How OpenShell Works](https://docs.nvidia.com/openshell/about/how-it-works):
+  lines 128 and 143 describe providers and credential material as part of the
+  gateway/sandbox boundary, rather than raw credentials being managed by agent
+  code.
+
+For local development, loading a `.env` file into the host shell before running
+`openshell provider create` is acceptable, but the `.env` file must stay outside
+git. The committed OpenAB config should keep only the environment reference.
+
+### 2.3 E2E and Automation Contract
 
 The quick start is written for humans. Agents and harnesses that test it should
 follow stricter rules so a passing run proves the real OpenShell path:

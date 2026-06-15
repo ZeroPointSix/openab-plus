@@ -49,7 +49,11 @@ In OpenShell, `/sandbox` is the agent's writable root. OpenAB config, `openab-ag
 From the OpenAB repo root:
 
 ```bash
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+openshell provider create --name openab-discord --type generic --credential DISCORD_BOT_TOKEN
+
 openshell sandbox create --name oab \
+  --provider openab-discord \
   --from ghcr.io/openabdev/openab-native-sandbox:latest \
   -- bash
 
@@ -61,7 +65,6 @@ Before authenticating or starting OpenAB, apply the [Day 1 network policy](#appl
 Then inside the sandbox:
 
 ```bash
-export DISCORD_BOT_TOKEN="your-discord-bot-token"
 cd /sandbox
 cat > config.toml <<'EOF'
 [discord]
@@ -144,10 +147,24 @@ If Docker Desktop needs macOS approval or first-run setup, finish that in the GU
 
 ## Create The Sandbox
 
+Keep your Discord token outside `config.toml`. Load it into your host shell from a secret manager or a local `.env` file that is not committed, then let OpenShell store and inject it as a provider credential:
+
+```bash
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+
+openshell provider create \
+  --name openab-discord \
+  --type generic \
+  --credential DISCORD_BOT_TOKEN
+```
+
+This follows the OpenShell provider model: the CLI can read credential values from local environment variables and attach them to sandboxes as provider credentials. The OpenAB config should reference `${DISCORD_BOT_TOKEN}` instead of containing the raw token.
+
 Use the prebuilt OpenAB sandbox image:
 
 ```bash
 openshell sandbox create --name oab \
+  --provider openab-discord \
   --from ghcr.io/openabdev/openab-native-sandbox:latest \
   -- bash
 ```
@@ -156,7 +173,7 @@ If you need to test local source changes instead, build the image yourself:
 
 ```bash
 docker build -t oab-native-sandbox -f openshell/Dockerfile .
-openshell sandbox create --name oab --from oab-native-sandbox:latest -- bash
+openshell sandbox create --name oab --provider openab-discord --from oab-native-sandbox:latest -- bash
 ```
 
 Connect:
@@ -216,7 +233,6 @@ done
 Inside the sandbox:
 
 ```bash
-export DISCORD_BOT_TOKEN="your-discord-bot-token"
 cd /sandbox
 mkdir -p /sandbox/bin /sandbox/.local/bin /sandbox/tmp
 
