@@ -392,6 +392,19 @@ pub async fn handle_reply(
         return;
     }
 
+    // Handle edit_message → stream via sendRichMessageDraft
+    if reply.command.as_deref() == Some("edit_message") && rich_messages {
+        let text = if reply.content.text.len() > 32768 {
+            &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
+        } else {
+            &reply.content.text
+        };
+        // Use chat_id hash as stable draft_id for animated transitions
+        let draft_id: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs() % 1_000_000 + 1;
+        let _ = send_rich_message_draft(client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, text).await;
+        return;
+    }
+
     // Handle add_reaction / remove_reaction
     if reply.command.as_deref() == Some("add_reaction")
         || reply.command.as_deref() == Some("remove_reaction")
