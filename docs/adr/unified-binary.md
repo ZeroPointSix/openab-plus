@@ -1,4 +1,4 @@
-# ADR: Unified Single-Binary Architecture
+# ADR: Separate Binaries with Opt-In Unified Build
 
 - **Status:** Proposed
 - **Date:** 2026-06-15
@@ -25,7 +25,7 @@ For most users who just want "Discord + Telegram in one bot", the two-process mo
 
 ## 2. Decision
 
-Restructure the project as a **Cargo workspace** with the final binary shipping **all adapters compiled in**, activated at runtime via config. The standalone gateway remains available for advanced deployments.
+Restructure the project as a **Cargo workspace** that keeps the two-binary model by default (core + standalone gateway), while allowing users to compile everything into a **single unified binary** via a feature flag — requiring zero code changes, only `--features unified` or a Cargo config toggle.
 
 ### Workspace Layout
 
@@ -45,16 +45,30 @@ openab/
 
 ```toml
 [features]
-default = ["discord", "slack", "telegram", "line", "feishu", "googlechat", "wecom", "teams"]
+# Default: core only (Discord + Slack). Gateway ships as separate binary.
+default = ["discord", "slack"]
 
-discord   = ["openab-core/discord"]
-slack     = ["openab-core/slack"]
-telegram  = ["dep:openab-gateway", "openab-gateway/telegram"]
-line      = ["dep:openab-gateway", "openab-gateway/line"]
-feishu    = ["dep:openab-gateway", "openab-gateway/feishu"]
+# Opt-in: compile all gateway adapters into a single unified binary
+unified = ["telegram", "line", "feishu", "googlechat", "wecom", "teams"]
+
+discord    = ["openab-core/discord"]
+slack      = ["openab-core/slack"]
+telegram   = ["dep:openab-gateway", "openab-gateway/telegram"]
+line       = ["dep:openab-gateway", "openab-gateway/line"]
+feishu     = ["dep:openab-gateway", "openab-gateway/feishu"]
 googlechat = ["dep:openab-gateway", "openab-gateway/googlechat"]
-wecom     = ["dep:openab-gateway", "openab-gateway/wecom"]
-teams     = ["dep:openab-gateway", "openab-gateway/teams"]
+wecom      = ["dep:openab-gateway", "openab-gateway/wecom"]
+teams      = ["dep:openab-gateway", "openab-gateway/teams"]
+```
+
+Users who want the unified single-binary experience:
+```bash
+cargo build --features unified   # all adapters in one binary
+```
+
+Or pick specific adapters:
+```bash
+cargo build --features telegram,line   # just these two added to core
 ```
 
 ### Runtime Activation
@@ -89,7 +103,20 @@ bot_token = "${TELEGRAM_BOT_TOKEN}"
         shared volume for media colocate
 ```
 
-### After (single binary)
+### After — Default (two binaries, same as today but workspace-structured)
+
+```
+┌─────────────────────────────┐     ┌───────────────────────────────────┐
+│  openab core                │     │  openab-gateway                   │
+│                             │     │                                   │
+│  Discord ──┐                │     │  Telegram ──┐                     │
+│  Slack ────┤► Dispatcher    │◄─WS─┤  LINE ──────┤► axum → GatewayEvent│
+│            │                │     │  Feishu ────┘                     │
+│  GatewayAdapter (WS client) │     │                                   │
+└─────────────────────────────┘     └───────────────────────────────────┘
+```
+
+### After — Opt-in Unified (`--features unified`)
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
@@ -126,13 +153,14 @@ Reply path is similarly direct — the adapter calls the platform API in its `Ch
 
 | Image | Contents | Use case |
 |-------|----------|----------|
-| `openab:latest` | All adapters compiled in | Default — one image for everyone |
-| `openab:slim` | Discord + Slack only | Minimal deploy (no axum/crypto deps) |
-| `openab-gateway:latest` | Standalone gateway (unchanged) | Advanced: geo-distributed gateway, legacy compat |
+| `openab:latest` | Discord + Slack only (core) | Default — lightweight, same as today |
+| `openab-gateway:latest` | Standalone gateway (all webhook adapters) | Default companion for webhook platforms |
+| `openab:unified` | All adapters in single binary | Simplified deployment for users who want one container |
 
 Custom builds via feature flags:
 ```bash
-cargo build --no-default-features --features telegram  # Telegram-only ~10MB
+cargo build --features unified             # all-in-one binary
+cargo build --features telegram,line       # core + specific adapters only
 ```
 
 ---
@@ -141,21 +169,30 @@ cargo build --no-default-features --features telegram  # Telegram-only ~10MB
 
 | Phase | Description |
 |-------|-------------|
-| **Phase 1** | Restructure into workspace. Move adapter code behind feature flags. Ship `openab:latest` with all adapters. Keep standalone gateway as-is. |
-| **Phase 2** | Users migrate from two-container to single-container. Helm chart defaults to single binary; gateway sidecar becomes opt-in. |
-| **Phase 3** | Deprecate standalone gateway after 2 minor releases. Remove `gateway.url` config field (or keep as hidden legacy). |
+| **Phase 1** | Restructure into workspace. Keep two-binary default. Add `unified` feature flag. Ship `openab:unified` image for early adopters. |
+| **Phase 2** | Gather feedback from unified adopters. Improve single-binary DX (combined health endpoint, unified log format). |
+| **Phase 3** | If community consensus shifts toward unified-by-default, flip the default in a future major release. |
 
 ### Backward Compatibility
 
-- Existing `[gateway]` config section + standalone gateway continues to work throughout all phases
-- The `GatewayAdapter` (WebSocket client in core) remains available for users who need remote gateway
-- No breaking change to config schema — new `[telegram]`, `[line]` sections are additive
+- Default behavior is **unchanged** — existing two-binary deployments continue to work with no migration
+- The `unified` feature is purely additive — opting in requires only a build flag or image swap
+- No breaking change to config schema — `[telegram]`, `[line]` sections work in both modes
+- `[gateway]` config section continues to work for users who keep the two-binary model
 
 ---
 
 ## 7. Trade-offs
 
-### Advantages
+### Advantages (of this approach)
+
+- **Zero disruption** — default behavior unchanged; existing deployments need no migration
+- **Opt-in simplicity** — users who want a single binary get it with one flag (`--features unified`)
+- **Smaller default binary** — `openab:latest` stays ~12MB without webhook adapter deps
+- **Independent release cadence** — gateway can still release independently by default
+- **Progressive adoption** — community can move to unified at their own pace
+
+### Advantages (of unified mode, when opted in)
 
 - **One container, one config, one release** — dramatically simpler deployment
 - **Lower latency** — no WS serialization hop
@@ -165,10 +202,9 @@ cargo build --no-default-features --features telegram  # Telegram-only ~10MB
 
 ### Disadvantages
 
-- **Larger default binary** — ~25MB vs ~12MB (Discord-only). Mitigated by `slim` image.
-- **Coupled release cadence** — platform adapter fix requires full release. Mitigated by workspace allowing independent crate versioning.
-- **More deps in tree** — `axum`, `jsonwebtoken`, `prost`, `quick-xml`, `aes/cbc` pulled in even if unused at runtime. Mitigated by feature flags for custom builds.
-- **Build time** — full build is longer. Mitigated by workspace incremental compilation (only changed crate recompiles).
+- **Two images to maintain** — CI must build both default and unified variants
+- **Unified binary is larger** — ~25MB vs ~12MB. Acceptable as opt-in.
+- **Feature flag complexity** — conditional compilation adds `#[cfg]` gates. Mitigated by clean workspace boundary (all gateway code lives in `openab-gateway` crate).
 
 ---
 
@@ -187,14 +223,18 @@ cargo build --no-default-features --features telegram  # Telegram-only ~10MB
 
 ## 9. Rejected Alternatives
 
-### A. Compile-time only (no fat binary)
+### A. Unified binary as default
 
-Users must `docker build` themselves with desired features. Poor UX — rejected.
+Ship all adapters compiled in by default; users opt out for slim builds. Rejected — forces a larger binary and more deps on users who don't need webhook adapters, and deprecates the standalone gateway prematurely.
 
-### B. Merge all code into one crate
+### B. Compile-time only (no pre-built unified image)
+
+Users must `docker build` themselves with desired features. Poor UX — rejected. We publish `openab:unified` as a pre-built image.
+
+### C. Merge all code into one crate
 
 Couples platform-specific complexity (Feishu AES-CBC, WeCom XML) with clean core abstractions. Rejected in favor of workspace separation.
 
-### C. Keep current architecture, improve docs
+### D. Keep current architecture, no workspace restructure
 
-The operational complexity is inherent to the two-process model. Better docs don't eliminate the shared volume requirement or WS failure modes. Rejected.
+The workspace restructure is needed regardless — it enables feature flags, cleaner builds, and the opt-in unified path. Rejected.
