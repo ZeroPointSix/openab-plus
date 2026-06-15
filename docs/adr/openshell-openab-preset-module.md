@@ -115,11 +115,12 @@ Recent local E2E testing found:
   Attempts to install tools into `/usr/local/bin` or use `apt` fail under the
   non-root sandbox user, and that is an intended boundary.
 - Most local users need an install-friendly sandbox. The recommended direction
-  is runtime user-local installs under `/sandbox`, not a large image that
-  preinstalls every possible tool.
-- The image should not pre-bake workflow CLIs such as `gh`, `aws`, `gcloud`,
-  `kubectl`, `terraform`, `wrangler`, or `gws`. The acceptance test should prove
-  that those tools are absent from a clean image and can be installed
+  is runtime user-local installs under `/sandbox`, while preserving the existing
+  OpenAB image defaults such as GitHub CLI when they are already part of the
+  documented agent workflow.
+- The image should not grow into a large all-tools image that preinstalls every
+  possible cloud/admin CLI such as `aws`, `gcloud`, `kubectl`, `terraform`,
+  `wrangler`, or `gws`. Additional workflow tools should be installed
   user-locally when needed.
 - Small standalone binaries can be staged under `/sandbox/bin`; larger tool
   trees should live under `/sandbox`; scratch downloads should use
@@ -141,6 +142,44 @@ Recommended docs stance while testing continues:
 - If a policy file fails to apply during E2E, treat that as a policy/docs issue.
   Do not rewrite the policy in a private scratch file and call the guide
   successful.
+
+### 2.2 E2E and Automation Contract
+
+The quick start is written for humans. Agents and harnesses that test it should
+follow stricter rules so a passing run proves the real OpenShell path:
+
+- Use real OpenShell. Do not replace the test with a native host install, plain
+  `docker run`, Kubernetes, or a host-local OpenAB process.
+- Create a real OpenShell sandbox named `oab`.
+- Prefer the prebuilt `ghcr.io/openabdev/openab-native-sandbox:latest` image for
+  Day 1 docs validation. Build from `openshell/Dockerfile` only when testing
+  local source changes.
+- Use `openshell sandbox exec -n oab --no-tty -- ...` for automated setup
+  commands. Avoid `openshell sandbox connect oab` unless a human explicitly
+  wants an interactive shell.
+- Do not install OpenAB binaries into host paths such as `~/.local/bin`.
+- Do not edit `/etc/sudoers.d`, runner permissions, OpenShell cache/state
+  internals, or OpenShell generated container files to make a test pass.
+- Do not print secrets. Read `DISCORD_BOT_TOKEN` and optional
+  `DISCORD_CHANNEL_ID` from the environment or a local secret file, then keep
+  command output redacted.
+- If `DISCORD_CHANNEL_ID` is set, configure OpenAB for only that channel.
+- Stop at `openab-agent auth codex-oauth --no-browser` when browser approval is
+  required. Print the auth URL and ask for the full redirected
+  `http://localhost:1455/auth/callback?...` URL.
+- After auth succeeds, restart `openab run` if it was already started before
+  auth.
+- Success requires logs showing `discord bot connected user=...`.
+- A bot token can post a readiness message, but it cannot prove user
+  mention/reply behavior. Ask a human to mention the bot in the allowed channel
+  for the final reply test.
+- Report exact commands, redacted outputs, sandbox/process state, policy/auth
+  steps, and remaining human actions.
+
+If the `openshell sandbox exec` transport cannot keep stdin open for the auth
+callback paste, the harness may attach to the OpenShell-created container after
+proving the sandbox exists. That fallback should still be treated as running
+inside the OpenShell sandbox, not as permission to bypass OpenShell entirely.
 
 ## 3. Core Difference
 
@@ -244,9 +283,9 @@ Policy implementation guidance:
 - Treat "enable installs" as a runtime user-local capability, not as permission
   to run `sudo`, `apt-get install`, `brew`, or writes into `/usr`, `/opt`, or
   `/usr/local/bin`.
-- Test both halves of the contract: clean images should not contain pre-baked
-  workflow tools, and the sandbox should still be able to install a standalone
-  binary into `/sandbox/bin` at runtime.
+- Test both halves of the contract: existing built-in workflow tools should
+  remain available, and the sandbox should still be able to install additional
+  standalone binaries into `/sandbox/bin` at runtime.
 
 ## 7. Preset Responsibilities
 
@@ -257,8 +296,9 @@ An `openab-full-agent` or `web-agent` preset should own the following decisions:
 - Make `/sandbox`, `/sandbox/.local`, `/sandbox/.cache`, and `/tmp` writable.
 - Keep system paths read-only.
 - Run as the non-root `sandbox` user.
-- Include only bootstrap/runtime essentials in the image. Extra tools should be
-  installed by the agent into `/sandbox` using the documented user-local pattern.
+- Include the existing OpenAB baseline tools plus bootstrap/runtime essentials
+  in the image. Extra tools should be installed by the agent into `/sandbox`
+  using the documented user-local pattern.
 - Enable broad outbound HTTPS for normal web/model/API access.
 - Enable WebSocket egress for OpenAB gateway connectivity.
 - Provide a clear gateway mode: host gateway, managed gateway, or direct
