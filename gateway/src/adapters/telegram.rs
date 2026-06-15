@@ -474,16 +474,6 @@ pub async fn handle_reply(
     }
 
     // Normal send_message
-    // Suppress streaming placeholder "…" — the thinking draft handles this
-    if rich_messages && (reply.content.text.trim() == "…" || reply.content.text.trim() == "...") {
-        let draft_id: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs() % 1_000_000 + 1;
-        let _ = send_rich_message_draft(
-            client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id,
-            "<tg-thinking>Thinking...</tg-thinking>",
-        ).await;
-        return;
-    }
-
     info!(
         chat_id = %reply.channel.id,
         thread_id = ?reply.channel.thread_id,
