@@ -737,9 +737,9 @@ mod tests {
         assert!(is_complex_markdown("| Col1 | Col2 |\n|---|---|\n| a | b |"));
         assert!(is_complex_markdown("| Col1 | Col2 |\n| :--- | ---: |\n| a | b |"));
         assert!(is_complex_markdown("| A | B |\n| :---: | :---: |\n| x | y |"));
-        // Code blocks
-        assert!(is_complex_markdown("```rust\nfn main() {}\n```"));
-        assert!(is_complex_markdown("~~~\ncode\n~~~"));
+        // Code blocks — intentionally NOT complex (preserves syntax highlighting on legacy path)
+        assert!(!is_complex_markdown("```rust\nfn main() {}\n```"));
+        assert!(!is_complex_markdown("~~~\ncode\n~~~"));
         // Headings
         assert!(is_complex_markdown("# Heading\n\nSome text"));
         assert!(is_complex_markdown("## Heading 2 at start"));
