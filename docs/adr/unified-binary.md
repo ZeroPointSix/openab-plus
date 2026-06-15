@@ -163,6 +163,41 @@ cargo build --features unified             # all-in-one binary
 cargo build --features telegram,line       # core + specific adapters only
 ```
 
+### Dockerfile Build Arg
+
+A single Dockerfile supports both modes via `BUILD_MODE` arg:
+
+```dockerfile
+ARG BUILD_MODE=default
+ARG FEATURES=""
+
+FROM rust:1.87 AS builder
+ARG BUILD_MODE
+ARG FEATURES
+
+WORKDIR /src
+COPY . .
+
+RUN if [ "$BUILD_MODE" = "unified" ]; then \
+      cargo build --release --features unified; \
+    elif [ -n "$FEATURES" ]; then \
+      cargo build --release --features "$FEATURES"; \
+    else \
+      cargo build --release; \
+    fi
+```
+
+```bash
+# Default: separate core binary
+docker build -t openab:latest .
+
+# Unified: all adapters in one binary
+docker build --build-arg BUILD_MODE=unified -t openab:unified .
+
+# Custom: pick specific adapters
+docker build --build-arg FEATURES=telegram,line -t openab:custom .
+```
+
 ---
 
 ## 6. Migration Path
