@@ -714,12 +714,20 @@ impl AdapterRouter {
                                 }
                             }
                         } else {
-                            // Normal streaming: edit first chunk into placeholder, send rest
-                            if let Some(first) = chunks.first() {
-                                let _ = adapter.edit_message(&msg, first).await;
-                            }
-                            for chunk in chunks.iter().skip(1) {
-                                let _ = adapter.send_message(&thread_channel, chunk).await;
+                            // Normal streaming: edit first chunk into placeholder, send rest.
+                            // If placeholder is a dummy "draft" ref (no real message), send as
+                            // new message instead — the gateway will persist via sendRichMessage.
+                            if msg.message_id == "draft" {
+                                for chunk in &chunks {
+                                    let _ = adapter.send_message(&thread_channel, chunk).await;
+                                }
+                            } else {
+                                if let Some(first) = chunks.first() {
+                                    let _ = adapter.edit_message(&msg, first).await;
+                                }
+                                for chunk in chunks.iter().skip(1) {
+                                    let _ = adapter.send_message(&thread_channel, chunk).await;
+                                }
                             }
                         }
                     } else {

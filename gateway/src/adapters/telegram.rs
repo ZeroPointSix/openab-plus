@@ -417,27 +417,41 @@ pub async fn handle_reply(
         return;
     }
 
-    // Handle edit_message → stream via sendRichMessageDraft
+    // Handle edit_message
     if reply.command.as_deref() == Some("edit_message") {
-        if !rich_messages {
-            // Without rich messages, "draft" placeholder has no real message_id to edit.
-            // Silently drop — the final reply will be sent as a new message via send_message.
+        if reply.reply_to == "draft" {
+            // Dummy "draft" ref from streaming without placeholder.
+            if rich_messages {
+                // Skip short updates — let thinking animation show until meaningful content arrives
+                if reply.content.text.len() < 30 {
+                    return;
+                }
+                let text = if reply.content.text.len() > 32768 {
+                    &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
+                } else {
+                    &reply.content.text
+                };
+                // Combine channel + thread to avoid draft_id collision in forum topics
+                let chan: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs();
+                let tid: i64 = reply.channel.thread_id.as_deref().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0).abs();
+                let draft_id: i64 = (chan.wrapping_add(tid)) % 1_000_000 + 1;
+                let _ = send_rich_message_draft(client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, text).await;
+            }
+            // else: rich_messages=false with dummy ref — silently drop (no real msg to edit)
             return;
         }
-        // Skip short updates — let thinking animation show until meaningful content arrives
-        if reply.content.text.len() < 30 {
-            return;
-        }
-        let text = if reply.content.text.len() > 32768 {
-            &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
-        } else {
-            &reply.content.text
-        };
-        // Combine channel + thread to avoid draft_id collision in forum topics
-        let chan: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs();
-        let tid: i64 = reply.channel.thread_id.as_deref().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0).abs();
-        let draft_id: i64 = (chan.wrapping_add(tid)) % 1_000_000 + 1;
-        let _ = send_rich_message_draft(client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, text).await;
+        // Real message_id — perform actual editMessageText (legacy streaming path)
+        let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/editMessageText");
+        let _ = client
+            .post(&url)
+            .json(&serde_json::json!({
+                "chat_id": reply.channel.id,
+                "message_id": reply.reply_to,
+                "text": &reply.content.text,
+                "parse_mode": "Markdown",
+            }))
+            .send()
+            .await;
         return;
     }
 
