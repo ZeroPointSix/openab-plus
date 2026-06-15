@@ -501,7 +501,7 @@ impl AdapterRouter {
                         } else {
                             // Dummy ref for edit loop — gateway uses drafts, doesn't need real msg_id
                             MessageRef {
-                                id: "draft".to_string(),
+                                message_id: "draft".to_string(),
                                 channel: thread_channel.clone(),
                             }
                         };
