@@ -1,113 +1,82 @@
-# MiMo-Code
+# MiMoCode (mimo)
 
-[MiMo-Code](https://github.com/XiaomiMiMo/MiMo-Code) supports ACP natively via the `acp` subcommand — no adapter needed.
+MiMoCode is a fork of OpenCode. It supports ACP over stdio and can be used as an OpenAB agent backend.
 
-MiMo-Code is a fork of [OpenCode](https://opencode.ai) by Xiaomi, adding persistent memory, intelligent context management, subagent orchestration, goal-driven autonomous loops, compose workflows, and dream/distill self-improvement. It includes **MiMo Auto** as a free-for-limited-time channel, so you can start with zero configuration.
+## Setup
 
-```
-┌──────────┐  Discord  ┌────────┐ ACP stdio ┌───────────┐   ┌───────────────────┐
-│ Discord  │◄────────► │ OpenAB │◄────────► │ MiMo-Code │──►│  LLM Providers    │
-│ Users    │ Gateway   │ (Rust) │ JSON-RPC  │   (ACP)   │   │                   │
-└──────────┘           └────────┘           └───────────┘   │ ┌───────────────┐ │
-                                                 │          │ │ MiMo Auto     │ │
-                                       mimocode.json        │ │ Xiaomi MiMo   │ │
-                                       sets model           │ │ OpenAI        │ │
-                                                            │ │ Anthropic     │ │
-                                                            │ │ AWS Bedrock   │ │
-                                                            │ │ OpenRouter    │ │
-                                                            │ │ Ollama (local)│ │
-                                                            │ │ + more...     │ │
-                                                            │ └───────────────┘ │
-                                                            └───────────────────┘
-```
-
-## Docker Image
-
-```bash
-docker build -f Dockerfile.mimocode -t openab-mimocode:latest .
-```
-
-The image installs `@mimo-ai/cli` globally via npm on `node:22-bookworm-slim`.
-
-## Helm Install
-
-```bash
-helm install openab openab/openab \
-  --set agents.kiro.enabled=false \
-  --set agents.mimocode.enabled=true \
-  --set agents.mimocode.image=ghcr.io/openabdev/openab-mimocode:latest \
-  --set-string 'agents.mimocode.discord.allowedChannels[0]=YOUR_CHANNEL_ID'
-```
-
-> The Docker image already defines `command`, `args`, and `workingDir` via
-> `OPENAB_AGENT_COMMAND` and `WORKDIR` — no need to set them in Helm values.
+| Field | Value |
+|-------|-------|
+| Image | `openab-mimocode` (or any image with `mimo` installed) |
+| Command | `mimo` |
+| Args | `["acp"]` |
+| Working dir | `/home/node` |
 
 ## Authentication
 
-MiMo-Code supports multiple auth methods:
-
-### MiMo Auto (zero config)
-
-MiMo Auto is built in as a free-for-limited-time channel. The first launch guides you through configuration automatically — select "MiMo Auto" for immediate use with no API keys.
-
-### Xiaomi MiMo Platform (OAuth)
+MiMoCode offers a free tier (`MiMo Auto`) that requires no API key — just a one-time device auth:
 
 ```bash
-kubectl exec -it deployment/openab-mimocode -- mimo auth login
+mimo auth login --provider mimo --method "MiMo Auto (free)"
 ```
 
-Select "Xiaomi MiMo Platform" and follow the OAuth flow.
+This is **fully non-interactive** and can be used in Dockerfiles, pre-boot hooks, or CI scripts. It sets `mimo/mimo-auto` as the default model (1M context, free).
 
-### Import from Claude Code
+The token expires in ~1 hour but auto-refreshes on next ACP session start. For persistent deployments, run this in a `[hooks.pre_boot]` script to ensure fresh auth on every container start.
 
-If you already have Claude Code credentials, MiMo-Code can import them:
+## ⚠️ Important: SQLite DB Locking
+
+MiMoCode uses a SQLite database (`~/.local/share/mimocode/mimocode.db`) for state. **Only one process can access it at a time.**
+
+**Do NOT** run manual `mimo` commands (e.g. `mimo auth login`, `mimo debug config`, `mimo models`) while `mimo acp` is actively handling a request. This will corrupt or lock the database, causing all subsequent ACP requests to fail with empty responses or "Connection Lost".
+
+### Safe workflow:
+1. Start the bot (openab spawns `mimo acp` on first message)
+2. Auth **before** the first message, or while the session is idle
+3. If the DB gets corrupted:
+   ```bash
+   # As root:
+   rm -f ~/.local/share/mimocode/mimocode.db*
+   chown -R node:node ~/.local/share/mimocode/
+   # As node:
+   mimo auth login
+   ```
+
+## AWS/Bedrock Auto-Detection
+
+When running on AWS (ECS, EC2), MiMoCode auto-detects AWS credentials and registers `amazon-bedrock` as a provider. Combined with its `Provider.sort()` logic, ACP mode picks the "best" (paid) model — which fails silently with 0 tokens if you don't have a paid Xiaomi account.
+
+### Solution: pre_boot hook
+
+Add this to your `[hooks.pre_boot]` script:
 
 ```bash
-kubectl exec -it deployment/openab-mimocode -- mimo auth login
+# Write mimo config — disables Bedrock, sets free model as default
+mkdir -p ~/.config/mimocode
+echo '{"disabled_providers":["amazon-bedrock"],"model":"mimo/mimo-auto"}' > ~/.config/mimocode/config.json
+
+# Provision free-tier auth (non-interactive, token refreshes each boot)
+mimo auth login --provider mimo --method "MiMo Auto (free)" 2>/dev/null || true
 ```
 
-Select "Import from Claude Code".
+This ensures:
+1. Bedrock is never auto-detected
+2. `mimo/mimo-auto` is the default model (not `xiaomi/mimo-v2.5-pro-ultraspeed`)
+3. Fresh auth token every container start
 
-### Custom Provider (OpenAI-compatible API)
+For paid Xiaomi accounts, replace `mimo/mimo-auto` with your preferred model (e.g. `xiaomi/mimo-v2.5-pro`).
 
-```bash
-kubectl exec -it deployment/openab-mimocode -- mimo auth login
+## Config (gist)
+
+```toml
+[agent]
+command = "mimo"
+args = ["acp"]
+env = { GHPOOL_URL = "http://ghpool.openab.local:8080", PATH = "/home/node/bin:/usr/local/bin:/usr/bin:/bin" }
 ```
 
-Select "Custom Provider" and enter your API endpoint and key.
+## Known Limitations
 
-## Configuration
-
-MiMo-Code is configured via `.mimocode/mimocode.json` in the working directory or `~/.config/mimocode/mimocode.json` globally. Example:
-
-```json
-{
-  "model": "mimo-auto"
-}
-```
-
-To set the model inside the pod:
-
-```bash
-kubectl exec deployment/openab-mimocode -- sh -c \
-  'mkdir -p /home/node/.mimocode && echo "{\"model\": \"mimo-auto\"}" > /home/node/.mimocode/mimocode.json'
-```
-
-## Key Differences from OpenCode
-
-| Feature | OpenCode | MiMo-Code |
-|---------|----------|-----------|
-| Persistent memory | ❌ | ✅ MEMORY.md + SQLite FTS5 |
-| Subagent system | ❌ | ✅ Parallel subagents |
-| Context management | Basic | ✅ Auto-checkpoint + reconstruction |
-| Goal / stop condition | ❌ | ✅ Independent judge |
-| Compose mode | ❌ | ✅ Specs-driven workflows |
-| Dream / Distill | ❌ | ✅ Self-improvement |
-| Free channel | ❌ | ✅ MiMo Auto |
-
-## Notes
-
-- **ACP compatibility**: MiMo-Code uses the same ACP protocol as OpenCode (`@agentclientprotocol/sdk`). All OAB ACP features (streaming, tool display, session management) work identically.
-- **Tool authorization**: Like OpenCode, MiMo-Code handles tool authorization internally — all tools run without user confirmation.
-- **Binary name**: The CLI binary is `mimo` (installed via `npm install -g @mimo-ai/cli`). Alternative install: `curl -fsSL https://mimo.xiaomi.com/install | bash`.
-- **Session persistence**: MiMo-Code's memory system (MEMORY.md, checkpoints) persists on the PVC and carries context across sessions automatically.
+- `mimo acp` does not accept `--model` flag (unlike the TUI)
+- Default model is set during `mimo auth login` and stored in the DB
+- No `config set` CLI command — model selection is via auth flow only
+- The `-m/--model` flag only works for TUI/run modes, not ACP
