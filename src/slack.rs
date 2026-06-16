@@ -1423,7 +1423,10 @@ async fn handle_message(
                 .get(ts)
                 .is_some_and(|inst| inst.elapsed() < adapter.session_ttl)
         })
-    };
+    } || thread_channel
+        .thread_id
+        .as_deref()
+        .is_some_and(|ts| adapter.multibot_cache.is_multibot(ts));
 
     // Best-effort echo before the agent reply so the user can verify STT.
     crate::stt::post_echo(

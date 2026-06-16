@@ -852,7 +852,7 @@ impl EventHandler for Handler {
         let other_bot_present_flag = {
             let cache = self.multibot_threads.lock().await;
             cache.contains_key(&msg.channel_id.to_string())
-        };
+        } || self.multibot_cache.is_multibot(&msg.channel_id.to_string());
 
         // Backfill thread_id: when OAB just created a new thread, the sender
         // was built before the thread existed. Patch it so the agent sees
