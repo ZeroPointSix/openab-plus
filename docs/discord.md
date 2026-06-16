@@ -69,7 +69,7 @@ bot_token = "${DISCORD_BOT_TOKEN}"
 allowed_channels = ["123456789"]      # channel ID allowlist (empty = all)
 allowed_users = ["987654321"]         # user ID allowlist (empty = all)
 allow_bot_messages = "off"            # off | mentions | all
-allow_user_messages = "involved"      # involved | mentions
+allow_user_messages = "multibot-mentions"      # multibot-mentions | involved | mentions
 trusted_bot_ids = []                  # bot user IDs allowed through (empty = any)
 ```
 

@@ -145,7 +145,7 @@ User in thread: @BotA any other ideas?
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `allow_user_messages` | string | `"involved"` | `"involved"` — reply without @mention in participated threads. `"mentions"` — always require @mention. `"multibot-mentions"` — require @mention once 2+ bots are in the thread. |
+| `allow_user_messages` | string | `"multibot-mentions"` | `"multibot-mentions"` — require @mention once 2+ bots are in the thread. `"involved"` — reply without @mention in participated threads. `"mentions"` — always require @mention. |
 
 > **Note:** This is a **global setting** — it cannot be changed per thread. Configure it in `config.toml` or via `values.yaml` for Helm.
 
