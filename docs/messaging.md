@@ -154,8 +154,8 @@ User in thread: @BotA any other ideas?
 ```toml
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
-# Default is "involved" — all involved bots respond without @mention.
-# Use "multibot-mentions" for precise control in multi-bot threads.
+# Default is "multibot-mentions" — require @mention in multi-bot threads.
+# Use "involved" to let all bots respond without @mention.
 allow_user_messages = "multibot-mentions"
 ```
 

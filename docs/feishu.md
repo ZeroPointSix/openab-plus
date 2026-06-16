@@ -113,7 +113,6 @@ When `FEISHU_ALLOW_USER_MESSAGES=multibot-mentions`, the bot detects when anothe
 |------|----------|
 | `multibot-mentions` (default) | Like `involved`, but requires @mention once another bot has posted in the thread. |
 | `involved` | Bot responds in participated threads without @mention. All participated bots respond. |
-| `multibot-mentions` | Same as `involved`, but once another bot is @mentioned in the thread, require @mention for all bots. |
 | `mentions` | Always require @mention, even in participated threads. |
 
 **Multi-bot detection** (how the gateway identifies "another bot"):

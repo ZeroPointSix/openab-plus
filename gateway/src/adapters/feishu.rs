@@ -2420,7 +2420,7 @@ mod tests {
             allowed_users: vec![],
             require_mention: true,
             allow_bots: AllowBots::Off,
-            allow_user_messages: AllowUsers::Involved,
+            allow_user_messages: AllowUsers::MultibotMentions,
             trusted_bot_ids: vec![],
             max_bot_turns: 20,
             dedupe_ttl_secs: 300,
