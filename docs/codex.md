@@ -249,6 +249,19 @@ agents:
 > pod. If you also need codex to write back to it (e.g. `codex features enable`
 > persisting flags), pre-seed the config on the PVC instead.
 
+Alternatively, copy a local `config.toml` directly into the running pod's PVC
+(writable, persists across restarts):
+
+```bash
+kubectl cp config.toml <pod-name>:/home/node/.codex/config.toml
+```
+
+Then restart to pick up the changes:
+
+```bash
+kubectl rollout restart deployment/openab-codex
+```
+
 ### What Auto-review does
 
 - Approves ~99% of legitimate out-of-sandbox actions automatically.
