@@ -39,15 +39,12 @@ RUN mkdir -p /home/node/.config/mimocode && chown -R node:node /home/node
 
 USER node
 
-# Pre-provision MiMo Auto (free) — non-interactive, no API key needed.
-# Sets mimo/mimo-auto as the default model so ACP mode works out-of-the-box
-# without users needing to manually auth or risk Bedrock auto-detection on AWS.
-RUN mimo auth login --provider mimo --method "MiMo Auto (free)"
-
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD pgrep -x openab || exit 1
 ENV OPENAB_AGENT_COMMAND="mimo acp"
 ENV OPENAB_AGENT_AUTH_COMMAND="mimo auth login --provider mimo --method \"MiMo Auto (free)\""
 
 ENTRYPOINT ["tini", "--"]
-CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
+# Auth with MiMo Auto (free) at container start — token is ephemeral (~1h)
+# so it must be provisioned fresh each boot, not baked at build time.
+CMD ["sh", "-c", "mimo auth login --provider mimo --method 'MiMo Auto (free)' 2>/dev/null; exec openab run -c /etc/openab/config.toml"]
