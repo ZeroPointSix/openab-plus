@@ -50,18 +50,25 @@ When running on AWS (ECS, EC2), MiMoCode auto-detects AWS credentials and regist
 Add this to your `[hooks.pre_boot]` script:
 
 ```bash
+#!/bin/sh
 # Write mimo config — disables Bedrock, sets free model as default
 mkdir -p ~/.config/mimocode
 echo '{"disabled_providers":["amazon-bedrock"],"model":"mimo/mimo-auto"}' > ~/.config/mimocode/config.json
 
 # Provision free-tier auth (non-interactive, token refreshes each boot)
 mimo auth login --provider mimo --method "MiMo Auto (free)" 2>/dev/null || true
+
+# Warmup: trigger DB migration so first real request works.
+# Without this, the first message after cold start returns empty because
+# mimo's "one time database migration" blocks provider loading.
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"capabilities":{},"clientInfo":{"name":"warmup","version":"1.0"}}}' | timeout 10 mimo acp >/dev/null 2>&1 || true
 ```
 
 This ensures:
 1. Bedrock is never auto-detected
 2. `mimo/mimo-auto` is the default model (not `xiaomi/mimo-v2.5-pro-ultraspeed`)
 3. Fresh auth token every container start
+4. DB migration completes before the first real request
 
 For paid Xiaomi accounts, replace `mimo/mimo-auto` with your preferred model (e.g. `xiaomi/mimo-v2.5-pro`).
 
