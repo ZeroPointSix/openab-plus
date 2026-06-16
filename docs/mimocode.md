@@ -19,9 +19,9 @@ MiMoCode offers a free tier (`MiMo Auto`) that requires no API key — just a on
 mimo auth login --provider mimo --method "MiMo Auto (free)"
 ```
 
-This is **fully non-interactive** and can be used in Dockerfiles, pre-boot hooks, or CI scripts. It sets `mimo/mimo-auto` as the default model (1M context, free).
+This is **fully non-interactive** and can be used in pre-boot hooks or CI scripts. It provisions a token for `mimo/mimo-auto` (1M context, free).
 
-The token expires in ~1 hour but auto-refreshes on next ACP session start. For persistent deployments, run this in a `[hooks.pre_boot]` script to ensure fresh auth on every container start.
+The token expires in ~1 hour. Run this in a `[hooks.pre_boot]` script to ensure fresh auth on every container start.
 
 ## ⚠️ Important: SQLite DB Locking
 
@@ -77,6 +77,7 @@ env = { GHPOOL_URL = "http://ghpool.openab.local:8080", PATH = "/home/node/bin:/
 ## Known Limitations
 
 - `mimo acp` does not accept `--model` flag (unlike the TUI)
-- Default model is set during `mimo auth login` and stored in the DB
-- No `config set` CLI command — model selection is via auth flow only
+- ACP model selection is determined by `~/.config/mimocode/config.json` `"model"` field — the DB value from `mimo auth login` is NOT used by ACP's `defaultModel()` resolver
+- `mimo auth login` provisions a token (~1h expiry) but does not reliably set the ACP default model
 - The `-m/--model` flag only works for TUI/run modes, not ACP
+- SQLite DB locking: never run manual `mimo` commands while ACP is handling a request
