@@ -16,11 +16,12 @@ MiMoCode is a fork of OpenCode. It supports ACP over stdio and can be used as an
 MiMoCode offers a free tier (`MiMo Auto`) that requires no API key — just a one-time device auth:
 
 ```bash
-mimo auth login
-# Select: MiMo Auto (free)
+mimo auth login --provider mimo --method "MiMo Auto (free)"
 ```
 
-This sets `mimo/mimo-auto` as the default model (1M context, free).
+This is **fully non-interactive** and can be used in Dockerfiles, pre-boot hooks, or CI scripts. It sets `mimo/mimo-auto` as the default model (1M context, free).
+
+The token expires in ~1 hour but auto-refreshes on next ACP session start. For persistent deployments, run this in a `[hooks.pre_boot]` script to ensure fresh auth on every container start.
 
 ## ⚠️ Important: SQLite DB Locking
 
