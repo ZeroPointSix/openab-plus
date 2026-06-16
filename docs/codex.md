@@ -202,6 +202,7 @@ manual approval is impractical and `"never"` removes all guardrails.
 Enable Auto-review in `/home/node/.codex/config.toml`:
 
 ```toml
+# Full recommended config for OpenAB agents
 sandbox_mode = "danger-full-access"
 approval_policy = "on-request"
 approvals_reviewer = "auto_review"
