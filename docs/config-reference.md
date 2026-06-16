@@ -38,7 +38,7 @@ Discord adapter. Requires a Discord bot token.
 | `allowed_users` | string[] | `[]` | User IDs to allow. Only checked when `allow_all_users` resolves to false. |
 | `allow_bot_messages` | string | `"off"` | `"off"` — ignore all bot messages. `"mentions"` — only process bot messages that @mention this bot. `"all"` — process all bot messages (capped by `max_bot_turns`). |
 | `trusted_bot_ids` | string[] | `[]` | When non-empty, only these bot IDs pass the bot gate. Empty = any bot (mode permitting). **Admission override:** a trusted bot that @mentions this bot bypasses `allow_bot_messages` mode entirely (treated as human @mention, can pull bot into threads). |
-| `allow_user_messages` | string | `"involved"` | `"involved"` — reply in threads bot has participated in without @mention; channel messages require @mention; DMs always process. `"mentions"` — always require @mention. `"multibot-mentions"` — like `"involved"`, but require @mention once another bot has posted in the thread. |
+| `allow_user_messages` | string | `"multibot-mentions"` | `"multibot-mentions"` — like `"involved"`, but require @mention once another bot has posted in the thread (recommended for multi-bot deployments). `"involved"` — reply in threads bot has participated in without @mention; channel messages require @mention; DMs always process. `"mentions"` — always require @mention. |
 | `allow_dm` | bool | `false` | `true` = respond to Discord DMs; `false` = ignore DMs. `allowed_users` still applies in DMs. Each DM user consumes one session slot. |
 | `max_bot_turns` | u32 | `100` | Max consecutive bot turns per thread before throttling (soft limit). Human message resets the counter. A compiled-in hard cap of 1000 consecutive bot messages is always enforced. |
 | `message_processing_mode` | string | `"per-message"` | Message dispatch mode: `"per-message"` (each message = own turn), `"per-thread"` (all messages in thread share one buffer), or `"per-lane"` (each sender gets own buffer). See [Message Dispatch Modes](message-dispatch-modes.md). |
@@ -61,7 +61,7 @@ Slack adapter using Socket Mode. Requires both a Bot User OAuth Token and an App
 | `allowed_users` | string[] | `[]` | Slack user IDs (e.g. `U0123456789`). |
 | `allow_bot_messages` | string | `"off"` | Same as Discord. |
 | `trusted_bot_ids` | string[] | `[]` | Slack Bot User IDs (`U...`) or Bot IDs (`B...`). `U...` matching resolves event Bot IDs via Slack `bots.info`, so the bot token needs `users:read`. |
-| `allow_user_messages` | string | `"involved"` | Same as Discord. |
+| `allow_user_messages` | string | `"multibot-mentions"` | Same as Discord. |
 | `max_bot_turns` | u32 | `100` | Same as Discord. |
 | `message_processing_mode` | string | `"per-message"` | Same as Discord. See [Message Dispatch Modes](message-dispatch-modes.md). |
 | `max_buffered_messages` | u32 | `10` | Same as Discord. |

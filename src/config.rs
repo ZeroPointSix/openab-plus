@@ -358,17 +358,17 @@ fn default_max_batch_tokens() -> usize {
 
 /// Controls whether the bot responds to user messages in threads without @mention.
 ///
-/// - `Involved` (default): respond to thread messages only if the bot has participated
+/// - `Involved`: respond to thread messages only if the bot has participated
 ///   in the thread (posted at least one message, or the thread parent @mentions the bot).
 ///   Channel/MPDM messages always require @mention. DMs always process (implicit mention).
 /// - `Mentions`: always require @mention, even in threads the bot is participating in.
-/// - `MultibotMentions`: same as `Involved` in single-bot threads; falls back to `Mentions`
-///   when other bots have also posted in the thread.
+/// - `MultibotMentions` (default): same as `Involved` in single-bot threads; falls back to
+///   `Mentions` when other bots have also posted in the thread.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AllowUsers {
-    #[default]
     Involved,
     Mentions,
+    #[default]
     MultibotMentions,
 }
 

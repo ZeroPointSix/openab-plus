@@ -99,18 +99,18 @@ User in thread: can you also do Y?
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `allow_user_messages` | string | `"involved"` | Controls when bots respond without @mention. See Layer 3 for all modes. |
+| `allow_user_messages` | string | `"multibot-mentions"` | Controls when bots respond without @mention. See Layer 3 for all modes. |
 
-In this single-bot scenario, the default `"involved"` means the bot responds to all messages in threads it has participated in.
+In this single-bot scenario, the default `"multibot-mentions"` behaves the same as `"involved"` — the bot responds to all messages in threads it has participated in.
 
 ### Example config.toml
 
 ```toml
 [discord]
 bot_token = "${DISCORD_BOT_TOKEN}"
-# allow_user_messages defaults to "involved":
-# bot responds to all messages in threads it has participated in,
-# no @mention needed for follow-ups.
+# allow_user_messages defaults to "multibot-mentions":
+# bot responds to all messages in single-bot threads it has participated in;
+# in multi-bot threads, @mention is required.
 ```
 
 ---
@@ -123,20 +123,20 @@ How involved bots behave on subsequent messages is controlled by `allow_user_mes
 
 | Mode | Behavior |
 |------|----------|
-| `involved` (default) | All involved bots respond to every message — no @mention required. |
+| `multibot-mentions` (default) | Like `involved`, but once a second bot has posted in the thread, you must @mention the bot(s) you want to respond. |
+| `involved` | All involved bots respond to every message — no @mention required. |
 | `mentions` | Always require an explicit @mention, even in threads. |
-| `multibot-mentions` | Like `involved`, but once a second bot has posted in the thread, you must @mention the bot(s) you want to respond. |
 
 ```
-# allow_user_messages = "involved" (default)
+# allow_user_messages = "multibot-mentions" (default)
 User in thread: @BotB what do you think?
   → BotB replies, now "involved"
 User in thread: any other ideas?
-  → Both BotA and BotB reply
-
-# allow_user_messages = "multibot-mentions"
-User in thread: any other ideas?
   → No bot replies (need explicit @mention)
+
+# allow_user_messages = "involved"
+User in thread: any other ideas?
+  → Both BotA and BotB reply
 User in thread: @BotA any other ideas?
   → Only BotA replies
 ```
