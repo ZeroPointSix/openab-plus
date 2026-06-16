@@ -43,19 +43,27 @@ MiMoCode uses a SQLite database (`~/.local/share/mimocode/mimocode.db`) for stat
 
 ## AWS/Bedrock Auto-Detection
 
-When running on AWS (ECS, EC2), MiMoCode auto-detects AWS credentials and registers `amazon-bedrock` as a provider. If Bedrock models are not enabled in your account or the task role lacks `bedrock:InvokeModel`, this causes silent empty responses.
+When running on AWS (ECS, EC2), MiMoCode auto-detects AWS credentials and registers `amazon-bedrock` as a provider. Combined with its `Provider.sort()` logic, ACP mode picks the "best" (paid) model — which fails silently with 0 tokens if you don't have a paid Xiaomi account.
 
-### Solutions:
+### Solution: pre_boot hook
 
-1. **Fresh DB** — If the only auth you run is `mimo auth login` → MiMo Auto (free), then mimo-auto becomes the only provider and the default. No Bedrock conflict.
+Add this to your `[hooks.pre_boot]` script:
 
-2. **Block AWS detection** (if needed) — Set in `[agent].env`:
-   ```toml
-   env = { AWS_CONTAINER_CREDENTIALS_RELATIVE_URI = "" }
-   ```
-   ⚠️ This breaks `aws` CLI access from within the container.
+```bash
+# Write mimo config — disables Bedrock, sets free model as default
+mkdir -p ~/.config/mimocode
+echo '{"disabled_providers":["amazon-bedrock"],"model":"mimo/mimo-auto"}' > ~/.config/mimocode/config.json
 
-3. **Config file** (schema TBD) — MiMoCode reads `~/.config/mimocode/config.json` but the schema differs from OpenCode. The `bedrockDiscovery` key from OpenCode docs is not recognized by MiMoCode.
+# Provision free-tier auth (non-interactive, token refreshes each boot)
+mimo auth login --provider mimo --method "MiMo Auto (free)" 2>/dev/null || true
+```
+
+This ensures:
+1. Bedrock is never auto-detected
+2. `mimo/mimo-auto` is the default model (not `xiaomi/mimo-v2.5-pro-ultraspeed`)
+3. Fresh auth token every container start
+
+For paid Xiaomi accounts, replace `mimo/mimo-auto` with your preferred model (e.g. `xiaomi/mimo-v2.5-pro`).
 
 ## Config (gist)
 
