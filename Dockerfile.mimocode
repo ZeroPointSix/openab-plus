@@ -38,10 +38,17 @@ COPY --from=builder --chown=node:node /build/target/release/openab /usr/local/bi
 RUN mkdir -p /home/node/.config/mimocode && chown -R node:node /home/node
 
 USER node
+
+# Disable Bedrock auto-detection — prevents mimo from silently using AWS models
+# when running on ECS/EC2 with IAM roles attached.
+RUN echo '{"disabled_providers":["amazon-bedrock"]}' > /home/node/.config/mimocode/config.json
+
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD pgrep -x openab || exit 1
 ENV OPENAB_AGENT_COMMAND="mimo acp"
-ENV OPENAB_AGENT_AUTH_COMMAND="mimo auth login"
+ENV OPENAB_AGENT_AUTH_COMMAND="mimo auth login --provider mimo --method \"MiMo Auto (free)\""
 
 ENTRYPOINT ["tini", "--"]
-CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
+# Auth with MiMo Auto (free) at container start — token is ephemeral (~1h)
+# so it must be provisioned fresh each boot, not baked at build time.
+CMD ["sh", "-c", "mimo auth login --provider mimo --method 'MiMo Auto (free)' 2>/dev/null; exec openab run -c /etc/openab/config.toml"]
