@@ -35,25 +35,12 @@ The image installs `@mimo-ai/cli` globally via npm on `node:22-bookworm-slim`.
 helm install openab openab/openab \
   --set agents.kiro.enabled=false \
   --set agents.mimocode.enabled=true \
-  --set agents.mimocode.command=mimo \
-  --set 'agents.mimocode.args={acp}' \
   --set agents.mimocode.image=ghcr.io/openabdev/openab-mimocode:latest \
-  --set agents.mimocode.discord.botToken="$DISCORD_BOT_TOKEN" \
-  --set-string 'agents.mimocode.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
-  --set agents.mimocode.workingDir=/home/node \
-  --set agents.mimocode.pool.maxSessions=3
+  --set-string 'agents.mimocode.discord.allowedChannels[0]=YOUR_CHANNEL_ID'
 ```
 
-> Set `agents.kiro.enabled=false` to disable the default Kiro agent.
-
-## Manual config.toml
-
-```toml
-[agent]
-command = "mimo"
-args = ["acp"]
-working_dir = "/home/node"
-```
+> The Docker image already defines `command`, `args`, and `workingDir` via
+> `OPENAB_AGENT_COMMAND` and `WORKDIR` — no need to set them in Helm values.
 
 ## Authentication
 
