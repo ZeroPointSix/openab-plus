@@ -39,9 +39,10 @@ RUN mkdir -p /home/node/.config/mimocode && chown -R node:node /home/node
 
 USER node
 
-# Disable Bedrock auto-detection — prevents mimo from silently using AWS models
-# when running on ECS/EC2 with IAM roles attached.
-RUN echo '{"disabled_providers":["amazon-bedrock"]}' > /home/node/.config/mimocode/config.json
+# Disable Bedrock auto-detection and set mimo-auto as default model.
+# Without this, ACP mode picks the "best" (paid) model from Provider.sort()
+# which fails silently when running on AWS without a paid Xiaomi account.
+RUN echo '{"disabled_providers":["amazon-bedrock"],"model":"mimo/mimo-auto"}' > /home/node/.config/mimocode/config.json
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD pgrep -x openab || exit 1
