@@ -266,7 +266,7 @@ impl Handler {
             cache
                 .get(&key)
                 .is_some_and(|ts| ts.elapsed() < self.session_ttl)
-        } || self.multibot_cache.is_multibot(&key).await;
+        } || self.multibot_cache.is_multibot(&key);
 
         // Both cached → skip fetch entirely
         // With early detection from msg.author, multibot_threads is populated

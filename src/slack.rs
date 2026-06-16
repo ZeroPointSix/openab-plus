@@ -119,11 +119,13 @@ impl SlackAdapter {
     /// event loop when a bot message arrives, so multibot detection doesn't
     /// depend on fetching thread history. Idempotent.
     async fn note_other_bot_in_thread(&self, thread_ts: &str) {
-        let mut cache = self.multibot_threads.lock().await;
-        cache
-            .entry(thread_ts.to_string())
-            .or_insert_with(tokio::time::Instant::now);
-        enforce_cache_bounds(&mut cache, self.session_ttl);
+        {
+            let mut cache = self.multibot_threads.lock().await;
+            cache
+                .entry(thread_ts.to_string())
+                .or_insert_with(tokio::time::Instant::now);
+            enforce_cache_bounds(&mut cache, self.session_ttl);
+        }
         // Persist to disk — multibot is irreversible
         self.multibot_cache.mark_multibot(thread_ts).await;
     }
@@ -323,7 +325,7 @@ impl SlackAdapter {
             cache
                 .get(thread_ts)
                 .is_some_and(|ts| ts.elapsed() < self.session_ttl)
-        } || self.multibot_cache.is_multibot(thread_ts).await;
+        } || self.multibot_cache.is_multibot(thread_ts);
 
         // Eager multibot detection from message events populates the cache
         // before this runs. When already involved and cached, skip the fetch.
