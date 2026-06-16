@@ -372,18 +372,12 @@ impl SlackAdapter {
         let bot_posted = messages.iter().any(|m| m["user"].as_str() == Some(bot_id));
 
         let involved = parent_mentions_bot || bot_posted;
-        let other_bot_present = cached_multibot
-            || messages.iter().any(|m| {
-                let is_bot_msg =
-                    m["bot_id"].is_string() || m["subtype"].as_str() == Some("bot_message");
-                is_bot_msg && m["user"].as_str() != Some(bot_id)
-            });
+        // other_bot_present relies solely on early detection + disk cache;
+        // no longer scanned from fetched messages (200-msg window was unreliable).
+        let other_bot_present = cached_multibot;
 
         if involved {
             self.cache_participation(thread_ts).await;
-        }
-        if other_bot_present && !cached_multibot {
-            self.note_other_bot_in_thread(thread_ts).await;
         }
 
         (involved, other_bot_present)

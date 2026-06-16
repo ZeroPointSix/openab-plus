@@ -292,10 +292,9 @@ impl Handler {
         };
 
         let involved = cached_involved || messages.iter().any(|m| m.author.id == bot_id);
-        let other_bot_present = cached_multibot
-            || messages
-                .iter()
-                .any(|m| m.author.bot && m.author.id != bot_id);
+        // other_bot_present relies solely on early detection + disk cache;
+        // no longer scanned from fetched messages (200-msg window was unreliable).
+        let other_bot_present = cached_multibot;
 
         if involved && !cached_involved {
             let mut cache = self.participated_threads.lock().await;
@@ -313,28 +312,6 @@ impl Handler {
                     }
                 }
             }
-        }
-
-        if other_bot_present && !cached_multibot {
-            {
-                let mut cache = self.multibot_threads.lock().await;
-                cache.insert(key.clone(), tokio::time::Instant::now());
-
-                if cache.len() > PARTICIPATION_CACHE_MAX {
-                    cache.retain(|_, ts| ts.elapsed() < self.session_ttl);
-                    if cache.len() > PARTICIPATION_CACHE_MAX {
-                        let mut entries: Vec<_> =
-                            cache.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                        entries.sort_by_key(|(_, ts)| *ts);
-                        let evict_count = entries.len() / 2;
-                        for (k, _) in entries.into_iter().take(evict_count) {
-                            cache.remove(&k);
-                        }
-                    }
-                }
-            }
-            // Persist to disk — multibot is irreversible
-            self.multibot_cache.mark_multibot(&key).await;
         }
 
         (involved, other_bot_present)
