@@ -222,6 +222,8 @@ pub struct Handler {
     /// Positive-only cache: thread channel_id → cached_at for threads where other bots have posted.
     /// Like participation, a thread becoming multi-bot is irreversible (bot messages don't disappear).
     pub multibot_threads: tokio::sync::Mutex<HashMap<String, tokio::time::Instant>>,
+    /// Persistent disk cache for multibot thread detection (survives restarts).
+    pub multibot_cache: crate::multibot_cache::MultibotCache,
     /// TTL for participation cache entries (from pool.session_ttl_hours).
     pub session_ttl: std::time::Duration,
     /// Configurable soft limit on bot turns per thread (reset by human message).
@@ -264,7 +266,7 @@ impl Handler {
             cache
                 .get(&key)
                 .is_some_and(|ts| ts.elapsed() < self.session_ttl)
-        };
+        } || self.multibot_cache.is_multibot(&key).await;
 
         // Both cached → skip fetch entirely
         // With early detection from msg.author, multibot_threads is populated
@@ -314,20 +316,25 @@ impl Handler {
         }
 
         if other_bot_present && !cached_multibot {
-            let mut cache = self.multibot_threads.lock().await;
-            cache.insert(key, tokio::time::Instant::now());
+            {
+                let mut cache = self.multibot_threads.lock().await;
+                cache.insert(key.clone(), tokio::time::Instant::now());
 
-            if cache.len() > PARTICIPATION_CACHE_MAX {
-                cache.retain(|_, ts| ts.elapsed() < self.session_ttl);
                 if cache.len() > PARTICIPATION_CACHE_MAX {
-                    let mut entries: Vec<_> = cache.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                    entries.sort_by_key(|(_, ts)| *ts);
-                    let evict_count = entries.len() / 2;
-                    for (k, _) in entries.into_iter().take(evict_count) {
-                        cache.remove(&k);
+                    cache.retain(|_, ts| ts.elapsed() < self.session_ttl);
+                    if cache.len() > PARTICIPATION_CACHE_MAX {
+                        let mut entries: Vec<_> =
+                            cache.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                        entries.sort_by_key(|(_, ts)| *ts);
+                        let evict_count = entries.len() / 2;
+                        for (k, _) in entries.into_iter().take(evict_count) {
+                            cache.remove(&k);
+                        }
                     }
                 }
             }
+            // Persist to disk — multibot is irreversible
+            self.multibot_cache.mark_multibot(&key).await;
         }
 
         (involved, other_bot_present)
@@ -343,8 +350,12 @@ impl EventHandler for Handler {
         // Runs before self-check and bot gating so we always detect other bots. (#481)
         if msg.author.bot && msg.author.id != bot_id {
             let key = msg.channel_id.to_string();
-            let mut cache = self.multibot_threads.lock().await;
-            cache.entry(key).or_insert_with(tokio::time::Instant::now);
+            {
+                let mut cache = self.multibot_threads.lock().await;
+                cache.entry(key.clone()).or_insert_with(tokio::time::Instant::now);
+            }
+            // Persist to disk — multibot is irreversible
+            self.multibot_cache.mark_multibot(&key).await;
         }
 
         // Bot turn counting: runs before self-check so ALL bot messages
