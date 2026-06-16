@@ -45,6 +45,4 @@ ENV OPENAB_AGENT_COMMAND="mimo acp"
 ENV OPENAB_AGENT_AUTH_COMMAND="mimo auth login --provider mimo --method \"MiMo Auto (free)\""
 
 ENTRYPOINT ["tini", "--"]
-# Auth with MiMo Auto (free) at container start — token is ephemeral (~1h)
-# so it must be provisioned fresh each boot, not baked at build time.
-CMD ["sh", "-c", "mimo auth login --provider mimo --method 'MiMo Auto (free)' 2>/dev/null; exec openab run -c /etc/openab/config.toml"]
+CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
