@@ -87,11 +87,19 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review]
 
+# Debounce: cancel in-flight review when new push arrives.
+# Only the latest commit gets reviewed, preventing race conditions
+# where multiple reviews update the same PR concurrently.
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   statuses: write
 
 jobs:
   request-review:
+    if: "!github.event.pull_request.draft"
     runs-on: ubuntu-latest
     steps:
       - name: Set pending status
@@ -108,29 +116,44 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           CHANNEL_ID: ${{ vars.REVIEW_CHANNEL_ID }}
         run: |
+          set -eo pipefail
+
           PR_NUM=${{ github.event.pull_request.number }}
           PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
           SHA=${{ github.event.pull_request.head.sha }}
 
-          MSG_ID=$(curl -s -X POST \
+          # Create thread starter message
+          RESPONSE=$(curl -sf -X POST \
             "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
             -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"📋 PR #${PR_NUM} Review Request\"}" \
-            | jq -r '.id')
+            -d "{\"content\": \"📋 PR #${PR_NUM} Review Request\"}")
+          MSG_ID=$(echo "$RESPONSE" | jq -re '.id')
 
-          THREAD_ID=$(curl -s -X POST \
+          # Create thread from message
+          RESPONSE=$(curl -sf -X POST \
             "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages/${MSG_ID}/threads" \
             -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
             -H "Content-Type: application/json" \
-            -d "{\"name\": \"PR #${PR_NUM} Review\"}" \
-            | jq -r '.id')
+            -d "{\"name\": \"PR #${PR_NUM} Review\"}")
+          THREAD_ID=$(echo "$RESPONSE" | jq -re '.id')
 
-          curl -s -X POST \
+          # Post review request in thread
+          curl -sf -X POST \
             "https://discord.com/api/v10/channels/${THREAD_ID}/messages" \
             -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"<@1490365068863606784> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
+
+      - name: Mark error on Discord failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
+            -f state="error" \
+            -f context="OpenAB PR Review" \
+            -f description="Failed to trigger review — check workflow logs"
 ```
 
 ### Phase 2: Agent Callback (Status Update)
@@ -179,9 +202,11 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - If OpenAB agent is down, status stays "pending" indefinitely (need timeout/alerting)
 
 **Mitigations:**
-- Filter: skip draft PRs, skip PRs with `skip-review` label
-- Timeout: a scheduled Action can mark stale pending statuses as "error" after N hours
-- Rate limiting: debounce rapid pushes (only review latest commit after a cooldown)
+- Filter: skip draft PRs (`if: "!github.event.pull_request.draft"`)
+- Debounce: `concurrency` group with `cancel-in-progress: true` — new push cancels in-flight review, only latest SHA gets reviewed
+- Error fallback: `if: failure()` step marks status as "error" so it never stays pending on workflow failure
+- Race condition: concurrency group ensures only one review runs per PR at a time; commit status is keyed to SHA so old reviews cannot overwrite newer status
+- Timeout: a scheduled Action can mark stale pending statuses as "error" after N hours (agent down scenario)
 
 ## References
 
