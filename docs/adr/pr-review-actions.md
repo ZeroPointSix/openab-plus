@@ -205,15 +205,12 @@ jobs:
       - name: Trigger review via Discord webhook
         run: |
           set -eo pipefail
-
-          PR_NUM=${{ github.event.pull_request.number }}
-          PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
           SHA="${{ github.event.pull_request.head.sha }}"
           MODE=""
           if echo '${{ toJSON(github.event.pull_request.labels.*.name) }}' | grep -q 'auto-fix'; then
             MODE="\n__mode: auto-fix__"
           fi
-
           curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}\"}"
@@ -332,4 +329,4 @@ When the `auto-fix` label is present, the webhook payload includes `__mode: auto
 
 - [GitHub Commit Status API](https://docs.github.com/en/rest/commits/statuses)
 - [Discord Webhooks](https://discord.com/developers/docs/resources/webhook#execute-webhook)
-- [OpenAB PR Review Spec](../../.openab/memory/shared/pr-review-spec.md) (internal)
+- OpenAB PR Review Spec — internal agent document (not in this repository)
