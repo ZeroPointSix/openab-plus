@@ -204,7 +204,7 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 
 | Secret | Purpose | Minimum Permission |
 |--------|---------|-------------------|
-| `GITHUB_TOKEN` (Actions) | Set pending status + circuit breaker label | `statuses: write` + `issues: write` |
+| `GITHUB_TOKEN` (Actions) | Set pending status + circuit breaker label | `statuses: write` + `pull-requests: write` |
 | `OAB_REVIEW_ACTION_WEBHOOK` | Post review request to Discord channel | Webhook URL (channel-scoped) |
 | Agent's `gh` auth (PAT) | Post comment + update status + push auto-fix | `repo` (classic) or `contents: write` + `pull_requests: write` + `commit statuses: write` (fine-grained) |
 
