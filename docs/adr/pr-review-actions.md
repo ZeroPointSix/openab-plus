@@ -18,18 +18,17 @@ The agent should not need to be ephemeral — it stays running and receives revi
 
 ## Decision
 
-Use a **GitHub Action → Discord Bot API → OpenAB (ECS)** architecture with GitHub Commit Status API for check status feedback.
+Use a **GitHub Action → Discord Webhook → OpenAB (ECS)** architecture with GitHub Commit Status API for check status feedback.
 
 ### Why Commit Status API (not Check Runs)
 
 Check Runs API requires a GitHub App with `checks:write` permission. Commit Status API works with a standard PAT or fine-grained token (`commit statuses: write`), which the agent already has via `gh` CLI auth. This avoids creating an additional GitHub App solely for status reporting.
 
-### Why Discord Bot API (not webhook)
+### Why Discord Webhook
 
-Discord webhooks cannot open threads or carry user identity. The Discord Bot API allows:
-- Creating a thread per review (clean audit trail)
-- @mentioning 超渡 to trigger the existing OpenAB message pipeline
-- Full thread history showing multi-agent collaboration
+- Simplest setup — only one secret (webhook URL), no Bot Token management
+- Webhook messages posted to a channel will trigger OpenAB's existing message pipeline via @mention
+- OpenAB auto-creates a thread for the conversation (existing behavior)
 
 ## Architecture
 
@@ -45,10 +44,8 @@ Discord webhooks cannot open threads or carry user identity. The Discord Bot API
 │  1. POST /repos/{owner}/{repo}/statuses/{sha}                       │
 │     state: "pending", context: "OpenAB PR Review"                   │
 │                                                                     │
-│  2. Discord Bot API:                                                │
-│     → Create message in channel (thread starter)                    │
-│     → Create thread from message                                    │
-│     → Post "@超渡 review <PR_URL>" in thread (with sha)             │
+│  2. Discord Webhook:                                                │
+│     → POST to webhook URL with "@超渡 review <PR_URL>"              │
 │                                                                     │
 │  3. Job exits (fire-and-forget)                                     │
 └───────────────────────────┬─────────────────────────────────────────┘
@@ -57,7 +54,7 @@ Discord webhooks cannot open threads or carry user identity. The Discord Bot API
 ┌─────────────────────────────────────────────────────────────────────┐
 │  OpenAB Agent (ECS Fargate, long-lived)                             │
 │                                                                     │
-│  Receives @mention → opens agent session                            │
+│  Receives @mention → opens agent session (auto-creates thread)      │
 │  → Delegates to 法師團隊 (angle-based review)                        │
 │  → Collects findings in Discord thread                              │
 │  → Aggregates into single review comment                            │
@@ -111,10 +108,7 @@ jobs:
             -f context="OpenAB PR Review" \
             -f description="Review in progress..."
 
-      - name: Trigger review via Discord
-        env:
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          CHANNEL_ID: ${{ vars.REVIEW_CHANNEL_ID }}
+      - name: Trigger review via Discord webhook
         run: |
           set -eo pipefail
 
@@ -122,26 +116,7 @@ jobs:
           PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
           SHA=${{ github.event.pull_request.head.sha }}
 
-          # Create thread starter message
-          RESPONSE=$(curl -sf -X POST \
-            "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
-            -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\": \"📋 PR #${PR_NUM} Review Request\"}")
-          MSG_ID=$(echo "$RESPONSE" | jq -re '.id')
-
-          # Create thread from message
-          RESPONSE=$(curl -sf -X POST \
-            "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages/${MSG_ID}/threads" \
-            -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\": \"PR #${PR_NUM} Review\"}")
-          THREAD_ID=$(echo "$RESPONSE" | jq -re '.id')
-
-          # Post review request in thread
-          curl -sf -X POST \
-            "https://discord.com/api/v10/channels/${THREAD_ID}/messages" \
-            -H "Authorization: Bot ${DISCORD_BOT_TOKEN}" \
+          curl -sf -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"<@1490365068863606784> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
 
@@ -183,8 +158,16 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 | Secret | Purpose | Minimum Permission |
 |--------|---------|-------------------|
 | `GITHUB_TOKEN` (Actions) | Set initial pending status | `statuses: write` |
-| `DISCORD_BOT_TOKEN` | Create thread + send message | Bot in the review channel |
+| `DISCORD_WEBHOOK_URL` | Post review request to Discord channel | Webhook URL (channel-scoped) |
 | Agent's `gh` auth (PAT) | Post comment + update status | `repo` (classic) or `pull_requests: write` + `commit statuses: write` (fine-grained) |
+
+### GitHub Actions Secrets Setup
+
+| Secret Name | Value |
+|-------------|-------|
+| `DISCORD_WEBHOOK_URL` | Discord channel webhook URL (Settings → Integrations → Webhooks) |
+
+`GITHUB_TOKEN` is automatically provided by Actions — no manual setup needed.
 
 ## Consequences
 
@@ -192,14 +175,15 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Fully automated — no manual @mention needed for PR reviews
 - PR Checks tab shows live review status (🟡 → ✅/❌)
 - Can enforce review via branch protection rules
-- Discord thread preserves full review audit trail
+- Discord thread preserves full review audit trail (OpenAB auto-creates threads)
 - No architectural changes to OpenAB — agent receives messages normally
 - Fire-and-forget Action — no runner time wasted waiting for review
+- Minimal secrets — only one webhook URL needed in GitHub Secrets
 
 **Negative:**
-- Requires a Discord Bot Token stored in GitHub Secrets
 - Every PR push triggers a review (may want to filter by label or draft status)
 - If OpenAB agent is down, status stays "pending" indefinitely (need timeout/alerting)
+- Webhook messages lack user identity — OpenAB must allow webhook-originated messages
 
 **Mitigations:**
 - Filter: skip draft PRs (`if: "!github.event.pull_request.draft"`)
@@ -211,6 +195,5 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 ## References
 
 - [GitHub Commit Status API](https://docs.github.com/en/rest/commits/statuses)
-- [Discord Bot API — Create Message](https://discord.com/developers/docs/resources/message#create-message)
-- [Discord Bot API — Start Thread from Message](https://discord.com/developers/docs/resources/channel#start-thread-from-message)
+- [Discord Webhooks](https://discord.com/developers/docs/resources/webhook#execute-webhook)
 - [OpenAB PR Review Spec](../../.openab/memory/shared/pr-review-spec.md) (internal)
