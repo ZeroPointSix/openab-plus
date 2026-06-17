@@ -173,8 +173,8 @@ Without dedup, N rapid pushes could trigger N full reviews (~5 LLM calls each fo
 
 - **Trigger events:** `opened`, `synchronize`, `ready_for_review`, `labeled`
 - **Concurrency group:** per-PR number with `cancel-in-progress: true`
-- **Guard condition:** skips drafts, untrusted authors, and irrelevant labels
-- **Steps:** set pending status → trigger Discord webhook → error fallback on failure
+- **Guard condition:** skips drafts, untrusted authors, irrelevant labels, and PRs with `review-limit-reached` label
+- **Steps:** circuit breaker check → set pending status → trigger Discord webhook → error fallback on failure
 
 ### Phase 2: Agent Callback (Status Update)
 
@@ -204,7 +204,7 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 
 | Secret | Purpose | Minimum Permission |
 |--------|---------|-------------------|
-| `GITHUB_TOKEN` (Actions) | Set initial pending status | `statuses: write` |
+| `GITHUB_TOKEN` (Actions) | Set pending status + circuit breaker label | `statuses: write` + `issues: write` |
 | `OAB_REVIEW_ACTION_WEBHOOK` | Post review request to Discord channel | Webhook URL (channel-scoped) |
 | Agent's `gh` auth (PAT) | Post comment + update status + push auto-fix | `repo` (classic) or `contents: write` + `pull_requests: write` + `commit statuses: write` (fine-grained) |
 
@@ -276,6 +276,16 @@ When the `auto-fix` label is present, the webhook payload includes `__mode: auto
 - Only effective on same-repo branches (agent needs push access)
 - Fork PRs with `auto-fix` will still be reviewed but fixes cannot be pushed
 - Agent must implement iteration cap to prevent infinite push→review loops
+
+### Circuit Breaker (max_iterations=10)
+
+The workflow enforces a hard cap of 10 review cycles per PR. On each run, it counts how many `pending` statuses with context `"OpenAB PR Review"` exist across all commits in the PR. If the count reaches 10:
+
+1. Adds `review-limit-reached` label to the PR
+2. Sets commit status to `error` with description "Circuit breaker: exceeded 10 review cycles"
+3. Fails the workflow step
+
+The `review-limit-reached` label is checked in the job `if` condition — once applied, no further review runs will trigger. A maintainer can remove the label to reset the circuit breaker if needed.
 
 ## References
 

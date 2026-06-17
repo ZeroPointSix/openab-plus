@@ -10,11 +10,13 @@ concurrency:
 
 permissions:
   statuses: write
+  issues: write
 
 jobs:
   request-review:
     if: >-
       !github.event.pull_request.draft &&
+      !contains(toJSON(github.event.pull_request.labels.*.name), 'review-limit-reached') &&
       (github.event.action != 'labeled' ||
        github.event.label.name == 'safe-to-review' ||
        github.event.label.name == 'auto-fix') &&
@@ -23,6 +25,28 @@ jobs:
       contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
     runs-on: ubuntu-latest
     steps:
+      - name: Circuit breaker — max 10 review cycles
+        id: breaker
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eo pipefail
+          COUNT=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits" \
+            --jq '.[].sha' | xargs -I{} gh api "repos/${{ github.repository }}/commits/{}/statuses" \
+            --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length' \
+            | paste -sd+ | bc)
+          echo "count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
+          if [ "${COUNT:-0}" -ge 10 ]; then
+            gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" \
+              --method POST -f "labels[]=review-limit-reached"
+            gh api "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
+              -f state="error" \
+              -f context="OpenAB PR Review" \
+              -f description="Circuit breaker: exceeded 10 review cycles"
+            echo "::error::Circuit breaker triggered after $COUNT review cycles"
+            exit 1
+          fi
+
       - name: Set pending status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
