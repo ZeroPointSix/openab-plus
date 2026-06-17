@@ -81,6 +81,36 @@ Without this, the webhook @mention will be ignored and reviews will never trigge
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+## Review Loop (Auto-Fix Cycle)
+
+The architecture supports a closed-loop review cycle:
+
+```
+push → Action (pending) → OpenAB review
+  ├─ LGTM ✅ → status: success → done
+  └─ CHANGES REQUESTED ⚠️ → agent auto-fixes → commit + push
+       └─ triggers `synchronize` → Action (pending) → OpenAB review → ...
+```
+
+When the agent identifies fixable issues (e.g. typos, missing docs, lint violations), it can optionally:
+
+1. Fix the code directly on the PR branch
+2. Commit and push the fix
+3. The `synchronize` event re-triggers the workflow, starting a new review cycle
+4. Repeat until LGTM or a human intervenes
+
+### Safeguards
+
+- **Max iterations** — agent enforces a cap (e.g. 3 cycles) to prevent infinite loops
+- **Human-only issues** — if findings require design decisions or are ambiguous, the agent requests human input instead of auto-fixing
+- **Commit attribution** — auto-fix commits are authored by `chaodu-agent` with a clear prefix (e.g. `fix(review):`) so the loop is auditable
+
+### When Auto-Fix Is Skipped
+
+- Any 🔴 Critical finding (correctness, security) — requires human judgment
+- Ambiguous 🟡 findings where multiple valid solutions exist
+- 主人 explicitly opts out of auto-fix for the PR
+
 ## Implementation Plan
 
 ### Phase 1: GitHub Action Workflow
