@@ -156,7 +156,10 @@ permissions:
 
 jobs:
   request-review:
-    if: "!github.event.pull_request.draft"
+    if: >-
+      !github.event.pull_request.draft &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
+        github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     steps:
       - name: Set pending status
@@ -251,7 +254,7 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Fork PRs: `OAB_REVIEW_ACTION_WEBHOOK` and `OAB_REVIEW_ACTION_BOT_UID` secrets are not available to workflows triggered by fork PRs (GitHub security policy). The webhook step will fail and the error fallback will mark the status as "error". This is acceptable — fork PRs can still be reviewed manually.
 
 **Mitigations:**
-- Filter: skip draft PRs (`if: "!github.event.pull_request.draft"`)
+- Filter: skip draft PRs and untrusted authors — only `OWNER`, `MEMBER`, `COLLABORATOR`, and `CONTRIBUTOR` (returning contributor with merged PR) trigger automatic review. First-time contributors and unknown authors are skipped; maintainers can manually @mention the agent to review those PRs.
 - Debounce: `concurrency` group with `cancel-in-progress: true` — new push cancels in-flight review, only latest SHA gets reviewed
 - Error fallback: `if: failure()` step marks status as "error" so it never stays pending on workflow failure
 - Race condition: concurrency group prevents duplicate GitHub Action runs per PR; commit status is keyed to SHA so old reviews cannot overwrite newer status. **Note:** the concurrency group only operates at the GitHub Actions layer — if a webhook was already delivered before cancellation, the agent may briefly run a parallel review for the old SHA. Agent-side per-PR session dedup/cancellation is recommended as a future enhancement.

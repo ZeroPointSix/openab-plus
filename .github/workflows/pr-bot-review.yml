@@ -13,7 +13,10 @@ permissions:
 
 jobs:
   request-review:
-    if: "!github.event.pull_request.draft"
+    if: >-
+      !github.event.pull_request.draft &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
+        github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     steps:
       - name: Set pending status
