@@ -402,14 +402,21 @@ impl AcpServer {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        if session_id.is_empty() || !self.sessions.contains_key(session_id) {
-            return self.error_response(id, -32000, "session not found");
+        if session_id.is_empty() {
+            return self.error_response(id, -32602, "missing sessionId");
+        }
+
+        if !self.sessions.contains_key(session_id) {
+            return self.error_response(id, -32000, &format!("unknown sessionId: {session_id}"));
         }
 
         // Update working directory if caller provides cwd
         if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
             if !cwd.is_empty() {
                 self.working_dir = cwd.to_string();
+                if let Some(agent) = self.sessions.get_mut(session_id) {
+                    agent.set_working_dir(cwd.to_string());
+                }
             }
         }
 
@@ -980,12 +987,18 @@ mod tests {
     #[tokio::test]
     async fn test_session_load_unknown_session_returns_error() {
         let mut server = AcpServer::new();
+
+        // Unknown session → -32000
         let resp_str = server
             .handle_session_load(12, &json!({"sessionId": "nonexistent"}))
             .await;
         let resp: Value = serde_json::from_str(&resp_str).unwrap();
-
         assert!(resp["error"].is_object());
         assert_eq!(resp["error"]["code"], -32000);
+
+        // Missing sessionId → -32602
+        let resp_str = server.handle_session_load(13, &json!({})).await;
+        let resp: Value = serde_json::from_str(&resp_str).unwrap();
+        assert_eq!(resp["error"]["code"], -32602);
     }
 }
