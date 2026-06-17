@@ -242,6 +242,10 @@ impl AcpServer {
             let output = match req.method.as_deref() {
                 Some("initialize") => vec![self.handle_initialize(id)],
                 Some("session/new") => vec![self.handle_session_new(id).await],
+                Some("session/load") => {
+                    let params = req.params.unwrap_or(json!({}));
+                    vec![self.handle_session_load(id, &params).await]
+                }
                 Some("session/prompt") => {
                     let params = req.params.unwrap_or(json!({}));
                     self.handle_session_prompt(id, &params).await
@@ -278,7 +282,7 @@ impl AcpServer {
                 },
                 "agentCapabilities": {
                     "streaming": false,
-                    "loadSession": false
+                    "loadSession": true
                 }
             })),
             error: None,
@@ -388,6 +392,49 @@ impl AcpServer {
             error: None,
         };
         serde_json::to_string(&resp).unwrap()
+    }
+
+    async fn handle_session_load(&mut self, id: u64, params: &Value) -> String {
+        let session_id = params
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if session_id.is_empty() || !self.sessions.contains_key(session_id) {
+            return self.error_response(id, -32000, "session not found");
+        }
+
+        // Update working directory if caller provides cwd
+        if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
+            if !cwd.is_empty() {
+                self.working_dir = cwd.to_string();
+            }
+        }
+
+        // Ensure model list is populated
+        if self.model_options.is_empty() {
+            self.model_options = Self::available_models().await;
+        }
+
+        let model_name = self
+            .active_model
+            .clone()
+            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+
+        self.ok_response(
+            id,
+            json!({
+                "sessionId": session_id,
+                "configOptions": [{
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "enum",
+                    "currentValue": model_name,
+                    "options": self.model_options
+                }]
+            }),
+        )
     }
 
     /// List available models based on configured credentials.
