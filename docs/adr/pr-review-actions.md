@@ -86,10 +86,29 @@ Without this, the webhook @mention will be ignored and reviews will never trigge
 The architecture supports a closed-loop review cycle:
 
 ```
-push → Action (pending) → OpenAB review
-  ├─ LGTM ✅ → status: success → done
-  └─ CHANGES REQUESTED ⚠️ → agent auto-fixes → commit + push
-       └─ triggers `synchronize` → Action (pending) → OpenAB review → ...
+                    ┌─────────────────────────────────────────┐
+                    │                                         │
+                    ▼                                         │
+┌──────────┐    ┌─────────────────┐    ┌──────────────┐      │
+│  PR push │───▶│  GitHub Action   │───▶│  OpenAB      │      │
+│          │    │  (set pending)   │    │  Review      │      │
+└──────────┘    └─────────────────┘    └──────┬───────┘      │
+                                              │               │
+                                    ┌─────────┴─────────┐     │
+                                    │                   │     │
+                                    ▼                   ▼     │
+                             ┌────────────┐    ┌────────────┐ │
+                             │  LGTM ✅    │    │ CHANGES    │ │
+                             │            │    │ REQUESTED  │ │
+                             └─────┬──────┘    └─────┬──────┘ │
+                                   │                 │        │
+                                   ▼                 ▼        │
+                             ┌────────────┐    ┌────────────┐ │
+                             │  status:   │    │ Auto-fix   │ │
+                             │  success   │    │ commit +   │─┘
+                             │  (done)    │    │ push       │
+                             └────────────┘    └────────────┘
+                                              (re-triggers Action)
 ```
 
 When the agent identifies fixable issues (e.g. typos, missing docs, lint violations), it can optionally:
