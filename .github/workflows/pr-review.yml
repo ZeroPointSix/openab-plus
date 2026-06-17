@@ -1,0 +1,45 @@
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  statuses: write
+
+jobs:
+  request-review:
+    if: "!github.event.pull_request.draft"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set pending status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
+            -f state="pending" \
+            -f context="OpenAB PR Review" \
+            -f description="Review in progress..."
+
+      - name: Trigger review via Discord webhook
+        run: |
+          set -eo pipefail
+          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          SHA=${{ github.event.pull_request.head.sha }}
+          curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"<@${{ vars.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
+
+      - name: Mark error on Discord failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
+            -f state="error" \
+            -f context="OpenAB PR Review" \
+            -f description="Failed to trigger review — check workflow logs"
