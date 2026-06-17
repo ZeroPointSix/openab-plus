@@ -118,7 +118,7 @@ jobs:
 
           curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"<@${{ vars.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
+            -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
 
       - name: Mark error on Discord failure
         if: failure()
