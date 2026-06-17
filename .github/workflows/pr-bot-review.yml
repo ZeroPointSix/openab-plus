@@ -41,7 +41,7 @@ jobs:
           if [ "$HAS_AUTOFIX" = "true" ]; then
             MODE="\n__mode: auto-fix__"
           fi
-          curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
+          curl -sf -o /dev/null -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}\"}"
 

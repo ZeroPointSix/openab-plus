@@ -2,11 +2,11 @@
 
 **Status:** Proposed  
 **Date:** 2026-06-17  
-**Author:** 超渡法師
+**Author:** chaodu-agent
 
 ## Context
 
-OpenAB's PR review workflow currently relies on manual triggers — a human @mentions 超渡 in Discord to initiate a review. This works well for ad-hoc reviews but does not scale for repositories with frequent PR activity. Maintainers want automated PR reviews that:
+OpenAB's PR review workflow currently relies on manual triggers — a human @mentions the review bot in Discord to initiate a review. This works well for ad-hoc reviews but does not scale for repositories with frequent PR activity. Maintainers want automated PR reviews that:
 
 1. Trigger automatically when a PR is opened or updated
 2. Show review status as a GitHub Check (🟡 pending → ✅/❌ complete)
@@ -56,7 +56,7 @@ Without this, the webhook @mention will be ignored and reviews will never trigge
 │     state: "pending", context: "OpenAB PR Review"                   │
 │                                                                     │
 │  2. Discord Webhook:                                                │
-│     → POST to webhook URL with "@超渡 review <PR_URL>"              │
+│     → POST to webhook URL with "@bot review <PR_URL>"              │
 │                                                                     │
 │  3. Job exits (fire-and-forget)                                     │
 └───────────────────────────┬─────────────────────────────────────────┘
@@ -66,7 +66,7 @@ Without this, the webhook @mention will be ignored and reviews will never trigge
 │  OpenAB Agent (ECS Fargate, long-lived)                             │
 │                                                                     │
 │  Receives @mention → opens agent session (auto-creates thread)      │
-│  → Delegates to 法師團隊 (angle-based review)                        │
+│  → Delegates to reviewer team (angle-based review)                  │
 │  → Collects findings in Discord thread                              │
 │  → Aggregates into single review comment                            │
 └───────────────────────────┬─────────────────────────────────────────┘
@@ -215,7 +215,7 @@ jobs:
           if [ "$HAS_AUTOFIX" = "true" ]; then
             MODE="\n__mode: auto-fix__"
           fi
-          curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
+          curl -sf -o /dev/null -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}\"}"
 
@@ -267,7 +267,7 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 | Secret Name | Value |
 |-------------|-------|
 | `OAB_REVIEW_ACTION_WEBHOOK` | Discord channel webhook URL (Settings → Integrations → Webhooks) |
-| `OAB_REVIEW_ACTION_BOT_UID` | Discord user ID of the bot to @mention (e.g. 超渡法師's UID) |
+| `OAB_REVIEW_ACTION_BOT_UID` | Discord user ID of the bot to @mention (e.g. the review agent's UID) |
 
 `GITHUB_TOKEN` is automatically provided by Actions — no manual setup needed.
 
