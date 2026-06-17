@@ -2,7 +2,7 @@ name: PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]
+    types: [opened, synchronize, ready_for_review, labeled]
 
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
@@ -15,8 +15,9 @@ jobs:
   request-review:
     if: >-
       !github.event.pull_request.draft &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
-        github.event.pull_request.author_association)
+      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
+        github.event.pull_request.author_association) ||
+      contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
     runs-on: ubuntu-latest
     steps:
       - name: Set pending status

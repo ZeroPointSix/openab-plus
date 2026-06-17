@@ -142,7 +142,7 @@ Create `.github/workflows/pr-bot-review.yml`:
 name: PR Review
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]
+    types: [opened, synchronize, ready_for_review, labeled]
 
 # Debounce: cancel in-flight Action run when new push arrives.
 # Only the latest commit triggers the workflow; however, if a webhook
@@ -158,8 +158,9 @@ jobs:
   request-review:
     if: >-
       !github.event.pull_request.draft &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
-        github.event.pull_request.author_association)
+      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
+        github.event.pull_request.author_association) ||
+      contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
     runs-on: ubuntu-latest
     steps:
       - name: Set pending status
@@ -276,6 +277,10 @@ The workflow uses GitHub's `author_association` field to gate automatic reviews.
 | `NONE` | ❌ | No prior relationship |
 
 **Why:** Prevents token waste and prompt-injection risk from untrusted PR diffs being fed into agent context. Maintainers can still manually @mention the agent to review skipped PRs after visual inspection.
+
+### Label Override: `safe-to-review`
+
+Maintainers can add the `safe-to-review` label to any PR to bypass the `author_association` check. This triggers the workflow via the `labeled` event, allowing untrusted contributors' PRs to be reviewed automatically after a maintainer has visually confirmed the PR is safe.
 
 ## References
 
