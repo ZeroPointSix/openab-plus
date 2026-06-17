@@ -37,6 +37,8 @@ Discord webhook messages are flagged `author.bot == true` at the API level. Open
 1. Set `allow_bot_messages: "mentions"` — allows bot messages that @mention the agent
 2. Add the webhook's author ID to `trusted_bot_ids`
 
+These settings are configured in the OpenAB ECS task definition's environment variables (e.g. `DISCORD_ALLOW_BOT_MESSAGES=mentions`) or the agent's runtime configuration file.
+
 Without this, the webhook @mention will be ignored and reviews will never trigger.
 
 ## Architecture
@@ -203,12 +205,14 @@ jobs:
             -f description="Review in progress..."
 
       - name: Trigger review via Discord webhook
+        env:
+          HAS_AUTOFIX: ${{ contains(toJSON(github.event.pull_request.labels.*.name), 'auto-fix') }}
         run: |
           set -eo pipefail
           PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
           SHA="${{ github.event.pull_request.head.sha }}"
           MODE=""
-          if echo '${{ toJSON(github.event.pull_request.labels.*.name) }}' | grep -q 'auto-fix'; then
+          if [ "$HAS_AUTOFIX" = "true" ]; then
             MODE="\n__mode: auto-fix__"
           fi
           curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
@@ -256,7 +260,7 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 |--------|---------|-------------------|
 | `GITHUB_TOKEN` (Actions) | Set initial pending status | `statuses: write` |
 | `OAB_REVIEW_ACTION_WEBHOOK` | Post review request to Discord channel | Webhook URL (channel-scoped) |
-| Agent's `gh` auth (PAT) | Post comment + update status | `repo` (classic) or `pull_requests: write` + `commit statuses: write` (fine-grained) |
+| Agent's `gh` auth (PAT) | Post comment + update status + push auto-fix | `repo` (classic) or `contents: write` + `pull_requests: write` + `commit statuses: write` (fine-grained) |
 
 ### GitHub Actions Secrets Setup
 

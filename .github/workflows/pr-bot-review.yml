@@ -31,12 +31,14 @@ jobs:
             -f description="Review in progress..."
 
       - name: Trigger review via Discord webhook
+        env:
+          HAS_AUTOFIX: ${{ contains(toJSON(github.event.pull_request.labels.*.name), 'auto-fix') }}
         run: |
           set -eo pipefail
           PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
           SHA="${{ github.event.pull_request.head.sha }}"
           MODE=""
-          if echo '${{ toJSON(github.event.pull_request.labels.*.name) }}' | grep -q 'auto-fix'; then
+          if [ "$HAS_AUTOFIX" = "true" ]; then
             MODE="\n__mode: auto-fix__"
           fi
           curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
