@@ -132,6 +132,35 @@ When explicitly requested:
 - Ambiguous 🟡 findings where multiple valid solutions exist
 - 主人 explicitly opts out of auto-fix for the PR
 
+## Dedup & Performance
+
+Rapid pushes can cause multiple review requests for the same PR. The system deduplicates at two layers:
+
+### Layer 1: GitHub Actions (Concurrency Group)
+
+```yaml
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+```
+
+A new push cancels any in-flight Action run for the same PR. If the webhook has not yet been sent, only the latest SHA triggers a review.
+
+### Layer 2: Agent-Side SHA Validation
+
+If the webhook was already delivered before cancellation, the agent receives a stale request. To handle this:
+
+1. Agent extracts `__commit: <SHA>__` from the trigger message
+2. Agent queries current PR HEAD: `gh pr view <N> --json headRefOid --jq .headRefOid`
+3. If request SHA ≠ HEAD → skip review, respond "Superseded by newer commit"
+4. If request SHA = HEAD → proceed with normal review
+
+This prevents wasting API tokens and reviewer compute on commits that are no longer relevant.
+
+### Cost Impact
+
+Without dedup, N rapid pushes could trigger N full reviews (~5 LLM calls each for angle-based delegation). With both layers active, at most 1 review runs per push burst.
+
 ## Implementation Plan
 
 ### Phase 1: GitHub Action Workflow
