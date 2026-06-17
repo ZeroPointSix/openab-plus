@@ -113,7 +113,7 @@ The architecture supports a closed-loop review cycle:
                                               (re-triggers Action)
 ```
 
-By default, the agent **only reviews and reports findings** — it does not push fixes automatically. The auto-fix loop is only activated when a human (主人) explicitly requests it (e.g. "fix and push" or option 4️⃣ in the post-review menu).
+By default, the agent **only reviews and reports findings** — it does not push fixes automatically. The auto-fix loop is only activated when a human (maintainer) explicitly requests it (e.g. "fix and push" or option 4️⃣ in the post-review menu).
 
 When explicitly requested:
 
@@ -132,7 +132,7 @@ When explicitly requested:
 
 - Any 🔴 Critical finding (correctness, security) — requires human judgment
 - Ambiguous 🟡 findings where multiple valid solutions exist
-- 主人 explicitly opts out of auto-fix for the PR
+- Maintainer explicitly opts out of auto-fix for the PR
 
 ## Dedup & Performance
 
