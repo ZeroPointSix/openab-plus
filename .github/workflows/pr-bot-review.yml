@@ -15,6 +15,9 @@ jobs:
   request-review:
     if: >-
       !github.event.pull_request.draft &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'safe-to-review' ||
+       github.event.label.name == 'auto-fix') &&
       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
         github.event.pull_request.author_association) ||
       contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))

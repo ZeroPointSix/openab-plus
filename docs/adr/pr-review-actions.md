@@ -189,6 +189,9 @@ jobs:
   request-review:
     if: >-
       !github.event.pull_request.draft &&
+      (github.event.action != 'labeled' ||
+       github.event.label.name == 'safe-to-review' ||
+       github.event.label.name == 'auto-fix') &&
       (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
         github.event.pull_request.author_association) ||
       contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
@@ -315,6 +318,8 @@ The workflow uses GitHub's `author_association` field to gate automatic reviews.
 ### Label Override: `safe-to-review`
 
 Maintainers can add the `safe-to-review` label to any PR to bypass the `author_association` check. This triggers the workflow via the `labeled` event, allowing untrusted contributors' PRs to be reviewed automatically after a maintainer has visually confirmed the PR is safe.
+
+**Note:** The `labeled` event is filtered — only `safe-to-review` and `auto-fix` labels trigger the workflow. Other labels (e.g. `documentation`, `bug`) are ignored to avoid unnecessary review runs.
 
 ### Auto-Fix Mode: `auto-fix`
 
