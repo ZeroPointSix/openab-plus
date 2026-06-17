@@ -1,4 +1,4 @@
-# ADR: OpenAB PR Review Actions
+# ADR: OpenAB PR Review Loop
 
 **Status:** Proposed  
 **Date:** 2026-06-17  
