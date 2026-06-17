@@ -180,10 +180,14 @@ jobs:
           PR_NUM=${{ github.event.pull_request.number }}
           PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
           SHA="${{ github.event.pull_request.head.sha }}"
+          MODE=""
+          if echo '${{ toJSON(github.event.pull_request.labels.*.name) }}' | grep -q 'auto-fix'; then
+            MODE="\n__mode: auto-fix__"
+          fi
 
           curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
+            -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}\"}"
 
       - name: Mark error on Discord failure
         if: failure()
@@ -281,6 +285,19 @@ The workflow uses GitHub's `author_association` field to gate automatic reviews.
 ### Label Override: `safe-to-review`
 
 Maintainers can add the `safe-to-review` label to any PR to bypass the `author_association` check. This triggers the workflow via the `labeled` event, allowing untrusted contributors' PRs to be reviewed automatically after a maintainer has visually confirmed the PR is safe.
+
+### Auto-Fix Mode: `auto-fix`
+
+When the `auto-fix` label is present, the webhook payload includes `__mode: auto-fix__`. The agent enters an iterative loop:
+
+1. Review PR → identify actionable findings (🔴/🟡)
+2. Fix all findings → push commit
+3. Re-review until LGTM or max iterations reached (agent-side cap, recommended: 3)
+
+**Constraints:**
+- Only effective on same-repo branches (agent needs push access)
+- Fork PRs with `auto-fix` will still be reviewed but fixes cannot be pushed
+- Agent must implement iteration cap to prevent infinite push→review loops
 
 ## References
 
