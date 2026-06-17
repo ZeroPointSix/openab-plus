@@ -116,7 +116,7 @@ jobs:
           PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
           SHA=${{ github.event.pull_request.head.sha }}
 
-          curl -sf -X POST "${{ secrets.DISCORD_WEBHOOK_URL }}" \
+          curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
             -d "{\"content\": \"<@1490365068863606784> review ${PR_URL}\n\n__commit: ${SHA}__\"}"
 
@@ -158,14 +158,14 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 | Secret | Purpose | Minimum Permission |
 |--------|---------|-------------------|
 | `GITHUB_TOKEN` (Actions) | Set initial pending status | `statuses: write` |
-| `DISCORD_WEBHOOK_URL` | Post review request to Discord channel | Webhook URL (channel-scoped) |
+| `OAB_REVIEW_ACTION_WEBHOOK` | Post review request to Discord channel | Webhook URL (channel-scoped) |
 | Agent's `gh` auth (PAT) | Post comment + update status | `repo` (classic) or `pull_requests: write` + `commit statuses: write` (fine-grained) |
 
 ### GitHub Actions Secrets Setup
 
 | Secret Name | Value |
 |-------------|-------|
-| `DISCORD_WEBHOOK_URL` | Discord channel webhook URL (Settings → Integrations → Webhooks) |
+| `OAB_REVIEW_ACTION_WEBHOOK` | Discord channel webhook URL (Settings → Integrations → Webhooks) |
 
 `GITHUB_TOKEN` is automatically provided by Actions — no manual setup needed.
 
