@@ -167,71 +167,14 @@ Without dedup, N rapid pushes could trigger N full reviews (~5 LLM calls each fo
 
 ### Phase 1: GitHub Action Workflow
 
-Create `.github/workflows/pr-bot-review.yml`:
+> **Canonical source:** [`.github/workflows/pr-bot-review.yml`](../../.github/workflows/pr-bot-review.yml)
+>
+> Refer to the workflow file for the current implementation. Key design points:
 
-```yaml
-name: PR Review
-on:
-  pull_request:
-    types: [opened, synchronize, ready_for_review, labeled]
-
-# Debounce: cancel in-flight Action run when new push arrives.
-# Only the latest commit triggers the workflow; however, if a webhook
-# was already sent before cancellation, the agent may still process it.
-concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-permissions:
-  statuses: write
-
-jobs:
-  request-review:
-    if: >-
-      !github.event.pull_request.draft &&
-      (github.event.action != 'labeled' ||
-       github.event.label.name == 'safe-to-review' ||
-       github.event.label.name == 'auto-fix') &&
-      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
-        github.event.pull_request.author_association) ||
-      contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set pending status
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eo pipefail
-          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
-            -f state="pending" \
-            -f context="OpenAB PR Review" \
-            -f description="Review in progress..."
-
-      - name: Trigger review via Discord webhook
-        env:
-          HAS_AUTOFIX: ${{ contains(toJSON(github.event.pull_request.labels.*.name), 'auto-fix') }}
-        run: |
-          set -eo pipefail
-          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          SHA="${{ github.event.pull_request.head.sha }}"
-          MODE=""
-          if [ "$HAS_AUTOFIX" = "true" ]; then
-            MODE="\n__mode: auto-fix__"
-          fi
-          curl -sf -o /dev/null -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"content\": \"<@${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}\"}"
-
-      - name: Mark error on Discord failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
-            -f state="error" \
-            -f context="OpenAB PR Review" \
-            -f description="Failed to trigger review — check workflow logs"
-```
+- **Trigger events:** `opened`, `synchronize`, `ready_for_review`, `labeled`
+- **Concurrency group:** per-PR number with `cancel-in-progress: true`
+- **Guard condition:** skips drafts, untrusted authors, and irrelevant labels
+- **Steps:** set pending status → trigger Discord webhook → error fallback on failure
 
 ### Phase 2: Agent Callback (Status Update)
 

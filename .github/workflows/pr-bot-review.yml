@@ -31,7 +31,8 @@ jobs:
           gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
             -f state="pending" \
             -f context="OpenAB PR Review" \
-            -f description="Review in progress..."
+            -f description="Review in progress..." \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Trigger review via Discord webhook
         env:
