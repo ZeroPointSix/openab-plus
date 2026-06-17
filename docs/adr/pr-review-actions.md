@@ -260,6 +260,23 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Race condition: concurrency group prevents duplicate GitHub Action runs per PR; commit status is keyed to SHA so old reviews cannot overwrite newer status. **Note:** the concurrency group only operates at the GitHub Actions layer — if a webhook was already delivered before cancellation, the agent may briefly run a parallel review for the old SHA. Agent-side per-PR session dedup/cancellation is recommended as a future enhancement.
 - Timeout: a scheduled Action can mark stale pending statuses as "error" after N hours (agent down scenario)
 
+## Safeguards
+
+### Trusted Contributor Filter
+
+The workflow uses GitHub's `author_association` field to gate automatic reviews. Only PRs from trusted authors trigger the review pipeline:
+
+| `author_association` | Auto-review? | Meaning |
+|---------------------|--------------|---------|
+| `OWNER` | ✅ | Repository owner |
+| `MEMBER` | ✅ | Organization member |
+| `COLLABORATOR` | ✅ | Explicitly granted write access |
+| `CONTRIBUTOR` | ✅ | Has previously merged a PR |
+| `FIRST_TIME_CONTRIBUTOR` | ❌ | First PR to this repo |
+| `NONE` | ❌ | No prior relationship |
+
+**Why:** Prevents token waste and prompt-injection risk from untrusted PR diffs being fed into agent context. Maintainers can still manually @mention the agent to review skipped PRs after visual inspection.
+
 ## References
 
 - [GitHub Commit Status API](https://docs.github.com/en/rest/commits/statuses)
