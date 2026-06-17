@@ -30,6 +30,15 @@ Check Runs API requires a GitHub App with `checks:write` permission. Commit Stat
 - Webhook messages posted to a channel will trigger OpenAB's existing message pipeline via @mention
 - OpenAB auto-creates a thread for the conversation (existing behavior)
 
+### Configuration Prerequisites
+
+Discord webhook messages are flagged `author.bot == true` at the API level. OpenAB's Discord adapter defaults to `allow_bot_messages: "off"`, which silently drops bot messages. For this automation to work, the deployment **must** configure one of:
+
+1. Set `allow_bot_messages: "mentions"` — allows bot messages that @mention the agent
+2. Add the webhook's author ID to `trusted_bot_ids`
+
+Without this, the webhook @mention will be ignored and reviews will never trigger.
+
 ## Architecture
 
 ```
@@ -39,7 +48,7 @@ Check Runs API requires a GitHub App with `checks:write` permission. Commit Stat
                             │ triggers
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  GitHub Action (.github/workflows/pr-review.yml)                    │
+│  GitHub Action (.github/workflows/pr-bot-review.yml)                │
 │                                                                     │
 │  1. POST /repos/{owner}/{repo}/statuses/{sha}                       │
 │     state: "pending", context: "OpenAB PR Review"                   │
@@ -76,7 +85,7 @@ Check Runs API requires a GitHub App with `checks:write` permission. Commit Stat
 
 ### Phase 1: GitHub Action Workflow
 
-Create `.github/workflows/pr-review.yml`:
+Create `.github/workflows/pr-bot-review.yml`:
 
 ```yaml
 name: PR Review
@@ -84,9 +93,9 @@ on:
   pull_request:
     types: [opened, synchronize, ready_for_review]
 
-# Debounce: cancel in-flight review when new push arrives.
-# Only the latest commit gets reviewed, preventing race conditions
-# where multiple reviews update the same PR concurrently.
+# Debounce: cancel in-flight Action run when new push arrives.
+# Only the latest commit triggers the workflow; however, if a webhook
+# was already sent before cancellation, the agent may still process it.
 concurrency:
   group: pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -103,6 +112,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -eo pipefail
           gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
             -f state="pending" \
             -f context="OpenAB PR Review" \
@@ -114,7 +124,7 @@ jobs:
 
           PR_NUM=${{ github.event.pull_request.number }}
           PR_URL="https://github.com/${{ github.repository }}/pull/${PR_NUM}"
-          SHA=${{ github.event.pull_request.head.sha }}
+          SHA="${{ github.event.pull_request.head.sha }}"
 
           curl -sf -X POST "${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}" \
             -H "Content-Type: application/json" \
@@ -133,20 +143,22 @@ jobs:
 
 ### Phase 2: Agent Callback (Status Update)
 
-After the agent posts the final PR comment, update the commit status:
+After the agent posts the final PR comment, update the commit status (using the comment's `html_url` from the API response as `target_url` so "Details" links directly to the review):
 
 ```bash
 # LGTM
 gh api repos/OWNER/REPO/statuses/SHA \
   -f state="success" \
   -f context="OpenAB PR Review" \
-  -f description="LGTM ✅"
+  -f description="LGTM ✅" \
+  -f target_url="<comment_html_url>"
 
 # Changes Requested
 gh api repos/OWNER/REPO/statuses/SHA \
   -f state="failure" \
   -f context="OpenAB PR Review" \
-  -f description="Changes Requested ⚠️"
+  -f description="Changes Requested ⚠️" \
+  -f target_url="<comment_html_url>"
 ```
 
 ### Phase 3: Branch Protection
@@ -166,6 +178,7 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 | Secret Name | Value |
 |-------------|-------|
 | `OAB_REVIEW_ACTION_WEBHOOK` | Discord channel webhook URL (Settings → Integrations → Webhooks) |
+| `OAB_REVIEW_ACTION_BOT_UID` | Discord user ID of the bot to @mention (e.g. 超渡法師's UID) |
 
 `GITHUB_TOKEN` is automatically provided by Actions — no manual setup needed.
 
@@ -184,12 +197,13 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Every PR push triggers a review (may want to filter by label or draft status)
 - If OpenAB agent is down, status stays "pending" indefinitely (need timeout/alerting)
 - Webhook messages lack user identity — OpenAB must allow webhook-originated messages
+- Fork PRs: `OAB_REVIEW_ACTION_WEBHOOK` and `OAB_REVIEW_ACTION_BOT_UID` secrets are not available to workflows triggered by fork PRs (GitHub security policy). The webhook step will fail and the error fallback will mark the status as "error". This is acceptable — fork PRs can still be reviewed manually.
 
 **Mitigations:**
 - Filter: skip draft PRs (`if: "!github.event.pull_request.draft"`)
 - Debounce: `concurrency` group with `cancel-in-progress: true` — new push cancels in-flight review, only latest SHA gets reviewed
 - Error fallback: `if: failure()` step marks status as "error" so it never stays pending on workflow failure
-- Race condition: concurrency group ensures only one review runs per PR at a time; commit status is keyed to SHA so old reviews cannot overwrite newer status
+- Race condition: concurrency group prevents duplicate GitHub Action runs per PR; commit status is keyed to SHA so old reviews cannot overwrite newer status. **Note:** the concurrency group only operates at the GitHub Actions layer — if a webhook was already delivered before cancellation, the agent may briefly run a parallel review for the old SHA. Agent-side per-PR session dedup/cancellation is recommended as a future enhancement.
 - Timeout: a scheduled Action can mark stale pending statuses as "error" after N hours (agent down scenario)
 
 ## References
