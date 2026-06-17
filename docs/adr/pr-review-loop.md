@@ -277,12 +277,12 @@ When the `auto-fix` label is present, the webhook payload includes `__mode: auto
 - Fork PRs with `auto-fix` will still be reviewed but fixes cannot be pushed
 - Agent must implement iteration cap to prevent infinite push→review loops
 
-### Circuit Breaker (max_iterations=10)
+### Circuit Breaker (max_iterations=30)
 
-The workflow enforces a hard cap of 10 review cycles per PR. On each run, it counts how many `pending` statuses with context `"OpenAB PR Review"` exist across all commits in the PR. If the count reaches 10:
+The workflow enforces a hard cap of 30 review cycles per PR. On each run, it counts how many `pending` statuses with context `"OpenAB PR Review"` exist across all commits in the PR. If the count reaches 30:
 
 1. Adds `review-limit-reached` label to the PR
-2. Sets commit status to `error` with description "Circuit breaker: exceeded 10 review cycles"
+2. Sets commit status to `error` with description "Circuit breaker: exceeded 30 review cycles"
 3. Fails the workflow step
 
 The `review-limit-reached` label is checked in the job `if` condition — once applied, no further review runs will trigger. A maintainer can remove the label to reset the circuit breaker if needed.
