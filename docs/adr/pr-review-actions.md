@@ -111,12 +111,14 @@ The architecture supports a closed-loop review cycle:
                                               (re-triggers Action)
 ```
 
-When the agent identifies fixable issues (e.g. typos, missing docs, lint violations), it can optionally:
+By default, the agent **only reviews and reports findings** — it does not push fixes automatically. The auto-fix loop is only activated when a human (主人) explicitly requests it (e.g. "fix and push" or option 4️⃣ in the post-review menu).
 
-1. Fix the code directly on the PR branch
-2. Commit and push the fix
+When explicitly requested:
+
+1. Agent fixes the code directly on the PR branch
+2. Commits and pushes the fix
 3. The `synchronize` event re-triggers the workflow, starting a new review cycle
-4. Repeat until LGTM or a human intervenes
+4. Repeat until LGTM or max iterations reached
 
 ### Safeguards
 
