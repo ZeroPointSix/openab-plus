@@ -381,6 +381,7 @@ async fn main() -> anyhow::Result<()> {
             slack_idle,
         ));
         dispatchers.lock().unwrap().push(slack_dispatcher.clone());
+        let slack_ctl_registry = ctl_registry.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = slack::run_slack_adapter(
                 adapter,
@@ -396,7 +397,7 @@ async fn main() -> anyhow::Result<()> {
                 stt,
                 slack_shutdown_rx,
                 slack_dispatcher,
-                ctl_registry.clone(),
+                slack_ctl_registry,
             )
             .await
             {
