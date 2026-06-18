@@ -28,18 +28,19 @@ jobs:
 
           # Collect eligible open PRs (non-draft, no review-limit-reached label)
           # Include safe-to-review labeled PRs regardless of author_association
-          PRS=$(gh api --paginate "repos/${{ github.repository }}/pulls?state=open&per_page=50" \
-            --jq '[.[] | select(
+          # Note: --paginate with array jq emits one array per page; stream objects then collect
+          PRS=$(gh api --paginate "repos/${{ github.repository }}/pulls?state=open&per_page=100" \
+            --jq '.[] | select(
               .draft == false and
               (any(.labels[]; .name == "review-limit-reached") | not) and
               (
                 (.author_association | IN("OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR")) or
                 any(.labels[]; .name == "safe-to-review")
               )
-            ) | {number, sha: .head.sha, labels: [.labels[].name]}]')
+            ) | {number, sha: .head.sha, labels: [.labels[].name]}' | jq -s '.')
 
           TARGETS="[]"
-          for ROW in $(echo "$PRS" | jq -c '.[]'); do
+          while IFS= read -r ROW; do
             NUMBER=$(echo "$ROW" | jq -r '.number')
             SHA=$(echo "$ROW" | jq -r '.sha')
             LABELS=$(echo "$ROW" | jq -c '.labels')
@@ -74,7 +75,7 @@ jobs:
             # Trigger review: no status yet, or error (webhook failure), or stale pending
             echo "PR #${NUMBER}: needs review (state=${STATE:-none})"
             TARGETS=$(echo "$TARGETS" | jq --argjson row "$ROW" '. + [$row]')
-          done
+          done < <(echo "$PRS" | jq -c '.[]')
 
           echo "targets=$(echo "$TARGETS" | jq -c '.')" >> "$GITHUB_OUTPUT"
           echo "count=$(echo "$TARGETS" | jq 'length')" >> "$GITHUB_OUTPUT"
@@ -85,12 +86,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WEBHOOK_URL: ${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}
           BOT_UID: ${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}
+          TARGETS: ${{ steps.poll.outputs.targets }}
         run: |
           set -eo pipefail
 
-          TARGETS='${{ steps.poll.outputs.targets }}'
-
-          for ROW in $(echo "$TARGETS" | jq -c '.[]'); do
+          while IFS= read -r ROW; do
             NUMBER=$(echo "$ROW" | jq -r '.number')
             SHA=$(echo "$ROW" | jq -r '.sha')
             LABELS=$(echo "$ROW" | jq -c '.labels')
@@ -137,4 +137,4 @@ jobs:
             fi
 
             echo "PR #${NUMBER}: review triggered"
-          done
+          done < <(echo "$TARGETS" | jq -c '.[]')
