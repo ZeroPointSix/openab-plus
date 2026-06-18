@@ -5,6 +5,7 @@ on:
     paths:
       - 'Dockerfile*'
       - 'src/**'
+      - 'crates/**'
       - 'Cargo.*'
 
 jobs:
