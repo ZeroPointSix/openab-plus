@@ -75,6 +75,12 @@ pub fn spawn_server(
                 return;
             }
         };
+        // Restrict socket to owner only (defense-in-depth for shared hosts).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         info!(path = %path.display(), "control socket listening");
 
         loop {
