@@ -1,7 +1,10 @@
 name: PR Review
 
 on:
-  pull_request:
+  # pull_request_target runs in the base repo context, granting access to secrets
+  # even for fork PRs. This is safe because this workflow NEVER checks out or
+  # executes PR code — it only sets commit statuses and fires a Discord webhook.
+  pull_request_target:
     types: [opened, synchronize, ready_for_review, labeled]
 
 concurrency:
