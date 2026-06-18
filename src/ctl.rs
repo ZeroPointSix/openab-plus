@@ -29,6 +29,9 @@ pub struct Request {
     pub action: Action,
     pub key: String,
     pub value: Option<String>,
+    /// Target thread/channel ID — daemon uses this to route to the correct adapter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -52,8 +55,8 @@ pub struct Response {
 /// can access Discord/Slack adapters.
 #[async_trait::async_trait]
 pub trait CtlHandler: Send + Sync + 'static {
-    async fn handle_set(&self, key: &str, value: &str) -> Response;
-    async fn handle_get(&self, key: &str) -> Response;
+    async fn handle_set(&self, thread_id: Option<&str>, key: &str, value: &str) -> Response;
+    async fn handle_get(&self, thread_id: Option<&str>, key: &str) -> Response;
 }
 
 /// Start the control socket server. Call this from `openab run` startup.
@@ -103,9 +106,9 @@ async fn handle_conn(
         let resp = match req.action {
             Action::Set => {
                 let val = req.value.as_deref().unwrap_or("");
-                handler.handle_set(&req.key, val).await
+                handler.handle_set(req.thread_id.as_deref(), &req.key, val).await
             }
-            Action::Get => handler.handle_get(&req.key).await,
+            Action::Get => handler.handle_get(req.thread_id.as_deref(), &req.key).await,
         };
         let mut buf = serde_json::to_vec(&resp)?;
         buf.push(b'\n');
@@ -116,48 +119,67 @@ async fn handle_conn(
 
 // ─── Client (used by `openab set/get` subcommands) ──────────────────────────
 
+/// Thread registry: maps thread_id → platform name.
+/// Shared between the message dispatcher (writes) and the ctl handler (reads).
+pub type ThreadRegistry = Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>;
+
+/// Create an empty thread registry.
+pub fn new_registry() -> ThreadRegistry {
+    Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Register a thread→platform mapping. Called by adapters on message dispatch.
+pub async fn register_thread(registry: &ThreadRegistry, thread_id: &str, platform: &str) {
+    registry.write().await.insert(thread_id.to_string(), platform.to_string());
+}
+
 /// Concrete handler for `openab run` — dispatches to platform adapters.
 pub struct RuntimeHandler {
-    adapter: Arc<dyn ChatAdapter>,
+    /// Registered adapters by platform name.
+    adapters: std::collections::HashMap<String, Arc<dyn ChatAdapter>>,
+    /// thread_id → platform mapping. Populated by `openab run` when it dispatches messages.
+    registry: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
     shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>>,
 }
 
 impl RuntimeHandler {
     pub fn new(
-        adapter: Arc<dyn ChatAdapter>,
+        adapters: std::collections::HashMap<String, Arc<dyn ChatAdapter>>,
+        registry: Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>,
         shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>>,
     ) -> Self {
-        Self { adapter, shard }
+        Self { adapters, registry, shard }
     }
 
-    fn channel_ref() -> Option<ChannelRef> {
-        let channel_id = std::env::var("OPENAB_THREAD_ID")
-            .or_else(|_| std::env::var("OPENAB_CHANNEL_ID"))
-            .ok()?;
-        let platform = std::env::var("OPENAB_PLATFORM").unwrap_or_else(|_| "discord".into());
-        Some(ChannelRef {
-            platform,
-            channel_id,
-            thread_id: None,
-            parent_id: None,
-            origin_event_id: None,
-        })
+    /// Resolve which adapter to use for a given thread_id.
+    async fn resolve(&self, thread_id: Option<&str>) -> Option<(Arc<dyn ChatAdapter>, String)> {
+        let tid = thread_id?;
+        let platform = self.registry.read().await.get(tid).cloned()?;
+        let adapter = self.adapters.get(&platform)?.clone();
+        Some((adapter, tid.to_string()))
     }
 }
 
 #[async_trait::async_trait]
 impl CtlHandler for RuntimeHandler {
-    async fn handle_set(&self, key: &str, value: &str) -> Response {
+    async fn handle_set(&self, thread_id: Option<&str>, key: &str, value: &str) -> Response {
         match key {
             "thread.name" => {
-                let Some(channel) = Self::channel_ref() else {
+                let Some((adapter, tid)) = self.resolve(thread_id).await else {
                     return Response {
                         ok: false,
-                        message: "OPENAB_THREAD_ID or OPENAB_CHANNEL_ID not set".into(),
+                        message: "unknown thread (use --thread or register via message dispatch)".into(),
                         value: None,
                     };
                 };
-                match self.adapter.rename_thread(&channel, value).await {
+                let channel = ChannelRef {
+                    platform: String::new(),
+                    channel_id: tid,
+                    thread_id: None,
+                    parent_id: None,
+                    origin_event_id: None,
+                };
+                match adapter.rename_thread(&channel, value).await {
                     Ok(()) => Response {
                         ok: true,
                         message: format!("thread renamed to: {value}"),
@@ -171,10 +193,10 @@ impl CtlHandler for RuntimeHandler {
                 }
             }
             "thread.archived" => {
-                let Some(channel) = Self::channel_ref() else {
+                let Some((adapter, tid)) = self.resolve(thread_id).await else {
                     return Response {
                         ok: false,
-                        message: "OPENAB_THREAD_ID or OPENAB_CHANNEL_ID not set".into(),
+                        message: "unknown thread (use --thread or register via message dispatch)".into(),
                         value: None,
                     };
                 };
@@ -189,7 +211,14 @@ impl CtlHandler for RuntimeHandler {
                         };
                     }
                 };
-                match self.adapter.archive_thread(&channel, archived).await {
+                let channel = ChannelRef {
+                    platform: String::new(),
+                    channel_id: tid,
+                    thread_id: None,
+                    parent_id: None,
+                    origin_event_id: None,
+                };
+                match adapter.archive_thread(&channel, archived).await {
                     Ok(()) => Response {
                         ok: true,
                         message: format!(
@@ -239,7 +268,7 @@ impl CtlHandler for RuntimeHandler {
         }
     }
 
-    async fn handle_get(&self, key: &str) -> Response {
+    async fn handle_get(&self, _thread_id: Option<&str>, key: &str) -> Response {
         match key {
             "thread.name" | "thread.archived" | "agent.status" => Response {
                 ok: false,
@@ -289,12 +318,14 @@ mod tests {
             action: Action::Set,
             key: "thread.name".into(),
             value: Some("hello".into()),
+            thread_id: Some("123".into()),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.action, Action::Set);
         assert_eq!(parsed.key, "thread.name");
         assert_eq!(parsed.value.as_deref(), Some("hello"));
+        assert_eq!(parsed.thread_id.as_deref(), Some("123"));
     }
 
     #[tokio::test]
@@ -302,14 +333,14 @@ mod tests {
         struct MockHandler;
         #[async_trait::async_trait]
         impl CtlHandler for MockHandler {
-            async fn handle_set(&self, key: &str, value: &str) -> Response {
+            async fn handle_set(&self, thread_id: Option<&str>, key: &str, value: &str) -> Response {
                 Response {
                     ok: true,
-                    message: format!("{key} = {value}"),
+                    message: format!("{key} = {value} (thread: {})", thread_id.unwrap_or("none")),
                     value: None,
                 }
             }
-            async fn handle_get(&self, key: &str) -> Response {
+            async fn handle_get(&self, _thread_id: Option<&str>, key: &str) -> Response {
                 Response {
                     ok: true,
                     message: String::new(),
@@ -333,17 +364,19 @@ mod tests {
             action: Action::Set,
             key: "thread.name".into(),
             value: Some("hello world".into()),
+            thread_id: Some("999".into()),
         })
         .await
         .unwrap();
         assert!(resp.ok);
-        assert_eq!(resp.message, "thread.name = hello world");
+        assert_eq!(resp.message, "thread.name = hello world (thread: 999)");
 
         // Test get
         let resp = send_request(&Request {
             action: Action::Get,
             key: "thread.name".into(),
             value: None,
+            thread_id: None,
         })
         .await
         .unwrap();

@@ -99,11 +99,17 @@ enum Commands {
         key: String,
         /// Value to set
         value: String,
+        /// Target thread/channel ID
+        #[arg(long)]
+        thread: Option<String>,
     },
     /// Get a runtime value
     Get {
         /// Key to get (e.g. thread.name)
         key: String,
+        /// Target thread/channel ID
+        #[arg(long)]
+        thread: Option<String>,
     },
 }
 
@@ -129,11 +135,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::AgentcoreBridge { runtime_arn, region, command } => {
             return acp::agentcore::run_bridge(&runtime_arn, &region, &command).await;
         }
-        Commands::Set { key, value } => {
+        Commands::Set { key, value, thread } => {
             let resp = ctl::send_request(&ctl::Request {
                 action: ctl::Action::Set,
                 key,
                 value: Some(value),
+                thread_id: thread.or_else(|| std::env::var("OPENAB_THREAD_ID").ok()),
             })
             .await?;
             if resp.ok {
@@ -144,11 +151,12 @@ async fn main() -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        Commands::Get { key } => {
+        Commands::Get { key, thread } => {
             let resp = ctl::send_request(&ctl::Request {
                 action: ctl::Action::Get,
                 key,
                 value: None,
+                thread_id: thread.or_else(|| std::env::var("OPENAB_THREAD_ID").ok()),
             })
             .await?;
             if resp.ok {
@@ -300,19 +308,27 @@ async fn main() -> anyhow::Result<()> {
     let ctl_shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>> =
         Arc::new(std::sync::OnceLock::new());
 
+    // Thread registry: thread_id → platform. Populated on message dispatch.
+    let ctl_registry = ctl::new_registry();
+
     // Spawn control socket server for `openab set/get` IPC
-    let ctl_handle = if let Some(ref adapter) = shared_discord_adapter {
-        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
-            adapter.clone(),
-            ctl_shard.clone(),
-        ))))
-    } else if let Some(ref adapter) = shared_slack_adapter {
-        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
-            adapter.clone() as Arc<dyn adapter::ChatAdapter>,
-            ctl_shard.clone(),
-        ))))
-    } else {
-        None
+    let ctl_handle = {
+        let mut adapters = std::collections::HashMap::new();
+        if let Some(ref a) = shared_discord_adapter {
+            adapters.insert("discord".into(), a.clone());
+        }
+        if let Some(ref a) = shared_slack_adapter {
+            adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
+        if adapters.is_empty() {
+            None
+        } else {
+            Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
+                adapters,
+                ctl_registry.clone(),
+                ctl_shard.clone(),
+            ))))
+        }
     };
 
     // Validate cronjob config at startup (fail-fast on bad cron expressions or timezones)
