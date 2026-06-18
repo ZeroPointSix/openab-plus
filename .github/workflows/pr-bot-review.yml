@@ -31,10 +31,10 @@ jobs:
           PRS=$(gh api --paginate "repos/${{ github.repository }}/pulls?state=open&per_page=50" \
             --jq '[.[] | select(
               .draft == false and
-              ([.labels[].name] | contains(["review-limit-reached"]) | not) and
+              (any(.labels[]; .name == "review-limit-reached") | not) and
               (
                 (.author_association | IN("OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR")) or
-                ([.labels[].name] | contains(["safe-to-review"]))
+                any(.labels[]; .name == "safe-to-review")
               )
             ) | {number, sha: .head.sha, labels: [.labels[].name]}]')
 
@@ -123,7 +123,7 @@ jobs:
             # Trigger Discord webhook
             PR_URL="https://github.com/${{ github.repository }}/pull/${NUMBER}"
             MODE=""
-            if echo "$LABELS" | jq -e 'contains(["auto-fix"])' > /dev/null 2>&1; then
+            if echo "$LABELS" | jq -e 'any(. == "auto-fix")' > /dev/null 2>&1; then
               MODE="\n__mode: auto-fix__"
             fi
             PAYLOAD=$(printf '<@%s> review %s\n\n__commit: %s__%s' "$BOT_UID" "$PR_URL" "$SHA" "$MODE" | jq -Rs '{content: .}')
