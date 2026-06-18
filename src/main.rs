@@ -371,6 +371,26 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Spawn cron scheduler (background task)
+    // Spawn embedded webhook server when gateway adapters are compiled in (unified mode).
+    // In unified mode, platform webhooks hit this axum server directly → Dispatcher.submit(),
+    // bypassing the WebSocket hop of the two-process model.
+    #[cfg(any(
+        feature = "telegram",
+        feature = "line",
+        feature = "feishu",
+        feature = "googlechat",
+        feature = "wecom",
+        feature = "teams",
+    ))]
+    let _unified_handle = {
+        // TODO(Phase 1): Wire each compiled-in adapter's webhook handler to axum routes
+        // and call Dispatcher.submit() directly instead of going through WS gateway.
+        // For now, the feature compiles the gateway crate (making the code available)
+        // but the full runtime integration (axum server, route registration, direct dispatch)
+        // will be completed in a follow-up PR.
+        None::<tokio::task::JoinHandle<()>>
+    };
+
     let usercron_path = if cfg.cron.usercron_enabled {
         cfg.cron.usercron_path.as_ref().map(|p| {
             let path = std::path::PathBuf::from(p);
