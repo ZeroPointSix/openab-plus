@@ -10,7 +10,7 @@ concurrency:
 
 permissions:
   statuses: write
-  pull-requests: write
+  issues: write
 
 jobs:
   request-review:
@@ -24,6 +24,7 @@ jobs:
         github.event.pull_request.author_association) ||
       contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Circuit breaker — max 30 review cycles
         id: breaker
@@ -31,12 +32,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
-          COUNT=$(gh api "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits" \
-            --jq '.[].sha' | xargs -I{} gh api "repos/${{ github.repository }}/commits/{}/statuses" \
-            --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length' \
-            | paste -sd+ | bc)
-          echo "count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
-          if [ "${COUNT:-0}" -ge 30 ]; then
+          SHAS=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits" \
+            --jq '.[].sha')
+          if [ -z "$SHAS" ]; then
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          COUNT=0
+          for SHA in $SHAS; do
+            N=$(gh api --paginate "repos/${{ github.repository }}/commits/${SHA}/statuses" \
+              --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length')
+            COUNT=$((COUNT + N))
+          done
+          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
+          if [ "${COUNT}" -ge 30 ]; then
             gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" \
               --method POST -f "labels[]=review-limit-reached"
             gh api "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
@@ -48,6 +57,7 @@ jobs:
           fi
 
       - name: Set pending status
+        id: pending
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -59,6 +69,7 @@ jobs:
             -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Trigger review via Discord webhook
+        id: webhook
         env:
           HAS_AUTOFIX: ${{ contains(toJSON(github.event.pull_request.labels.*.name), 'auto-fix') }}
           WEBHOOK_URL: ${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}
@@ -71,12 +82,14 @@ jobs:
           if [ "$HAS_AUTOFIX" = "true" ]; then
             MODE="\n__mode: auto-fix__"
           fi
-          curl -sf -o /dev/null -X POST "$WEBHOOK_URL" \
+          PAYLOAD=$(jq -n --arg content "<@${BOT_UID}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}" \
+            '{"content": $content}')
+          curl -sS --fail-with-body --max-time 10 -X POST "$WEBHOOK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"content\": \"<@${BOT_UID}> review ${PR_URL}\n\n__commit: ${SHA}__${MODE}\"}"
+            -d "$PAYLOAD"
 
       - name: Mark error on Discord failure
-        if: failure()
+        if: failure() && steps.breaker.outcome == 'success' && steps.webhook.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

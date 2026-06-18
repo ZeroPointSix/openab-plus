@@ -9,7 +9,7 @@
 OpenAB's PR review workflow currently relies on manual triggers — a human @mentions the review bot in Discord to initiate a review. This works well for ad-hoc reviews but does not scale for repositories with frequent PR activity. Maintainers want automated PR reviews that:
 
 1. Trigger automatically when a PR is opened or updated
-2. Show review status as a GitHub Check (🟡 pending → ✅/❌ complete)
+2. Show review status as a commit status (🟡 pending → ✅/❌ complete)
 3. Preserve the full review process in a Discord thread for auditability
 4. Post a single aggregated comment on the PR (hiding previous comments)
 5. Work with the existing OpenAB agent running on ECS Fargate (long-lived)
@@ -37,7 +37,18 @@ Discord webhook messages are flagged `author.bot == true` at the API level. Open
 1. Set `allow_bot_messages: "mentions"` — allows bot messages that @mention the agent
 2. Add the webhook's author ID to `trusted_bot_ids`
 
-These settings are configured in the OpenAB ECS task definition's environment variables (e.g. `DISCORD_ALLOW_BOT_MESSAGES=mentions`) or the agent's runtime configuration file.
+These settings are configured in the OpenAB ECS task definition's environment variables or the agent's runtime configuration file.
+
+**Example (ECS environment variable):**
+```
+DISCORD_ALLOW_BOT_MESSAGES=mentions
+```
+
+**Example (config.toml):**
+```toml
+[discord]
+allow_bot_messages = "mentions"
+```
 
 Without this, the webhook @mention will be ignored and reviews will never trigger.
 
@@ -45,7 +56,7 @@ Without this, the webhook @mention will be ignored and reviews will never trigge
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  GitHub: PR opened / synchronize / ready_for_review                 │
+│  GitHub: PR opened / synchronize / ready_for_review / labeled        │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │ triggers
                             ▼
@@ -124,7 +135,7 @@ When explicitly requested:
 
 ### Safeguards
 
-- **Max iterations** — agent enforces a cap (e.g. 3 cycles) to prevent infinite loops
+- **Max iterations** — agent enforces a soft cap (3 cycles per auto-fix request) to prevent runaway fixes within a single session. The workflow's circuit breaker (30 cycles) is a hard cap across the entire PR lifetime, catching edge cases where the agent cap is bypassed (e.g. multiple maintainer requests).
 - **Human-only issues** — if findings require design decisions or are ambiguous, the agent requests human input instead of auto-fixing
 - **Commit attribution** — auto-fix commits are authored by `chaodu-agent` with a clear prefix (e.g. `fix(review):`) so the loop is auditable
 
@@ -200,11 +211,13 @@ gh api repos/OWNER/REPO/statuses/SHA \
 
 Add `OpenAB PR Review` as a required status check in branch protection rules. This enforces that PRs cannot merge until the review completes successfully.
 
+**Setup:** Repository Settings → Branches → Branch protection rules → Edit `main` → Require status checks to pass before merging → Add `OpenAB PR Review` to the required checks list.
+
 ## Token & Permissions
 
 | Secret | Purpose | Minimum Permission |
 |--------|---------|-------------------|
-| `GITHUB_TOKEN` (Actions) | Set pending status + circuit breaker label | `statuses: write` + `pull-requests: write` |
+| `GITHUB_TOKEN` (Actions) | Set pending status + circuit breaker label | `statuses: write` + `issues: write` |
 | `OAB_REVIEW_ACTION_WEBHOOK` | Post review request to Discord channel | Webhook URL (channel-scoped) |
 | Agent's `gh` auth (PAT) | Post comment + update status + push auto-fix | `repo` (classic) or `contents: write` + `pull_requests: write` + `commit statuses: write` (fine-grained) |
 
@@ -232,13 +245,13 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Every PR push triggers a review (may want to filter by label or draft status)
 - If OpenAB agent is down, status stays "pending" indefinitely (need timeout/alerting)
 - Webhook messages lack user identity — OpenAB must allow webhook-originated messages
-- Fork PRs: `OAB_REVIEW_ACTION_WEBHOOK` and `OAB_REVIEW_ACTION_BOT_UID` secrets are not available to workflows triggered by fork PRs (GitHub security policy). The webhook step will fail and the error fallback will mark the status as "error". This is acceptable — fork PRs can still be reviewed manually.
+- Fork PRs: `OAB_REVIEW_ACTION_WEBHOOK` and `OAB_REVIEW_ACTION_BOT_UID` secrets are not available to workflows triggered by fork PRs (GitHub security policy). The webhook step will fail, and since fork PRs receive a read-only `GITHUB_TOKEN`, the error fallback **cannot** write commit statuses either — the workflow will fail silently with no status update. Fork PRs can still be reviewed manually via Discord @mention. Note: the `safe-to-review` label does **not** grant secrets access to fork PRs — it only bypasses the `author_association` gate for same-repo PRs.
 
 **Mitigations:**
 - Filter: skip draft PRs and untrusted authors — only `OWNER`, `MEMBER`, `COLLABORATOR`, and `CONTRIBUTOR` (returning contributor with merged PR) trigger automatic review. First-time contributors and unknown authors are skipped; maintainers can manually @mention the agent to review those PRs.
 - Debounce: `concurrency` group with `cancel-in-progress: true` — new push cancels in-flight review, only latest SHA gets reviewed
-- Error fallback: `if: failure()` step marks status as "error" so it never stays pending on workflow failure
-- Race condition: concurrency group prevents duplicate GitHub Action runs per PR; commit status is keyed to SHA so old reviews cannot overwrite newer status. **Note:** the concurrency group only operates at the GitHub Actions layer — if a webhook was already delivered before cancellation, the agent may briefly run a parallel review for the old SHA. Agent-side per-PR session dedup/cancellation is recommended as a future enhancement.
+- Error fallback: a scoped `if: failure()` step marks status as "error" when the Discord webhook step specifically fails (not triggered by circuit breaker), so status never stays pending on webhook failure
+- Race condition: concurrency group prevents duplicate GitHub Action runs per PR; commit status is keyed to SHA so old reviews cannot overwrite newer status. **Note:** the concurrency group only operates at the GitHub Actions layer — if a webhook was already delivered before cancellation, the agent may receive a stale request. The agent **must** implement SHA validation (Layer 2 above) to skip stale requests and avoid wasted compute or comment race conditions.
 - Timeout: a scheduled Action can mark stale pending statuses as "error" after N hours (agent down scenario)
 
 ## Safeguards
@@ -272,14 +285,16 @@ When the `auto-fix` label is present, the webhook payload includes `__mode: auto
 2. Fix all findings → push commit
 3. Re-review until LGTM or max iterations reached (agent-side cap, recommended: 3)
 
+When the auto-fix loop completes (LGTM or cap reached), the agent removes the `auto-fix` label to prevent subsequent pushes from re-entering the fix loop.
+
 **Constraints:**
 - Only effective on same-repo branches (agent needs push access)
 - Fork PRs with `auto-fix` will still be reviewed but fixes cannot be pushed
 - Agent must implement iteration cap to prevent infinite push→review loops
 
-### Circuit Breaker (max_iterations=30)
+### Circuit Breaker (workflow hard cap: 30)
 
-The workflow enforces a hard cap of 30 review cycles per PR. On each run, it counts how many `pending` statuses with context `"OpenAB PR Review"` exist across all commits in the PR. If the count reaches 30:
+The workflow enforces a hard cap of 30 review cycles per PR (across all triggers over the PR's lifetime). This is distinct from the agent-side soft cap of 3 cycles per auto-fix session — the workflow cap catches edge cases where multiple auto-fix requests accumulate. On each run, it counts how many `pending` statuses with context `"OpenAB PR Review"` exist across all commits in the PR. If the count reaches 30:
 
 1. Adds `review-limit-reached` label to the PR
 2. Sets commit status to `error` with description "Circuit breaker: exceeded 30 review cycles"
