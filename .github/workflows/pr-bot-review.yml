@@ -1,102 +1,131 @@
-name: PR Review
+name: PR Review (Scheduled)
 
 on:
-  # pull_request_target runs in the base repo context, granting access to secrets
-  # even for fork PRs. This is safe because this workflow NEVER checks out or
-  # executes PR code — it only sets commit statuses and fires a Discord webhook.
-  pull_request_target:
-    types: [opened, synchronize, ready_for_review, labeled]
-
-concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
 
 permissions:
   statuses: write
   issues: write
+  pull-requests: read
 
 jobs:
-  request-review:
-    if: >-
-      !github.event.pull_request.draft &&
-      !contains(toJSON(github.event.pull_request.labels.*.name), 'review-limit-reached') &&
-      (github.event.action != 'labeled' ||
-       github.event.label.name == 'safe-to-review' ||
-       github.event.label.name == 'auto-fix') &&
-      (contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'),
-        github.event.pull_request.author_association) ||
-      contains(toJSON(github.event.pull_request.labels.*.name), 'safe-to-review'))
+  poll-and-review:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Circuit breaker — max 30 review cycles
-        id: breaker
+      - name: Find PRs needing review
+        id: poll
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eo pipefail
-          SHAS=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/commits" \
-            --jq '.[].sha')
-          if [ -z "$SHAS" ]; then
-            echo "count=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          COUNT=0
-          for SHA in $SHAS; do
-            N=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
-              --paginate --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length' \
-              | awk '{s+=$1} END {print s+0}')
-            COUNT=$((COUNT + N))
+
+          # Collect eligible open PRs (non-draft, no review-limit-reached label)
+          PRS=$(gh api --paginate "repos/${{ github.repository }}/pulls?state=open&per_page=50" \
+            --jq '[.[] | select(
+              .draft == false and
+              (.author_association | IN("OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR")) and
+              ([.labels[].name] | contains(["review-limit-reached"]) | not)
+            ) | {number, sha: .head.sha, labels: [.labels[].name]}]')
+
+          TARGETS="[]"
+          for ROW in $(echo "$PRS" | jq -c '.[]'); do
+            NUMBER=$(echo "$ROW" | jq -r '.number')
+            SHA=$(echo "$ROW" | jq -r '.sha')
+            LABELS=$(echo "$ROW" | jq -c '.labels')
+
+            # Get latest status for this SHA with our context
+            STATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
+              --jq '[.[] | select(.context == "OpenAB PR Review")] | sort_by(.created_at) | last | .state // empty')
+
+            # Skip if still pending, UNLESS pending > 30 min (stale)
+            if [ "$STATE" = "pending" ]; then
+              PENDING_AT=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
+                --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | sort_by(.created_at) | last | .created_at // empty')
+              if [ -n "$PENDING_AT" ]; then
+                PENDING_TS=$(date -d "$PENDING_AT" +%s 2>/dev/null || date -u +%s)
+                NOW_TS=$(date -u +%s)
+                ELAPSED=$(( NOW_TS - PENDING_TS ))
+                if [ "$ELAPSED" -lt 1800 ]; then
+                  echo "PR #${NUMBER}: still pending (${ELAPSED}s), skipping"
+                  continue
+                fi
+                echo "PR #${NUMBER}: pending stale (${ELAPSED}s > 30m), re-triggering"
+              fi
+            fi
+
+            # Skip if already reviewed this exact SHA with success (no new commits)
+            if [ "$STATE" = "success" ]; then
+              echo "PR #${NUMBER}: already LGTM on HEAD, skipping"
+              continue
+            fi
+
+            # Trigger review: no status yet, or failure/error (new push or needs re-review)
+            echo "PR #${NUMBER}: needs review (state=${STATE:-none})"
+            TARGETS=$(echo "$TARGETS" | jq --argjson row "$ROW" '. + [$row]')
           done
-          echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
-          if [ "${COUNT}" -ge 30 ]; then
-            gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" \
-              --method POST -f "labels[]=review-limit-reached"
-            gh api "repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}" \
-              -f state="error" \
-              -f context="OpenAB PR Review" \
-              -f description="Circuit breaker: exceeded 30 review cycles"
-            echo "::error::Circuit breaker triggered after $COUNT review cycles"
-            exit 1
-          fi
 
-      - name: Set pending status
-        id: pending
+          echo "targets=$(echo "$TARGETS" | jq -c '.')" >> "$GITHUB_OUTPUT"
+          echo "count=$(echo "$TARGETS" | jq 'length')" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger reviews
+        if: fromJSON(steps.poll.outputs.count) > 0
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eo pipefail
-          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
-            -f state="pending" \
-            -f context="OpenAB PR Review" \
-            -f description="Review in progress..." \
-            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-      - name: Trigger review via Discord webhook
-        id: webhook
-        env:
-          HAS_AUTOFIX: ${{ contains(toJSON(github.event.pull_request.labels.*.name), 'auto-fix') }}
           WEBHOOK_URL: ${{ secrets.OAB_REVIEW_ACTION_WEBHOOK }}
           BOT_UID: ${{ secrets.OAB_REVIEW_ACTION_BOT_UID }}
         run: |
           set -eo pipefail
-          PR_URL="https://github.com/${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
-          SHA="${{ github.event.pull_request.head.sha }}"
-          MODE=""
-          if [ "$HAS_AUTOFIX" = "true" ]; then
-            MODE="\n__mode: auto-fix__"
-          fi
-          PAYLOAD=$(printf '<@%s> review %s\n\n__commit: %s__%s' "$BOT_UID" "$PR_URL" "$SHA" "$MODE" | jq -Rs '{content: .}')
-          curl -sS --fail-with-body --max-time 10 -X POST "$WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD"
 
-      - name: Mark error on Discord failure
-        if: failure() && steps.breaker.outcome == 'success' && steps.webhook.outcome == 'failure'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }} \
-            -f state="error" \
-            -f context="OpenAB PR Review" \
-            -f description="Failed to trigger review — check workflow logs"
+          TARGETS='${{ steps.poll.outputs.targets }}'
+
+          for ROW in $(echo "$TARGETS" | jq -c '.[]'); do
+            NUMBER=$(echo "$ROW" | jq -r '.number')
+            SHA=$(echo "$ROW" | jq -r '.sha')
+            LABELS=$(echo "$ROW" | jq -c '.labels')
+
+            # Circuit breaker check
+            COUNT=$(gh api --paginate "repos/${{ github.repository }}/pulls/${NUMBER}/commits" \
+              --jq '.[].sha' | while read -r C_SHA; do
+                gh api "repos/${{ github.repository }}/commits/${C_SHA}/statuses" \
+                  --paginate --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length'
+              done | awk '{s+=$1} END {print s+0}')
+
+            if [ "${COUNT}" -ge 30 ]; then
+              gh api "repos/${{ github.repository }}/issues/${NUMBER}/labels" \
+                --method POST -f "labels[]=review-limit-reached"
+              gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+                -f state="error" \
+                -f context="OpenAB PR Review" \
+                -f description="Circuit breaker: exceeded 30 review cycles"
+              echo "::error::PR #${NUMBER}: circuit breaker triggered"
+              continue
+            fi
+
+            # Set pending status
+            gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+              -f state="pending" \
+              -f context="OpenAB PR Review" \
+              -f description="Review in progress..." \
+              -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+            # Trigger Discord webhook
+            PR_URL="https://github.com/${{ github.repository }}/pull/${NUMBER}"
+            MODE=""
+            if echo "$LABELS" | jq -e 'contains(["auto-fix"])' > /dev/null 2>&1; then
+              MODE="\n__mode: auto-fix__"
+            fi
+            PAYLOAD=$(printf '<@%s> review %s\n\n__commit: %s__%s' "$BOT_UID" "$PR_URL" "$SHA" "$MODE" | jq -Rs '{content: .}')
+            if ! curl -sS --fail-with-body --max-time 10 -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" -d "$PAYLOAD"; then
+              gh api "repos/${{ github.repository }}/statuses/${SHA}" \
+                -f state="error" \
+                -f context="OpenAB PR Review" \
+                -f description="Failed to trigger review — webhook error"
+              echo "::warning::PR #${NUMBER}: webhook failed"
+            fi
+
+            echo "PR #${NUMBER}: review triggered"
+          done
