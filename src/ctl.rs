@@ -64,7 +64,14 @@ pub trait CtlHandler: Send + Sync + 'static {
 pub fn spawn_server(
     handler: std::sync::Arc<dyn CtlHandler>,
 ) -> tokio::task::JoinHandle<()> {
-    let path = socket_path();
+    spawn_server_at(socket_path(), handler)
+}
+
+/// Start the control socket server at a specific path.
+pub fn spawn_server_at(
+    path: PathBuf,
+    handler: std::sync::Arc<dyn CtlHandler>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Remove stale socket file
         let _ = std::fs::remove_file(&path);
@@ -291,7 +298,11 @@ impl CtlHandler for RuntimeHandler {
 }
 
 pub async fn send_request(req: &Request) -> anyhow::Result<Response> {
-    let path = socket_path();
+    send_request_to(&socket_path(), req).await
+}
+
+/// Send a request to a specific socket path.
+pub async fn send_request_to(path: &PathBuf, req: &Request) -> anyhow::Result<Response> {
     let stream = UnixStream::connect(&path).await.map_err(|e| {
         anyhow::anyhow!(
             "cannot connect to openab at {}: {} (is `openab run` running?)",
@@ -358,15 +369,14 @@ mod tests {
         // Use a temp path to avoid conflicts
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("test.sock");
-        std::env::set_var("OPENAB_SOCK", sock.to_str().unwrap());
 
         let handler = std::sync::Arc::new(MockHandler);
-        let server = spawn_server(handler);
+        let server = spawn_server_at(sock.clone(), handler);
         // Give server a moment to bind
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Test set
-        let resp = send_request(&Request {
+        let resp = send_request_to(&sock, &Request {
             action: Action::Set,
             key: "thread.name".into(),
             value: Some("hello world".into()),
@@ -378,7 +388,7 @@ mod tests {
         assert_eq!(resp.message, "thread.name = hello world (thread: 999)");
 
         // Test get
-        let resp = send_request(&Request {
+        let resp = send_request_to(&sock, &Request {
             action: Action::Get,
             key: "thread.name".into(),
             value: None,
@@ -390,6 +400,5 @@ mod tests {
         assert_eq!(resp.value.as_deref(), Some("val-of-thread.name"));
 
         server.abort();
-        std::env::remove_var("OPENAB_SOCK");
     }
 }
