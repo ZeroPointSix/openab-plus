@@ -666,6 +666,18 @@ impl ChatAdapter for SlackAdapter {
         Ok(())
     }
 
+    async fn rename_thread(&self, channel: &ChannelRef, title: &str) -> Result<()> {
+        // Slack conversations.rename works on channels, not message threads.
+        // For thread-based conversations, there's no rename API.
+        let channel_id = channel.thread_id.as_deref().unwrap_or(&channel.channel_id);
+        let body = serde_json::json!({
+            "channel": channel_id,
+            "name": title,
+        });
+        self.api_post("conversations.rename", body).await?;
+        Ok(())
+    }
+
     async fn set_status(&self, channel: &ChannelRef, status: &str) -> Result<()> {
         let thread_ts = channel.thread_id.clone().unwrap_or_default();
         let body = build_set_status_body(&channel.channel_id, &thread_ts, status);
@@ -720,6 +732,7 @@ pub async fn run_slack_adapter(
     stt_config: SttConfig,
     mut shutdown_rx: watch::Receiver<bool>,
     dispatcher: Arc<crate::dispatch::Dispatcher>,
+    ctl_registry: crate::ctl::ThreadRegistry,
 ) -> Result<()> {
     let bot_token = adapter.bot_token().to_string();
     let bot_turns = Arc::new(tokio::sync::Mutex::new(BotTurnTracker::new(max_bot_turns)));
@@ -829,6 +842,7 @@ pub async fn run_slack_adapter(
                                                 let allowed_users = allowed_users.clone();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
+                                                let ctl_registry = ctl_registry.clone();
                                                 let team_id = envelope["payload"]["team_id"]
                                                     .as_str()
                                                     .unwrap_or("")
@@ -845,6 +859,7 @@ pub async fn run_slack_adapter(
                                                         &allowed_users,
                                                         &stt_config,
                                                         &dispatcher,
+                                                        &ctl_registry,
                                                     )
                                                     .await;
                                                 });
@@ -1080,6 +1095,7 @@ pub async fn run_slack_adapter(
                                                 let allowed_users = allowed_users.clone();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
+                                                let ctl_registry = ctl_registry.clone();
                                                 tokio::spawn(async move {
                                                     handle_message(
                                                         &event,
@@ -1092,6 +1108,7 @@ pub async fn run_slack_adapter(
                                                         &allowed_users,
                                                         &stt_config,
                                                         &dispatcher,
+                                                        &ctl_registry,
                                                     )
                                                     .await;
                                                 });
@@ -1184,6 +1201,7 @@ async fn handle_message(
     allowed_users: &HashSet<String>,
     stt_config: &SttConfig,
     dispatcher: &Arc<crate::dispatch::Dispatcher>,
+    ctl_registry: &crate::ctl::ThreadRegistry,
 ) {
     let channel_id = match event["channel"].as_str() {
         Some(ch) => ch.to_string(),
@@ -1529,6 +1547,9 @@ async fn handle_message(
         other_bot_present,
         recipient: stream_recipient,
     };
+    // Register thread for ctl routing
+    let ctl_thread_id = thread_channel.thread_id.as_deref().unwrap_or(&thread_channel.channel_id);
+    crate::ctl::register_thread(ctl_registry, ctl_thread_id, "slack").await;
     if let Err(e) = dispatcher
         .submit(thread_key, thread_channel, adapter_dyn, buf_msg)
         .await

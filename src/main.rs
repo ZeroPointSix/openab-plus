@@ -396,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
                 stt,
                 slack_shutdown_rx,
                 slack_dispatcher,
+                ctl_registry.clone(),
             )
             .await
             {
@@ -580,6 +581,7 @@ async fn main() -> anyhow::Result<()> {
             reminder_store: reminder_store.clone(),
             scheduled_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
             ctl_shard: ctl_shard.clone(),
+            ctl_registry: ctl_registry.clone(),
         };
 
         let intents = GatewayIntents::GUILD_MESSAGES

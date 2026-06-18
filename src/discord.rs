@@ -248,6 +248,8 @@ pub struct Handler {
     pub scheduled_ids: tokio::sync::Mutex<std::collections::HashSet<String>>,
     /// Shared slot for ShardMessenger — set on ready, used by ctl server for agent.status.
     pub ctl_shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>>,
+    /// Thread registry for ctl routing (thread_id → platform).
+    pub ctl_registry: crate::ctl::ThreadRegistry,
 }
 
 impl Handler {
@@ -874,6 +876,7 @@ impl EventHandler for Handler {
 
         let dispatcher = self.dispatcher.clone();
         let stt_cfg = self.stt_config.clone();
+        let ctl_registry = self.ctl_registry.clone();
 
         tokio::spawn(async move {
             // Best-effort echo before the agent reply so the user can verify STT.
@@ -902,6 +905,7 @@ impl EventHandler for Handler {
                 other_bot_present: other_bot_present_flag,
                 recipient: None, // Slack-only (assistant mode); N/A for Discord
             };
+            crate::ctl::register_thread(&ctl_registry, &thread_channel.channel_id, "discord").await;
             if let Err(e) = dispatcher
                 .submit(thread_key, thread_channel, adapter, buf_msg)
                 .await
