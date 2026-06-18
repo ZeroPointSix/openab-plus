@@ -1,7 +1,7 @@
 # ADR: OpenAB PR Review Loop
 
-**Status:** Proposed  
-**Date:** 2026-06-17  
+**Status:** Amended  
+**Date:** 2026-06-18  
 **Author:** chaodu-agent
 
 ## Context
@@ -52,24 +52,74 @@ allow_bot_messages = "mentions"
 
 Without this, the webhook @mention will be ignored and reviews will never trigger.
 
+## Amendment: Reactive → Scheduled Polling (2026-06-18)
+
+### Problem with Reactive Mode
+
+The original reactive design (`pull_request_target` trigger) fires a webhook on every push. While GitHub Actions' `concurrency` group cancels in-flight runs, once a Discord webhook is delivered it cannot be recalled. This causes:
+
+1. Rapid pushes spawn multiple concurrent agent review sessions in Discord
+2. Agent callbacks race — stale reviews may overwrite fresh status
+3. Wasted compute and API tokens on superseded commits
+
+### Solution: Scheduled Polling
+
+Replace the event-driven trigger with a `schedule` cron job that polls every 5 minutes:
+
+```yaml
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+```
+
+**Polling logic per open PR:**
+
+| HEAD commit status | Action |
+|-------------------|--------|
+| `pending` | **Skip** — previous review still in progress |
+| `success` | **Skip** — already reviewed this SHA |
+| `failure` / `error` / none | **Trigger** — needs (re-)review |
+
+This guarantees **at most one in-flight review per PR** at any time, regardless of push frequency.
+
+### Trade-offs vs Reactive Mode
+
+| Aspect | Reactive (old) | Scheduled (new) |
+|--------|---------------|-----------------|
+| Latency | Immediate on push | Up to 5 min delay |
+| Duplicate reviews | Possible (webhook already sent) | Impossible (skip if pending) |
+| GitHub Actions minutes | Per-push (many short runs) | Fixed (one run per 5 min) |
+| Complexity | Simple trigger | Polling + state check logic |
+
+### Why This Is Acceptable
+
+- 5-minute latency is fine for code review (not user-facing)
+- Eliminates all duplicate-review bugs without agent-side dedup
+- `workflow_dispatch` allows manual trigger for urgent reviews
+- Reduces GitHub Actions billing (one run covers all PRs)
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│  GitHub: PR opened / synchronize / ready_for_review / labeled        │
+│  Cron: every 5 minutes (schedule) / manual (workflow_dispatch)       │
 └───────────────────────────┬─────────────────────────────────────────┘
-                            │ triggers
+                            │ polls open PRs
                             ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  GitHub Action (.github/workflows/pr-bot-review.yml)                │
 │                                                                     │
-│  1. POST /repos/{owner}/{repo}/statuses/{sha}                       │
+│  For each eligible PR:                                              │
+│  1. Check HEAD commit status for "OpenAB PR Review"                 │
+│     - pending → SKIP (review still in progress)                     │
+│     - success → SKIP (already LGTM on this SHA)                     │
+│     - failure/error/none → TRIGGER                                  │
+│                                                                     │
+│  2. POST /repos/{owner}/{repo}/statuses/{sha}                       │
 │     state: "pending", context: "OpenAB PR Review"                   │
 │                                                                     │
-│  2. Discord Webhook:                                                │
-│     → POST to webhook URL with "@bot review <PR_URL>"              │
-│                                                                     │
-│  3. Job exits (fire-and-forget)                                     │
+│  3. Discord Webhook: "@bot review <PR_URL>"                         │
 └───────────────────────────┬─────────────────────────────────────────┘
                             │ Discord message
                             ▼
@@ -147,21 +197,15 @@ When explicitly requested:
 
 ## Dedup & Performance
 
-Rapid pushes can cause multiple review requests for the same PR. The system deduplicates at two layers:
+The scheduled polling model inherently deduplicates reviews:
 
-### Layer 1: GitHub Actions (Concurrency Group)
+### Primary Dedup: Status-Based Gating
 
-```yaml
-concurrency:
-  group: pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-```
+The poller checks HEAD commit status before triggering. If status is `pending`, the PR is skipped — guaranteeing at most one in-flight review per PR at any time. Rapid pushes between polls simply update HEAD; only the latest SHA is reviewed on next poll.
 
-A new push cancels any in-flight Action run for the same PR. If the webhook has not yet been sent, only the latest SHA triggers a review.
+### Agent-Side SHA Validation (Belt-and-Suspenders)
 
-### Layer 2: Agent-Side SHA Validation
-
-If the webhook was already delivered before cancellation, the agent receives a stale request. To handle this:
+Even with polling, a narrow race is possible (push arrives between status check and webhook delivery). The agent still validates:
 
 1. Agent extracts `__commit: <SHA>__` from the trigger message
 2. Agent queries current PR HEAD: `gh pr view <N> --json headRefOid --jq .headRefOid`
@@ -182,10 +226,10 @@ Without dedup, N rapid pushes could trigger N full reviews (~5 LLM calls each fo
 >
 > Refer to the workflow file for the current implementation. Key design points:
 
-- **Trigger events:** `opened`, `synchronize`, `ready_for_review`, `labeled`
-- **Concurrency group:** per-PR number with `cancel-in-progress: true`
-- **Guard condition:** skips drafts, untrusted authors, irrelevant labels, and PRs with `review-limit-reached` label
-- **Steps:** circuit breaker check → set pending status → trigger Discord webhook → error fallback on failure
+- **Trigger:** `schedule` (cron `*/5 * * * *`) + `workflow_dispatch` for manual runs
+- **Polling logic:** iterates all open PRs, checks HEAD commit status, skips if `pending` or `success`
+- **Guard condition:** skips drafts, untrusted authors, and PRs with `review-limit-reached` label
+- **Steps:** poll open PRs → for each eligible PR: circuit breaker check → set pending status → trigger Discord webhook → error fallback on failure
 
 ### Phase 2: Agent Callback (Status Update)
 
