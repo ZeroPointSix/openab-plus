@@ -40,8 +40,9 @@ jobs:
           fi
           COUNT=0
           for SHA in $SHAS; do
-            N=$(gh api --paginate "repos/${{ github.repository }}/commits/${SHA}/statuses" \
-              --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length')
+            N=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
+              --paginate --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | length' \
+              | awk '{s+=$1} END {print s+0}')
             COUNT=$((COUNT + N))
           done
           echo "count=${COUNT}" >> "$GITHUB_OUTPUT"
