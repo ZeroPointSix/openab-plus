@@ -91,17 +91,26 @@ This guarantees **at most one in-flight review per PR** at any time, regardless 
 
 | Aspect | Reactive (old) | Scheduled (new) |
 |--------|---------------|-----------------|
-| Latency | Immediate on push | Up to 5 min delay |
-| Duplicate reviews | Possible (webhook already sent) | Impossible (skip if pending) |
+| Latency | Immediate on push | Up to 5 min (best-effort; may lag under GH load) |
+| Duplicate reviews | Possible (webhook already sent) | Extremely unlikely (skip if pending; narrow race only) |
 | GitHub Actions minutes | Per-push (many short runs) | Fixed (one run per 5 min) |
 | Complexity | Simple trigger | Polling + state check logic |
 
 ### Why This Is Acceptable
 
 - 5-minute latency is fine for code review (not user-facing)
-- Eliminates all duplicate-review bugs without agent-side dedup
+- Eliminates duplicate-review bugs without agent-side dedup (agent SHA validation remains as belt-and-suspenders for narrow race)
 - `workflow_dispatch` allows manual trigger for urgent reviews
 - Reduces GitHub Actions billing (one run covers all PRs)
+- **Cron caveat:** GitHub Actions `schedule` is best-effort — actual interval may be 5–25 min during platform congestion. This is acceptable since review latency is not user-facing.
+
+### Stale Timeout Rationale (30 minutes)
+
+The 30-min threshold is based on observed review completion times: typical reviews finish in 5–15 minutes (LLM processing + GitHub API calls). A legitimate review exceeding 30 min is rare (only very large PRs with many files). If re-triggered, the agent validates HEAD SHA and will skip if the original session is still active — so a false stale trigger is harmless.
+
+### Fork PRs & `safe-to-review` in Scheduled Mode
+
+The scheduled poller runs on `schedule` events (base repo context), so it has full access to secrets. The `safe-to-review` label bypass is preserved in the jq filter — PRs with untrusted `author_association` are included if the label is present. Fork PRs are handled the same as before: the poller can set statuses and fire webhooks for any open PR regardless of source, since it operates in the base repo context.
 
 ## Architecture
 
