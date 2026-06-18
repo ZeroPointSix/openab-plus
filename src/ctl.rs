@@ -244,7 +244,7 @@ impl CtlHandler for RuntimeHandler {
                 let Some(shard) = self.shard.get() else {
                     return Response {
                         ok: false,
-                        message: "shard not ready (Discord not connected yet)".into(),
+                        message: "agent.status only supported on Discord".into(),
                         value: None,
                     };
                 };
