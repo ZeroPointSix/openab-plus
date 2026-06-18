@@ -220,6 +220,33 @@ impl ChatAdapter for IMessageAdapter {
 - No threading (conversations are flat)
 - Reactions map to tapbacks (❤️, 👍, 👎, 😂, ‼️, ❓) — only 6 options
 - No typing indicators via AppleScript (Spectrum Cloud supports this)
+- No structured @mention field (see §6.1 below)
+
+### 6.1 @Mention Detection (Group Chat)
+
+iMessage supports @mentions (iOS 14+, displayed as bold blue text), but `chat.db` does **not** expose them as a structured column. The mention data is embedded inside the `attributedBody` blob — a serialized `NSAttributedString` (NSKeyedArchiver / typedstream format).
+
+**To extract mentions, the bridge must:**
+
+1. Read `message.attributedBody` (binary blob)
+2. Decode NSKeyedArchiver binary plist
+3. Locate ranges where `__kIMMessagePartAttributeName` = 1 (indicates a mention)
+4. Extract the mentioned handle ID from `__kIMMentionConfirmedMention`
+
+**Comparison with other platforms:**
+
+| Platform | Mention detection | Complexity |
+|----------|-------------------|-----------|
+| Discord | `message.mentions` array | Trivial — structured field |
+| LINE | `mentionees` in webhook payload | Trivial — structured field |
+| Slack | `<@BOT_ID>` in text + `app_mention` event type | Easy — text pattern |
+| iMessage | Parse binary `attributedBody` blob | Hard — undocumented binary format |
+
+**Implications for group chat:**
+- **1:1 conversations (Phase 1):** No mention detection needed — all messages are directed at the bot
+- **Group chat (Phase 5):** Bridge must parse `attributedBody` to know when the bot is mentioned, or fall back to keyword-prefix trigger (e.g. `/ask ...`)
+- The `attributedBody` format is undocumented and may change across macOS versions — Rust `plist` crate can decode the binary plist, but the internal schema requires reverse-engineering
+- **Outbound:** AppleScript `send` does not support sending @mentions — bot replies are plain text only
 
 ---
 
@@ -293,7 +320,7 @@ project_secret = "${PHOTON_PROJECT_SECRET}"
 | **Phase 2** | `IMessageAdapter` in OAB core implementing `ChatAdapter` trait | Multi-Platform Adapters (done) |
 | **Phase 3** | Spectrum sidecar adapter (Node.js/Bun wrapper) as alternative to self-hosted bridge | Photon account |
 | **Phase 4** | Helm chart additions: bridge sidecar, Spectrum sidecar, config templates | Phase 1 or 3 |
-| **Phase 5** | Rich features: tapback reactions, group chat support, attachment handling | Phase 2 |
+| **Phase 5** | Rich features: tapback reactions, group chat support, @mention parsing, attachment handling | Phase 2 |
 
 ---
 
@@ -321,7 +348,7 @@ Apple does not provide an official iMessage API. All known approaches rely on:
 |---|----------|---------|-------|
 | 1 | Bridge language | Rust (consistent with OAB) vs TypeScript (reuse imessage-kit) | Rust preferred for single-binary deployment |
 | 2 | Poll interval default | 100ms vs 200ms vs 500ms | Tradeoff: latency vs CPU. agy-acp uses 100ms |
-| 3 | Group chat support in Phase 1? | Yes / defer to Phase 5 | Groups add complexity (participant tracking) |
+| 3 | Group chat support in Phase 1? | Yes / defer to Phase 5 | Recommend defer — no structured @mention field means bot can't reliably detect when addressed. 1:1 is the sweet spot. |
 | 4 | Should bridge run as launchd service? | Yes (auto-restart) / manual | launchd is macOS best practice for daemons |
 | 5 | Photon free tier shared numbers acceptable? | Yes for POC / require dedicated | Shared numbers may confuse recipients |
 
