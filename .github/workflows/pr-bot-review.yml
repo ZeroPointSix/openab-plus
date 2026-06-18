@@ -44,14 +44,14 @@ jobs:
             SHA=$(echo "$ROW" | jq -r '.sha')
             LABELS=$(echo "$ROW" | jq -c '.labels')
 
-            # Get latest status for this SHA with our context
-            STATE=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
-              --jq '[.[] | select(.context == "OpenAB PR Review")] | sort_by(.created_at) | last | .state // empty')
+            # Get latest status for this SHA (single API call)
+            STATUS_JSON=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
+              --jq '[.[] | select(.context == "OpenAB PR Review")] | sort_by(.created_at) | last | {state, created_at} // empty')
+            STATE=$(echo "$STATUS_JSON" | jq -r '.state // empty')
 
             # Skip if still pending, UNLESS pending > 30 min (stale)
             if [ "$STATE" = "pending" ]; then
-              PENDING_AT=$(gh api "repos/${{ github.repository }}/commits/${SHA}/statuses" \
-                --jq '[.[] | select(.context == "OpenAB PR Review" and .state == "pending")] | sort_by(.created_at) | last | .created_at // empty')
+              PENDING_AT=$(echo "$STATUS_JSON" | jq -r '.created_at // empty')
               if [ -n "$PENDING_AT" ]; then
                 PENDING_TS=$(date -d "$PENDING_AT" +%s 2>/dev/null || date -u +%s)
                 NOW_TS=$(date -u +%s)
