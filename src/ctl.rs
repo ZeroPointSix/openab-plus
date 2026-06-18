@@ -119,11 +119,15 @@ async fn handle_conn(
 /// Concrete handler for `openab run` — dispatches to platform adapters.
 pub struct RuntimeHandler {
     adapter: Arc<dyn ChatAdapter>,
+    shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>>,
 }
 
 impl RuntimeHandler {
-    pub fn new(adapter: Arc<dyn ChatAdapter>) -> Self {
-        Self { adapter }
+    pub fn new(
+        adapter: Arc<dyn ChatAdapter>,
+        shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>>,
+    ) -> Self {
+        Self { adapter, shard }
     }
 
     fn channel_ref() -> Option<ChannelRef> {
@@ -133,7 +137,7 @@ impl RuntimeHandler {
         let platform = std::env::var("OPENAB_PLATFORM").unwrap_or_else(|_| "discord".into());
         Some(ChannelRef {
             platform,
-            channel_id: channel_id.clone(),
+            channel_id,
             thread_id: None,
             parent_id: None,
             origin_event_id: None,
@@ -166,6 +170,67 @@ impl CtlHandler for RuntimeHandler {
                     },
                 }
             }
+            "thread.archived" => {
+                let Some(channel) = Self::channel_ref() else {
+                    return Response {
+                        ok: false,
+                        message: "OPENAB_THREAD_ID or OPENAB_CHANNEL_ID not set".into(),
+                        value: None,
+                    };
+                };
+                let archived = match value {
+                    "true" | "1" | "yes" => true,
+                    "false" | "0" | "no" => false,
+                    _ => {
+                        return Response {
+                            ok: false,
+                            message: format!("invalid value: {value} (expected true/false)"),
+                            value: None,
+                        };
+                    }
+                };
+                match self.adapter.archive_thread(&channel, archived).await {
+                    Ok(()) => Response {
+                        ok: true,
+                        message: format!(
+                            "thread {}",
+                            if archived { "archived" } else { "unarchived" }
+                        ),
+                        value: None,
+                    },
+                    Err(e) => Response {
+                        ok: false,
+                        message: format!("archive failed: {e}"),
+                        value: None,
+                    },
+                }
+            }
+            "agent.status" => {
+                let Some(shard) = self.shard.get() else {
+                    return Response {
+                        ok: false,
+                        message: "shard not ready (Discord not connected yet)".into(),
+                        value: None,
+                    };
+                };
+                use serenity::gateway::ActivityData;
+                use serenity::model::user::OnlineStatus;
+                let activity = if value.is_empty() {
+                    None
+                } else {
+                    Some(ActivityData::custom(value))
+                };
+                shard.set_presence(activity, OnlineStatus::Online);
+                Response {
+                    ok: true,
+                    message: if value.is_empty() {
+                        "status cleared".into()
+                    } else {
+                        format!("status set to: {value}")
+                    },
+                    value: None,
+                }
+            }
             _ => Response {
                 ok: false,
                 message: format!("unknown key: {key}"),
@@ -176,9 +241,9 @@ impl CtlHandler for RuntimeHandler {
 
     async fn handle_get(&self, key: &str) -> Response {
         match key {
-            "thread.name" => Response {
+            "thread.name" | "thread.archived" | "agent.status" => Response {
                 ok: false,
-                message: "thread.name get not yet supported (Discord API limitation)".into(),
+                message: format!("{key} get not yet supported"),
                 value: None,
             },
             _ => Response {

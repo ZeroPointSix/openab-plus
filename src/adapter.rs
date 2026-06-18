@@ -253,6 +253,11 @@ pub trait ChatAdapter: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Archive or unarchive a thread. Default: no-op.
+    async fn archive_thread(&self, _channel: &ChannelRef, _archived: bool) -> Result<()> {
+        Ok(())
+    }
+
     /// Delete a message. Used to remove streaming placeholders when reply_to is set.
     /// Default: edits to zero-width space (fallback for platforms without delete support).
     async fn delete_message(&self, msg: &MessageRef) -> Result<()> {

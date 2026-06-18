@@ -296,11 +296,21 @@ async fn main() -> anyhow::Result<()> {
         ))
     });
 
+    // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
+    let ctl_shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>> =
+        Arc::new(std::sync::OnceLock::new());
+
     // Spawn control socket server for `openab set/get` IPC
     let ctl_handle = if let Some(ref adapter) = shared_discord_adapter {
-        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(adapter.clone()))))
+        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
+            adapter.clone(),
+            ctl_shard.clone(),
+        ))))
     } else if let Some(ref adapter) = shared_slack_adapter {
-        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(adapter.clone() as Arc<dyn adapter::ChatAdapter>))))
+        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
+            adapter.clone() as Arc<dyn adapter::ChatAdapter>,
+            ctl_shard.clone(),
+        ))))
     } else {
         None
     };
@@ -553,6 +563,7 @@ async fn main() -> anyhow::Result<()> {
             dispatcher: discord_dispatcher,
             reminder_store: reminder_store.clone(),
             scheduled_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            ctl_shard: ctl_shard.clone(),
         };
 
         let intents = GatewayIntents::GUILD_MESSAGES
