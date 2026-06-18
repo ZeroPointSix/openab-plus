@@ -79,8 +79,9 @@ on:
 |-------------------|--------|
 | `pending` (< 30 min) | **Skip** — previous review still in progress |
 | `pending` (≥ 30 min) | **Trigger** — stale, agent likely missed it |
-| `success` | **Skip** — already reviewed this SHA |
-| `failure` / `error` / none | **Trigger** — needs (re-)review |
+| `success` | **Skip** — already reviewed this SHA (LGTM) |
+| `failure` | **Skip** — already reviewed this SHA (CHANGES REQUESTED); new push = new SHA = auto-triggers |
+| `error` / none | **Trigger** — needs review (new SHA or webhook previously failed) |
 
 The 30-minute stale timeout handles the case where the agent is down or missed the webhook — the status would otherwise stay `pending` indefinitely, blocking further reviews.
 
@@ -295,11 +296,11 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Fork PRs: `OAB_REVIEW_ACTION_WEBHOOK` and `OAB_REVIEW_ACTION_BOT_UID` secrets are not available to workflows triggered by fork PRs (GitHub security policy). The webhook step will fail, and since fork PRs receive a read-only `GITHUB_TOKEN`, the error fallback **cannot** write commit statuses either — the workflow will fail silently with no status update. Fork PRs can still be reviewed manually via Discord @mention. Note: the `safe-to-review` label does **not** grant secrets access to fork PRs — it only bypasses the `author_association` gate for same-repo PRs.
 
 **Mitigations:**
-- Filter: skip draft PRs and untrusted authors — only `OWNER`, `MEMBER`, `COLLABORATOR`, and `CONTRIBUTOR` (returning contributor with merged PR) trigger automatic review. First-time contributors and unknown authors are skipped; maintainers can manually @mention the agent to review those PRs.
-- Debounce: `concurrency` group with `cancel-in-progress: true` — new push cancels in-flight review, only latest SHA gets reviewed
-- Error fallback: a scoped `if: failure()` step marks status as "error" when the Discord webhook step specifically fails (not triggered by circuit breaker), so status never stays pending on webhook failure
-- Race condition: concurrency group prevents duplicate GitHub Action runs per PR; commit status is keyed to SHA so old reviews cannot overwrite newer status. **Note:** the concurrency group only operates at the GitHub Actions layer — if a webhook was already delivered before cancellation, the agent may receive a stale request. The agent **must** implement SHA validation (Layer 2 above) to skip stale requests and avoid wasted compute or comment race conditions.
-- Timeout: a scheduled Action can mark stale pending statuses as "error" after N hours (agent down scenario)
+- Filter: skip draft PRs and untrusted authors — only `OWNER`, `MEMBER`, `COLLABORATOR`, and `CONTRIBUTOR` (returning contributor with merged PR) trigger automatic review. First-time contributors and unknown authors are skipped; maintainers can add `safe-to-review` label or manually @mention the agent.
+- Dedup: status-based gating — `pending` (fresh) and `failure`/`success` skip review. Only new SHAs with no status or stale `pending` (>30 min) trigger.
+- Concurrency: workflow-level `concurrency` group prevents overlapping cron runs from racing.
+- Error fallback: webhook failure marks status as "error", which will be retried on next poll cycle.
+- Timeout: stale `pending` >30 min is treated as agent-down and re-triggered automatically.
 
 ## Safeguards
 
