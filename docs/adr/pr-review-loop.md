@@ -275,6 +275,8 @@ The workflow uses GitHub's `author_association` field to gate automatic reviews.
 
 Maintainers can add the `safe-to-review` label to any PR to bypass the `author_association` check. This triggers the workflow via the `labeled` event, allowing untrusted contributors' PRs to be reviewed automatically after a maintainer has visually confirmed the PR is safe.
 
+**Important:** This label only enables automatic review for **same-repo PRs**. Fork PRs lack access to repository secrets regardless of labels — adding `safe-to-review` to a fork PR will not trigger automation. Fork PRs must be reviewed manually via Discord @mention.
+
 **Note:** The `labeled` event is filtered — only `safe-to-review` and `auto-fix` labels trigger the workflow. Other labels (e.g. `documentation`, `bug`) are ignored to avoid unnecessary review runs.
 
 ### Auto-Fix Mode: `auto-fix`
