@@ -125,9 +125,10 @@ The scheduled poller runs on `schedule` events (base repo context), so it has fu
 │                                                                     │
 │  For each eligible PR:                                              │
 │  1. Check HEAD commit status for "OpenAB PR Review"                 │
-│     - pending → SKIP (review still in progress)                     │
-│     - success → SKIP (already LGTM on this SHA)                     │
-│     - failure/error/none → TRIGGER                                  │
+│     - pending (< 30 min) → SKIP (review still in progress)         │
+│     - pending (≥ 30 min) → TRIGGER (stale)                         │
+│     - success / failure → SKIP (already reviewed this SHA)          │
+│     - error / none → TRIGGER                                        │
 │                                                                     │
 │  2. POST /repos/{owner}/{repo}/statuses/{sha}                       │
 │     state: "pending", context: "OpenAB PR Review"                   │
@@ -193,7 +194,7 @@ When explicitly requested:
 
 1. Agent fixes the code directly on the PR branch
 2. Commits and pushes the fix
-3. The `synchronize` event re-triggers the workflow, starting a new review cycle
+3. The new SHA has no status → next poll cycle triggers a new review
 4. Repeat until LGTM or max iterations reached
 
 ### Safeguards
@@ -240,7 +241,7 @@ Without dedup, N rapid pushes could trigger N full reviews (~5 LLM calls each fo
 > Refer to the workflow file for the current implementation. Key design points:
 
 - **Trigger:** `schedule` (cron `*/5 * * * *`) + `workflow_dispatch` for manual runs
-- **Polling logic:** iterates all open PRs, checks HEAD commit status, skips if `pending` or `success`
+- **Polling logic:** iterates all open PRs, checks HEAD commit status, skips if `pending` (fresh), `success`, or `failure`
 - **Guard condition:** skips drafts, untrusted authors, and PRs with `review-limit-reached` label
 - **Steps:** poll open PRs → for each eligible PR: circuit breaker check → set pending status → trigger Discord webhook → error fallback on failure
 
@@ -299,8 +300,8 @@ Add `OpenAB PR Review` as a required status check in branch protection rules. Th
 - Minimal secrets — only one webhook URL needed in GitHub Secrets
 
 **Negative:**
-- Every PR push triggers a review (may want to filter by label or draft status)
-- If OpenAB agent is down, status stays "pending" indefinitely (need timeout/alerting)
+- Up to 5-min latency before review starts (GitHub cron is best-effort, may lag further under load)
+- If OpenAB agent is down, status stays "pending" until stale timeout re-triggers (30 min)
 - Webhook messages lack user identity — OpenAB must allow webhook-originated messages
 - Fork PRs: `OAB_REVIEW_ACTION_WEBHOOK` and `OAB_REVIEW_ACTION_BOT_UID` secrets are not available to workflows triggered by fork PRs (GitHub security policy). The webhook step will fail, and since fork PRs receive a read-only `GITHUB_TOKEN`, the error fallback **cannot** write commit statuses either — the workflow will fail silently with no status update. Fork PRs can still be reviewed manually via Discord @mention. Note: the `safe-to-review` label does **not** grant secrets access to fork PRs — it only bypasses the `author_association` gate for same-repo PRs.
 
