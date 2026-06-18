@@ -3,6 +3,7 @@ mod adapter;
 mod bot_turns;
 mod config;
 mod cron;
+mod ctl;
 mod directives;
 mod discord;
 mod dispatch;
@@ -92,6 +93,18 @@ enum Commands {
         #[arg(long, default_value = "kiro-cli acp --trust-all-tools")]
         command: String,
     },
+    /// Set a runtime value (e.g. thread.name)
+    Set {
+        /// Key to set (e.g. thread.name)
+        key: String,
+        /// Value to set
+        value: String,
+    },
+    /// Get a runtime value
+    Get {
+        /// Key to get (e.g. thread.name)
+        key: String,
+    },
 }
 
 #[tokio::main]
@@ -115,6 +128,36 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "agentcore")]
         Commands::AgentcoreBridge { runtime_arn, region, command } => {
             return acp::agentcore::run_bridge(&runtime_arn, &region, &command).await;
+        }
+        Commands::Set { key, value } => {
+            let resp = ctl::send_request(&ctl::Request {
+                action: ctl::Action::Set,
+                key,
+                value: Some(value),
+            })
+            .await?;
+            if resp.ok {
+                println!("✓ {}", resp.message);
+            } else {
+                eprintln!("✗ {}", resp.message);
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Commands::Get { key } => {
+            let resp = ctl::send_request(&ctl::Request {
+                action: ctl::Action::Get,
+                key,
+                value: None,
+            })
+            .await?;
+            if resp.ok {
+                println!("{}", resp.value.unwrap_or_default());
+            } else {
+                eprintln!("✗ {}", resp.message);
+                std::process::exit(1);
+            }
+            return Ok(());
         }
         Commands::Run { config } => config,
     };
@@ -252,6 +295,15 @@ async fn main() -> anyhow::Result<()> {
             multibot_cache.clone(),
         ))
     });
+
+    // Spawn control socket server for `openab set/get` IPC
+    let ctl_handle = if let Some(ref adapter) = shared_discord_adapter {
+        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(adapter.clone()))))
+    } else if let Some(ref adapter) = shared_slack_adapter {
+        Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(adapter.clone() as Arc<dyn adapter::ChatAdapter>))))
+    } else {
+        None
+    };
 
     // Validate cronjob config at startup (fail-fast on bad cron expressions or timezones)
     let mut configured_platforms: Vec<&str> = Vec::new();
@@ -549,6 +601,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     cleanup_handle.abort();
+    if let Some(h) = ctl_handle {
+        h.abort();
+        let _ = std::fs::remove_file(ctl::socket_path());
+    }
     // Signal Slack adapter to shut down gracefully
     let _ = shutdown_tx.send(true);
     if let Some(handle) = slack_handle {
