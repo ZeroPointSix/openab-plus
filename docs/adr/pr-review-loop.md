@@ -291,7 +291,7 @@ When the auto-fix loop completes (LGTM or cap reached), the agent removes the `a
 
 **Constraints:**
 - Only effective on same-repo branches (agent needs push access)
-- Fork PRs with `auto-fix` will still be reviewed but fixes cannot be pushed
+- Fork PRs: automation does not trigger (no secrets available); review manually via Discord @mention
 - Agent must implement iteration cap to prevent infinite push→review loops
 
 ### Circuit Breaker (workflow hard cap: 30)
