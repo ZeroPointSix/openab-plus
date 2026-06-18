@@ -666,18 +666,6 @@ impl ChatAdapter for SlackAdapter {
         Ok(())
     }
 
-    async fn rename_thread(&self, channel: &ChannelRef, title: &str) -> Result<()> {
-        // Slack conversations.rename works on channels, not message threads.
-        // For thread-based conversations, there's no rename API.
-        let channel_id = channel.thread_id.as_deref().unwrap_or(&channel.channel_id);
-        let body = serde_json::json!({
-            "channel": channel_id,
-            "name": title,
-        });
-        self.api_post("conversations.rename", body).await?;
-        Ok(())
-    }
-
     async fn set_status(&self, channel: &ChannelRef, status: &str) -> Result<()> {
         let thread_ts = channel.thread_id.clone().unwrap_or_default();
         let body = build_set_status_body(&channel.channel_id, &thread_ts, status);
