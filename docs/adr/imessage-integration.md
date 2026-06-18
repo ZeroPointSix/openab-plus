@@ -12,7 +12,7 @@
 
 Enable OAB agents to receive and respond to iMessage conversations, allowing users to interact with their agent team through Apple's native messaging platform. This extends OAB's multi-platform adapter architecture (see [ADR: Multi-Platform Adapters](./multi-platform-adapters.md)) to a platform that lacks an official API.
 
-**Decision:** Provide two integration paths — a self-hosted macOS gateway (using SQLite DB polling + AppleScript, same pattern as `agy-acp`) and a cloud-hosted option via Photon Spectrum SDK. Both implement the existing `ChatAdapter` trait and connect to OAB core via WebSocket through the Custom Gateway.
+**Decision:** Implement iMessage as a built-in adapter within the Custom Gateway, running natively on macOS. The gateway polls `chat.db` for inbound messages and sends outbound via AppleScript, connecting to OAB core (running in OrbStack/containers) over WebSocket. This is an iMessage-only deployment — no separate bridge binary needed.
 
 ---
 
@@ -22,7 +22,7 @@ Enable OAB agents to receive and respond to iMessage conversations, allowing use
 - iMessage offers a more personal, low-friction interaction surface compared to Discord/Slack
 - Apple provides **no official iMessage API** — all third-party integrations rely on macOS Messages.app as a bridge
 - The existing `agy-acp` component already proves the "poll SQLite DB" pattern works reliably in OAB
-- Two deployment paths accommodate different user needs: full self-sovereignty vs. operational simplicity
+- iMessage bridging requires macOS-native access (`chat.db` + AppleScript) — it **cannot** run inside a container
 
 ### Why iMessage Over Existing Channels
 
@@ -53,47 +53,61 @@ iMessage fills a gap that LINE, Telegram, and Slack cannot:
 
 ## 3. Architecture
 
-### 3.1 Self-Hosted (Mac mini Gateway)
+### 3.1 Primary: Custom Gateway on macOS Host + OAB in OrbStack
 
 ```
-                                    ┌─────────────────────────────────────┐
-                                    │  K8s / ECS (containerized)          │
-                                    │                                     │
-┌────────────────┐                  │  ┌───────────────────────────────┐  │
-│  iPhone User   │                  │  │  OAB Core                     │  │
-│  (iMessage)    │                  │  │  ├── AdapterRouter             │  │
-└───────┬────────┘                  │  │  ├── SessionPool               │  │
-        │                           │  │  └── ACP agents (法師們)        │  │
-        ▼                           │  └──────────────┬────────────────┘  │
-═══════════════════                 │                  │ WebSocket          │
-║ Apple iMessage  ║                 │  ┌──────────────▼────────────────┐  │
-║    Network      ║                 │  │  Custom Gateway               │  │
-═══════════════════                 │  │  (webhook receiver)           │  │
-        │                           │  └──────────────▲────────────────┘  │
-        ▼                           │                  │                   │
-┌───────────────────────────┐       └──────────────────┼───────────────────┘
-│  Mac mini (bare metal)    │                          │
-│                           │       HTTPS POST         │
-│  ┌─────────────────────┐  │  ────────────────────────┘
-│  │  Messages.app        │  │
-│  │  ~/Library/Messages/ │  │
-│  │  chat.db (SQLite)    │  │
-│  └──────────┬───────────┘  │
-│             │ poll every    │
-│             │ 100-500ms     │
-│  ┌──────────▼───────────┐  │
-│  │  imessage-bridge      │  │
-│  │                       │  │
-│  │  - Poll chat.db       │  │
-│  │    (WHERE rowId > N)  │  │
-│  │  - AppleScript send   │  │
-│  │  - HTTP POST to       │  │
-│  │    Custom Gateway     │  │
-│  └───────────────────────┘  │
-└─────────────────────────────┘
+┌────────────────┐
+│  iPhone User   │
+│  (iMessage)    │
+└───────┬────────┘
+        │
+        ▼
+═══════════════════
+║ Apple iMessage  ║
+║    Network      ║
+═══════════════════
+        │
+        ▼
+┌──────────────────────────────────────────┐
+│  macOS host (Mac mini / MacBook)         │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │  Messages.app                      │  │
+│  │  ~/Library/Messages/chat.db        │  │
+│  └──────────────┬─────────────────────┘  │
+│                 │ poll every 100-500ms    │
+│  ┌──────────────▼─────────────────────┐  │
+│  │  Custom Gateway (native binary)    │  │
+│  │                                    │  │
+│  │  ├── iMessage adapter (built-in)   │  │
+│  │  │   ├── poll chat.db (SQLite)     │  │
+│  │  │   └── send via osascript        │  │
+│  │  └── WebSocket client → OAB        │  │
+│  └──────────────┬─────────────────────┘  │
+│                 │                         │
+└─────────────────┼─────────────────────────┘
+                  │ WebSocket (outbound connection)
+                  ▼
+┌──────────────────────────────────────────┐
+│  OrbStack (Linux containers)             │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │  OAB Core                          │  │
+│  │  ├── AdapterRouter                 │  │
+│  │  ├── SessionPool                   │  │
+│  │  └── ACP agents                    │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+└──────────────────────────────────────────┘
 ```
 
-### 3.2 Cloud-Hosted (Photon Spectrum)
+**Why the gateway must run on macOS host (not in a container):**
+
+1. **`chat.db` access** — macOS TCC (Transparency, Consent, Control) grants Full Disk Access per-app. A containerized process cannot inherit FDA permissions.
+2. **SQLite WAL locking** — `chat.db` is held by Messages.app with WAL lock. A cross-VM mount risks lock contention.
+3. **AppleScript IPC** — `osascript` communicates with Messages.app via macOS IPC (Apple Events). This only works from the same macOS session.
+
+### 3.2 Alternative: Photon Spectrum (Cloud, No Mac Required)
 
 ```
 ┌────────────────┐        ═══════════════        ┌──────────────────┐
@@ -103,27 +117,26 @@ iMessage fills a gap that LINE, Telegram, and Slack cannot:
                                                           │ gRPC stream
                                                           ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  OAB Deployment (any OS, containerized)                             │
+│  OrbStack (Linux containers)                                        │
 │                                                                     │
-│  ┌──────────────────┐     ┌───────────────┐     ┌───────────────┐  │
-│  │ Spectrum Sidecar  │────►│ Custom Gateway│────►│ OAB Core      │  │
-│  │ (Node.js/Bun)    │     │               │     │ + Agents      │  │
-│  │                   │     └───────────────┘     └───────────────┘  │
-│  │ - gRPC to Photon  │                                              │
-│  │ - HTTP to Gateway │                                              │
-│  └──────────────────┘                                               │
+│  ┌──────────────────┐     ┌───────────────────────────────────────┐ │
+│  │ Spectrum Sidecar  │────►│ OAB Core                             │ │
+│  │ (Node.js/Bun)    │     │                                       │ │
+│  └──────────────────┘     └───────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+Photon Spectrum manages the Mac infrastructure — no local Mac needed. Useful as fallback if Apple restricts local `chat.db` access.
 
 ---
 
 ## 4. How iMessage Bridging Works
 
-Apple does not provide an iMessage API. The bridge relies on two macOS-native mechanisms:
+Apple does not provide an iMessage API. The gateway's iMessage adapter relies on two macOS-native mechanisms:
 
 ### 4.1 Receiving Messages (Inbound)
 
-Messages.app writes all received messages to a local SQLite database at `~/Library/Messages/chat.db`. The bridge polls this DB for new rows:
+Messages.app writes all received messages to a local SQLite database at `~/Library/Messages/chat.db`. The adapter polls this DB for new rows:
 
 ```sql
 SELECT rowid, text, handle_id, date, is_from_me, cache_roomnames
@@ -149,16 +162,25 @@ tell application "Messages"
 end tell
 ```
 
+For group chats, send to a specific chat ID:
+
+```applescript
+tell application "Messages"
+    set targetChat to chat id "iMessage;+;chat123456"
+    send "Hello from OAB" to targetChat
+end tell
+```
+
 ### 4.3 Comparison with agy-acp
 
-| Aspect | agy-acp | imessage-bridge |
-|--------|---------|-----------------|
+| Aspect | agy-acp | Custom Gateway (iMessage adapter) |
+|--------|---------|-----------------------------------|
 | Monitored program | `agy` (Gemini CLI) | Messages.app |
 | Data source | `conversations/*.db` | `~/Library/Messages/chat.db` |
 | Poll mechanism | `WHERE idx > last` every 100ms | `WHERE rowid > last` every 100-500ms |
 | Data format | protobuf `step_payload` field 20.1 | `attributedBody` blob / plain `text` column |
 | Send mechanism | spawn `agy -p "prompt"` | spawn `osascript` (AppleScript) |
-| Output | JSON-RPC streaming notifications | HTTP POST to Custom Gateway |
+| Output | JSON-RPC streaming notifications | WebSocket to OAB core (direct) |
 
 ---
 
@@ -168,54 +190,29 @@ end tell
 
 ```
 1. User sends iMessage from iPhone
-2. Apple iMessage network delivers to Mac mini's Messages.app
+2. Apple iMessage network delivers to Mac's Messages.app
 3. Messages.app writes row to chat.db
-4. imessage-bridge detects new row (poll)
-5. Bridge formats as OpenAB inbound event:
+4. Gateway's iMessage adapter detects new row (poll)
+5. Adapter formats as OpenAB inbound event:
    { "platform": "imessage", "sender": "+1234567890",
      "text": "...", "channel_id": "iMessage;-;+1234567890" }
-6. Bridge POSTs to Custom Gateway webhook endpoint
-7. Custom Gateway routes to OAB core via WebSocket
-8. AdapterRouter dispatches to SessionPool → agent
+6. Gateway sends event to OAB core via WebSocket
+7. AdapterRouter dispatches to SessionPool → agent
 ```
 
 ### Outbound (Agent → User)
 
 ```
 1. Agent produces response via ACP session
-2. AdapterRouter calls iMessageAdapter.send_message()
-3. Adapter sends HTTP request to Mac mini bridge
-4. Bridge invokes AppleScript to send via Messages.app
-5. Messages.app → Apple network → User's iPhone
+2. OAB core sends outbound event via WebSocket to gateway
+3. Gateway's iMessage adapter invokes AppleScript
+4. Messages.app → Apple network → User's iPhone
 ```
 
 ---
 
-## 6. iMessage Adapter (ChatAdapter impl)
+## 6. Platform Limitations
 
-```rust
-pub struct IMessageAdapter {
-    gateway_url: String,  // Custom Gateway WebSocket URL
-    bridge_url: String,   // Mac mini bridge HTTP endpoint (for outbound)
-}
-
-#[async_trait]
-impl ChatAdapter for IMessageAdapter {
-    fn platform(&self) -> &'static str { "imessage" }
-    fn message_limit(&self) -> usize { 10000 }  // iMessage has no practical limit
-
-    async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef>;
-    async fn edit_message(&self, msg: &MessageRef, content: &str) -> Result<()>;
-    // edit_message → not supported by iMessage, returns Ok(()) no-op
-    async fn create_thread(&self, ..) -> Result<ChannelRef>;
-    // iMessage doesn't have threads — replies go to same conversation
-    async fn add_reaction(&self, msg: &MessageRef, emoji: &str) -> Result<()>;
-    // Maps to tapback if supported, otherwise no-op
-    async fn remove_reaction(&self, ..) -> Result<()>;
-}
-```
-
-**Platform limitations:**
 - No message editing (iMessage supports "edit" natively on iOS 16+ but AppleScript cannot trigger it)
 - No threading (conversations are flat)
 - Reactions map to tapbacks (❤️, 👍, 👎, 😂, ‼️, ❓) — only 6 options
@@ -226,7 +223,7 @@ impl ChatAdapter for IMessageAdapter {
 
 iMessage supports @mentions (iOS 14+, displayed as bold blue text), but `chat.db` does **not** expose them as a structured column. The mention data is embedded inside the `attributedBody` blob — a serialized `NSAttributedString` (NSKeyedArchiver / typedstream format).
 
-**To extract mentions, the bridge must:**
+**To extract mentions, the adapter must:**
 
 1. Read `message.attributedBody` (binary blob)
 2. Decode NSKeyedArchiver binary plist
@@ -244,7 +241,7 @@ iMessage supports @mentions (iOS 14+, displayed as bold blue text), but `chat.db
 
 **Implications for group chat:**
 - **1:1 conversations (Phase 1):** No mention detection needed — all messages are directed at the bot
-- **Group chat (Phase 5):** Bridge must parse `attributedBody` to know when the bot is mentioned, or fall back to keyword-prefix trigger (e.g. `/ask ...`)
+- **Group chat (Phase 3):** Adapter must parse `attributedBody` to know when the bot is mentioned, or fall back to keyword-prefix trigger (e.g. `/ask ...`)
 - The `attributedBody` format is undocumented and may change across macOS versions — Rust `plist` crate can decode the binary plist, but the internal schema requires reverse-engineering
 - **Outbound:** AppleScript `send` does not support sending @mentions — bot replies are plain text only
 
@@ -253,17 +250,18 @@ iMessage supports @mentions (iOS 14+, displayed as bold blue text), but `chat.db
 ## 7. Config Design
 
 ```toml
-[imessage]
-mode = "self-hosted"  # "self-hosted" | "spectrum"
-
-# Self-hosted mode
-[imessage.bridge]
-url = "https://mac-mini.local:8443"   # Bridge HTTP endpoint
-api_key = "${IMESSAGE_BRIDGE_API_KEY}" # Shared secret for auth
+[gateway.imessage]
+enabled = true
 poll_interval_ms = 200
+chat_db_path = "~/Library/Messages/chat.db"  # default; override for testing
 
-# Spectrum mode (alternative)
-[imessage.spectrum]
+# OAB core WebSocket endpoint (OrbStack container)
+[gateway]
+oab_ws_url = "ws://localhost:8080/ws"  # OrbStack port-forwards to OAB
+
+# Spectrum mode (alternative — no local Mac needed)
+[gateway.imessage.spectrum]
+enabled = false
 project_id = "${PHOTON_PROJECT_ID}"
 project_secret = "${PHOTON_PROJECT_SECRET}"
 ```
@@ -272,15 +270,15 @@ project_secret = "${PHOTON_PROJECT_SECRET}"
 
 ## 8. Security Considerations
 
-### 8.1 Mac mini (Self-Hosted) Risks
+### 8.1 macOS Host Risks
 
 | Risk | Mitigation |
 |------|-----------|
-| No container isolation on macOS | Dedicated macOS user account with minimal privileges |
-| Mac mini compromise → iMessage access | Bridge runs as dumb forwarder; all agent logic stays in K8s |
-| Network exposure | Bridge only accepts connections from known OAB gateway IP; mTLS recommended |
+| No container isolation | Dedicated macOS user account with minimal privileges |
+| Mac compromise → iMessage access | Gateway is a thin adapter; all agent logic stays in OrbStack |
 | Apple account credential exposure | Use a dedicated Apple ID, not personal |
 | AppleScript injection | Sanitize all outbound text; no user input in script template |
+| Full Disk Access requirement | Grant FDA only to the gateway binary, not the user shell |
 
 ### 8.2 Photon Spectrum Risks
 
@@ -293,22 +291,36 @@ project_secret = "${PHOTON_PROJECT_SECRET}"
 
 ### 8.3 General
 
-- Messages contain PII — bridge and OAB must encrypt at rest and in transit
+- Messages contain PII — gateway and OAB must encrypt in transit (WebSocket over TLS)
 - Rate limiting on outbound to avoid Apple throttling/blocking
-- Bridge API key rotation via Kubernetes secrets
+- Gateway binary should be code-signed to satisfy macOS Gatekeeper
 
 ---
 
-## 9. Deployment Options
+## 9. Deployment
 
-| Deployment | Hardware | Isolation | Cost | Complexity |
-|-----------|----------|-----------|------|------------|
-| Self-hosted (all-in-one) | Mac mini | None (bare metal) | ~$600 one-time | Low |
-| Self-hosted (split) | Mac mini + K8s cluster | Bridge on Mac, OAB in pods | ~$600 + cluster | Medium |
-| Photon Spectrum (free) | None | Full container | $0/mo (10 users) | Low |
-| Photon Spectrum (dedicated) | None | Full container | $250/mo/line | Low |
+### Primary: macOS + OrbStack
 
-**Recommended for most users:** Split deployment — Mac mini runs only the bridge (~200 lines of code), OAB core stays containerized with full pod security.
+```
+macOS host:
+  - Custom Gateway binary (Rust, native arm64/x86_64)
+  - Runs as launchd service (auto-restart, auto-start on boot)
+  - Requires: Full Disk Access for chat.db, Accessibility for AppleScript
+
+OrbStack (on same Mac):
+  - OAB Core container (Linux)
+  - Exposes WebSocket endpoint on localhost
+```
+
+**Why not containerize the gateway:**
+- `chat.db` cannot be volume-mounted into Linux VMs (macOS TCC blocks cross-process FDA)
+- AppleScript IPC (`osascript`) requires native macOS session — unavailable in containers
+- SQLite WAL mode may conflict with cross-VM file locking
+
+| Deployment | Where | Cost | Complexity |
+|-----------|-------|------|------------|
+| Primary (this ADR) | Mac (gateway) + OrbStack (OAB) | ~$600 Mac mini | Low |
+| Spectrum alternative | OrbStack only (no Mac needed) | $0-250/mo | Low |
 
 ---
 
@@ -316,11 +328,9 @@ project_secret = "${PHOTON_PROJECT_SECRET}"
 
 | Phase | Scope | Dependencies |
 |-------|-------|-------------|
-| **Phase 1** | `imessage-bridge` binary (Rust): poll chat.db, POST to gateway, receive outbound via HTTP | Custom Gateway (#TBD) |
-| **Phase 2** | `IMessageAdapter` in OAB core implementing `ChatAdapter` trait | Multi-Platform Adapters (done) |
-| **Phase 3** | Spectrum sidecar adapter (Node.js/Bun wrapper) as alternative to self-hosted bridge | Photon account |
-| **Phase 4** | Helm chart additions: bridge sidecar, Spectrum sidecar, config templates | Phase 1 or 3 |
-| **Phase 5** | Rich features: tapback reactions, group chat support, @mention parsing, attachment handling | Phase 2 |
+| **Phase 1** | iMessage adapter in Custom Gateway: poll chat.db, send via AppleScript, WebSocket to OAB | Custom Gateway ([ADR](./custom-gateway.md)) |
+| **Phase 2** | Spectrum sidecar adapter as alternative (no Mac required) | Photon account |
+| **Phase 3** | Rich features: tapback reactions, group chat support, @mention parsing, attachment handling | Phase 1 |
 
 ---
 
@@ -346,11 +356,10 @@ Apple does not provide an official iMessage API. All known approaches rely on:
 
 | # | Question | Options | Notes |
 |---|----------|---------|-------|
-| 1 | Bridge language | Rust (consistent with OAB) vs TypeScript (reuse imessage-kit) | Rust preferred for single-binary deployment |
-| 2 | Poll interval default | 100ms vs 200ms vs 500ms | Tradeoff: latency vs CPU. agy-acp uses 100ms |
-| 3 | Group chat support in Phase 1? | Yes / defer to Phase 5 | Recommend defer — no structured @mention field means bot can't reliably detect when addressed. 1:1 is the sweet spot. |
-| 4 | Should bridge run as launchd service? | Yes (auto-restart) / manual | launchd is macOS best practice for daemons |
-| 5 | Photon free tier shared numbers acceptable? | Yes for POC / require dedicated | Shared numbers may confuse recipients |
+| 1 | Poll interval default | 100ms vs 200ms vs 500ms | Tradeoff: latency vs CPU. agy-acp uses 100ms |
+| 2 | Group chat support in Phase 1? | Yes / defer to Phase 3 | Recommend defer — no structured @mention field means bot can't reliably detect when addressed. 1:1 is the sweet spot. |
+| 3 | Should gateway run as launchd service? | Yes (auto-restart) / manual | launchd is macOS best practice for daemons |
+| 4 | Photon free tier shared numbers acceptable? | Yes for POC / require dedicated | Shared numbers may confuse recipients |
 
 ---
 
