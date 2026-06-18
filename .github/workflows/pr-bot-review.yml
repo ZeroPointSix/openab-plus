@@ -5,6 +5,10 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
+concurrency:
+  group: pr-review-poller
+  cancel-in-progress: true
+
 permissions:
   statuses: write
   issues: write
@@ -23,11 +27,15 @@ jobs:
           set -eo pipefail
 
           # Collect eligible open PRs (non-draft, no review-limit-reached label)
+          # Include safe-to-review labeled PRs regardless of author_association
           PRS=$(gh api --paginate "repos/${{ github.repository }}/pulls?state=open&per_page=50" \
             --jq '[.[] | select(
               .draft == false and
-              (.author_association | IN("OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR")) and
-              ([.labels[].name] | contains(["review-limit-reached"]) | not)
+              ([.labels[].name] | contains(["review-limit-reached"]) | not) and
+              (
+                (.author_association | IN("OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR")) or
+                ([.labels[].name] | contains(["safe-to-review"]))
+              )
             ) | {number, sha: .head.sha, labels: [.labels[].name]}]')
 
           TARGETS="[]"
@@ -56,13 +64,14 @@ jobs:
               fi
             fi
 
-            # Skip if already reviewed this exact SHA with success (no new commits)
-            if [ "$STATE" = "success" ]; then
-              echo "PR #${NUMBER}: already LGTM on HEAD, skipping"
+            # Skip if already reviewed this exact SHA (success or failure)
+            # failure = CHANGES REQUESTED — only re-review when new commits are pushed (new SHA)
+            if [ "$STATE" = "success" ] || [ "$STATE" = "failure" ]; then
+              echo "PR #${NUMBER}: already reviewed on HEAD (${STATE}), skipping"
               continue
             fi
 
-            # Trigger review: no status yet, or failure/error (new push or needs re-review)
+            # Trigger review: no status yet, or error (webhook failure), or stale pending
             echo "PR #${NUMBER}: needs review (state=${STATE:-none})"
             TARGETS=$(echo "$TARGETS" | jq --argjson row "$ROW" '. + [$row]')
           done
