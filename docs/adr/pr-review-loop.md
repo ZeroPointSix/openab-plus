@@ -77,9 +77,12 @@ on:
 
 | HEAD commit status | Action |
 |-------------------|--------|
-| `pending` | **Skip** — previous review still in progress |
+| `pending` (< 30 min) | **Skip** — previous review still in progress |
+| `pending` (≥ 30 min) | **Trigger** — stale, agent likely missed it |
 | `success` | **Skip** — already reviewed this SHA |
 | `failure` / `error` / none | **Trigger** — needs (re-)review |
+
+The 30-minute stale timeout handles the case where the agent is down or missed the webhook — the status would otherwise stay `pending` indefinitely, blocking further reviews.
 
 This guarantees **at most one in-flight review per PR** at any time, regardless of push frequency.
 
