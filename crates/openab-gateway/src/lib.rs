@@ -1,4 +1,4 @@
 pub mod adapters;
-pub mod media;
+pub(crate) mod media;
 pub mod schema;
 pub mod store;
