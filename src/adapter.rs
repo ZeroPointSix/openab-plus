@@ -923,7 +923,9 @@ impl AdapterRouter {
                     };
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
+                    let mentions = extract_mentions(&final_content);
                     let chunks = format::split_message(&final_content, message_limit);
+                    let chunks = propagate_mentions_to_chunks(chunks, &mentions);
                     // Track delivery health across all final write paths. Any failure
                     // here means the user's view is incomplete; we propagate Err at the
                     // end of the closure so dispatch surfaces set_error (❌) instead of
@@ -1137,6 +1139,71 @@ impl AdapterRouter {
             })
             .await
     }
+}
+
+/// Extract all Discord mentions (`<@123>`, `<@!123>`, `<@&123>`) from content.
+/// Returns deduplicated list in appearance order.
+fn extract_mentions(content: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut i = 0;
+    let bytes = content.as_bytes();
+    while i + 2 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i + 1] == b'@' {
+            let prefix_end = if i + 2 < bytes.len()
+                && (bytes[i + 2] == b'!' || bytes[i + 2] == b'&')
+            {
+                i + 3
+            } else {
+                i + 2
+            };
+            if prefix_end < bytes.len() && bytes[prefix_end].is_ascii_digit() {
+                if let Some(end) = content[prefix_end..].find('>') {
+                    if content[prefix_end..prefix_end + end]
+                        .chars()
+                        .all(|c| c.is_ascii_digit())
+                    {
+                        let mention = &content[i..prefix_end + end + 1];
+                        if !mentions.contains(&mention.to_string()) {
+                            mentions.push(mention.to_string());
+                        }
+                    }
+                    i = prefix_end + end + 1;
+                    continue;
+                }
+            }
+            i = prefix_end;
+        } else {
+            i += 1;
+        }
+    }
+    mentions
+}
+
+/// Append mentions to split chunks that don't already contain them.
+/// Ensures every chunk carries all mentions from the original content so
+/// receiving bots under `allow_bot_messages = "mentions"` gate accept all pieces.
+fn propagate_mentions_to_chunks(chunks: Vec<String>, mentions: &[String]) -> Vec<String> {
+    if mentions.is_empty() || chunks.len() <= 1 {
+        return chunks;
+    }
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            if i == 0 {
+                return chunk;
+            }
+            let missing: Vec<&String> = mentions
+                .iter()
+                .filter(|m| !chunk.contains(m.as_str()))
+                .collect();
+            if missing.is_empty() {
+                chunk
+            } else {
+                format!("{}\n{}", chunk, missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" "))
+            }
+        })
+        .collect()
 }
 
 /// Returns true if `content` contains a Discord user/bot mention (`<@123>`, `<@!123>`)
@@ -1504,6 +1571,78 @@ mod tests {
     #[test]
     fn contains_bot_mention_embedded() {
         assert!(contains_bot_mention("請問 <@1501788608439386172> 1+1=?"));
+    }
+
+    #[test]
+    fn extract_mentions_basic() {
+        let mentions = extract_mentions("hello <@123> and <@&456> world");
+        assert_eq!(mentions, vec!["<@123>", "<@&456>"]);
+    }
+
+    #[test]
+    fn extract_mentions_dedup() {
+        let mentions = extract_mentions("<@123> foo <@123> bar");
+        assert_eq!(mentions, vec!["<@123>"]);
+    }
+
+    #[test]
+    fn extract_mentions_nickname() {
+        let mentions = extract_mentions("hey <@!789>");
+        assert_eq!(mentions, vec!["<@!789>"]);
+    }
+
+    #[test]
+    fn extract_mentions_none() {
+        let mentions = extract_mentions("no mentions here");
+        assert!(mentions.is_empty());
+    }
+
+    #[test]
+    fn propagate_mentions_single_chunk() {
+        let chunks = vec!["hello <@123>".to_string()];
+        let result = propagate_mentions_to_chunks(chunks.clone(), &["<@123>".to_string()]);
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
+    fn propagate_mentions_appends_missing() {
+        let chunks = vec![
+            "hello <@123> table".to_string(),
+            "more rows".to_string(),
+            "end".to_string(),
+        ];
+        let result = propagate_mentions_to_chunks(chunks, &["<@123>".to_string()]);
+        assert_eq!(result[0], "hello <@123> table");
+        assert_eq!(result[1], "more rows\n<@123>");
+        assert_eq!(result[2], "end\n<@123>");
+    }
+
+    #[test]
+    fn propagate_mentions_skips_already_present() {
+        let chunks = vec![
+            "hello <@123>".to_string(),
+            "world <@123>".to_string(),
+        ];
+        let result = propagate_mentions_to_chunks(chunks.clone(), &["<@123>".to_string()]);
+        assert_eq!(result, chunks);
+    }
+
+    #[test]
+    fn propagate_mentions_multiple() {
+        let chunks = vec![
+            "<@111> and <@222> start".to_string(),
+            "middle".to_string(),
+        ];
+        let mentions = vec!["<@111>".to_string(), "<@222>".to_string()];
+        let result = propagate_mentions_to_chunks(chunks, &mentions);
+        assert_eq!(result[1], "middle\n<@111> <@222>");
+    }
+
+    #[test]
+    fn propagate_mentions_empty() {
+        let chunks = vec!["hello".to_string(), "world".to_string()];
+        let result = propagate_mentions_to_chunks(chunks.clone(), &[]);
+        assert_eq!(result, chunks);
     }
 }
 
