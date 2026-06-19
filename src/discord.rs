@@ -1017,6 +1017,12 @@ impl EventHandler for Handler {
                     }
                 };
 
+            // Defense-in-depth: if to_user() reveals this is a bot but member was
+            // None (rare edge case), re-apply bot gating retroactively.
+            if is_bot_confirmed && !is_reactor_bot {
+                return;
+            }
+
             let in_allowed_channel =
                 allow_all_channels || allowed_channels.contains(&channel_id.get());
 
