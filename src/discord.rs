@@ -970,6 +970,22 @@ impl EventHandler for Handler {
             .clone();
 
         let channel_id = reaction.channel_id;
+
+        // allow_user_messages gating: reactions are only processed in threads
+        // where the bot is already involved (participated or owns the thread).
+        // This prevents reactions from pulling the bot into new conversations.
+        match self.allow_user_messages {
+            AllowUsers::Mentions => return,
+            AllowUsers::Involved | AllowUsers::MultibotMentions => {
+                let (involved, _) = self
+                    .bot_participated_in_thread(&ctx.http, channel_id, bot_id)
+                    .await;
+                if !involved {
+                    return;
+                }
+            }
+        }
+
         let message_id = reaction.message_id;
         let allow_all_channels = self.allow_all_channels;
         let allowed_channels = self.allowed_channels.clone();
