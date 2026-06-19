@@ -189,6 +189,16 @@ stall_hard_ms = 30000
 done_hold_ms = 1500
 error_hold_ms = 2500
 
+# --- Emoji reaction equivalency ---
+# Map emoji reactions to text commands. Reacting with a mapped emoji
+# is equivalent to sending the corresponding text message.
+# Requires GUILD_MESSAGE_REACTIONS privileged intent enabled in Discord Developer Portal.
+# [reactions.equivalency]
+# "👍" = "OK"
+# "👎" = "不行"
+# "🔄" = "重新 review"
+# "✅" = "approve"
+
 # --- Scheduled messages (config-driven cron) ---
 # Everything cron-related lives under [cron].
 
