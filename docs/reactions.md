@@ -39,7 +39,7 @@ Reaction mapping respects all existing access control policies:
 | `allowed_users` / `allow_all_users` | Denied users cannot trigger via reactions |
 | `allow_bot_messages` | `off`/`mentions` → bot reactions ignored; `all` → allowed (respects `trusted_bot_ids`) |
 | `allow_user_messages` | `mentions` → reactions disabled entirely; `involved`/`multibot-mentions` → only in threads where bot has participated |
-| `multibot-mentions` + multibot thread | Reactions rejected (can't express @mention) |
+| `multibot-mentions` + multibot thread | Only responds if the reaction is on **this bot's** message (implicit targeting) |
 | Channel/thread allowlist | Same ACL as text messages |
 
 ## Limitations

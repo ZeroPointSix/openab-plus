@@ -995,6 +995,10 @@ impl EventHandler for Handler {
         // Snapshot multibot state (irreversible, safe to read early).
         let other_bot_present = self.multibot_cache.is_multibot(&channel_id.to_string());
 
+        // In multibot threads, reaction target message's author determines which bot responds.
+        // message_author_id is provided by Discord in REACTION_ADD events.
+        let message_author_id = reaction.message_author_id;
+
         let message_id = reaction.message_id;
         let allow_all_channels = self.allow_all_channels;
         let allowed_channels = self.allowed_channels.clone();
@@ -1075,9 +1079,14 @@ impl EventHandler for Handler {
                     if !is_thread || !bot_involved {
                         return;
                     }
-                    // In multibot threads, require @mention (which reactions can't provide).
+                    // In multibot threads, the reaction target message's author
+                    // determines which bot responds. Only process if the user
+                    // reacted on THIS bot's message.
                     if other_bot_present {
-                        return;
+                        match message_author_id {
+                            Some(author) if author == bot_id => {} // targeted at us
+                            _ => return,
+                        }
                     }
                 }
             }
