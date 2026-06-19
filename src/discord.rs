@@ -1004,6 +1004,8 @@ impl EventHandler for Handler {
         let allow_all_channels = self.allow_all_channels;
         let allowed_channels = self.allowed_channels.clone();
         let allow_user_messages = self.allow_user_messages;
+        let allow_bot_messages = self.allow_bot_messages;
+        let trusted_bot_ids = self.trusted_bot_ids.clone();
         let dispatcher = self.dispatcher.clone();
         let ctl_registry = self.ctl_registry.clone();
         let http = ctx.http.clone();
@@ -1025,7 +1027,16 @@ impl EventHandler for Handler {
             // Defense-in-depth: if to_user() reveals this is a bot but member was
             // None (rare edge case), re-apply bot gating retroactively.
             if is_bot_confirmed && !is_reactor_bot {
-                return;
+                match allow_bot_messages {
+                    AllowBots::Off | AllowBots::Mentions => return,
+                    AllowBots::All => {
+                        if !trusted_bot_ids.is_empty()
+                            && !trusted_bot_ids.contains(&user_id.get())
+                        {
+                            return;
+                        }
+                    }
+                }
             }
 
             let in_allowed_channel =
