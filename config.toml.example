@@ -193,11 +193,12 @@ error_hold_ms = 2500
 # Map emoji reactions to text commands. Reacting with a mapped emoji
 # is equivalent to sending the corresponding text message.
 # Requires GUILD_MESSAGE_REACTIONS intent enabled in Discord Developer Portal.
+# Keys can be unicode emoji or Discord shortcodes (e.g. :thumbsup:).
 # [reactions.mapping]
 # "👍" = "OK"
-# "👎" = "不行"
-# "🔄" = "重新 review"
-# "✅" = "approve"
+# ":thumbsdown:" = "不行"
+# ":arrows_counterclockwise:" = "重新 review"
+# ":white_check_mark:" = "approve"
 
 # --- Scheduled messages (config-driven cron) ---
 # Everything cron-related lives under [cron].
