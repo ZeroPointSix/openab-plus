@@ -922,7 +922,10 @@ impl EventHandler for Handler {
         // Extract unicode emoji string from the reaction.
         let emoji_str = match &reaction.emoji {
             ReactionType::Unicode(s) => s.clone(),
-            _ => return, // custom emojis not supported
+            _ => {
+                tracing::debug!(emoji = ?reaction.emoji, "ignoring non-unicode reaction");
+                return;
+            }
         };
 
         // Look up mapping (early exit before any API calls).
