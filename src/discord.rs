@@ -925,7 +925,7 @@ impl EventHandler for Handler {
             _ => return, // custom emojis not supported
         };
 
-        // Look up mapping.
+        // Look up mapping (early exit before any API calls).
         let mapping = &self.router.reactions_config().mapping;
         let prompt = match mapping.get(&emoji_str) {
             Some(text) => text.clone(),
@@ -937,38 +937,66 @@ impl EventHandler for Handler {
             None => return,
         };
 
+        // Determine if reactor is a bot (from member hint or user fetch).
+        let is_reactor_bot = reaction
+            .member
+            .as_ref()
+            .map(|m| m.user.bot)
+            .unwrap_or(false);
+
+        // Bot gating: apply same allow_bot_messages policy as message().
+        if is_reactor_bot {
+            match self.allow_bot_messages {
+                AllowBots::Off => return,
+                // For reactions there is no @mention concept — treat as "not mentioned".
+                AllowBots::Mentions => return,
+                AllowBots::All => {}
+            }
+        }
+
+        // User allowlist check (same as message() handler).
+        if is_denied_user(
+            is_reactor_bot,
+            self.allow_all_users,
+            &self.allowed_users,
+            user_id.get(),
+        ) {
+            return;
+        }
+
         let adapter = self
             .adapter
             .get_or_init(|| Arc::new(DiscordAdapter::new(ctx.http.clone())))
             .clone();
 
         // Fetch user info for sender context.
-        let (sender_name, display_name) = match user_id.to_user(&ctx.http).await {
-            Ok(user) => {
-                let display = user.global_name.as_ref().unwrap_or(&user.name).clone();
-                (user.name.clone(), display)
-            }
-            Err(_) => {
-                let fallback = user_id.to_string();
-                (fallback.clone(), fallback)
-            }
-        };
+        let (sender_name, display_name, is_bot_confirmed) =
+            match user_id.to_user(&ctx.http).await {
+                Ok(user) => {
+                    let display = user.global_name.as_ref().unwrap_or(&user.name).clone();
+                    (user.name.clone(), display, user.bot)
+                }
+                Err(_) => {
+                    let fallback = user_id.to_string();
+                    (fallback.clone(), fallback, is_reactor_bot)
+                }
+            };
 
         // Determine thread context from the reacted message's channel.
         let channel_id = reaction.channel_id;
         let in_allowed_channel =
             self.allow_all_channels || self.allowed_channels.contains(&channel_id.get());
 
-        // Thread detection: check if this channel is a thread.
+        // Thread detection: match detect_thread() logic — thread channel_id in
+        // allowlist OR parent in allowlist OR allow_all_channels.
         let (thread_channel, _thread_parent_id) = match channel_id.to_channel(&ctx.http).await {
             Ok(serenity::model::channel::Channel::Guild(gc)) => {
                 if gc.thread_metadata.is_some() {
-                    // It's a thread — parent must be allowed.
                     let parent = gc.parent_id.map(|p| p.get());
-                    let parent_allowed = parent
-                        .map(|p| self.allow_all_channels || self.allowed_channels.contains(&p))
-                        .unwrap_or(false);
-                    if !parent_allowed {
+                    let in_allowed_thread = in_allowed_channel
+                        || self.allow_all_channels
+                        || parent.is_some_and(|pid| self.allowed_channels.contains(&pid));
+                    if !in_allowed_thread {
                         return;
                     }
                     (
@@ -1000,6 +1028,12 @@ impl EventHandler for Handler {
             _ => return, // DM or unknown channel — not supported
         };
 
+        // Check multibot state for this thread (consistent with message handler).
+        let other_bot_present = {
+            let cache = self.multibot_threads.lock().await;
+            cache.contains_key(&channel_id.to_string())
+        } || self.multibot_cache.is_multibot(&channel_id.to_string());
+
         let message_id = reaction.message_id;
         let trigger_msg = MessageRef {
             channel: ChannelRef {
@@ -1024,7 +1058,7 @@ impl EventHandler for Handler {
                 .unwrap_or(&thread_channel.channel_id)
                 .to_string(),
             thread_id: thread_channel.parent_id.as_ref().map(|_| thread_channel.channel_id.clone()),
-            is_bot: false,
+            is_bot: is_bot_confirmed,
             timestamp: Some(chrono::Utc::now().to_rfc3339()),
             message_id: Some(message_id.to_string()),
             receiver_id: Some(bot_id.to_string()),
@@ -1044,7 +1078,7 @@ impl EventHandler for Handler {
             trigger_msg,
             arrived_at: std::time::Instant::now(),
             estimated_tokens,
-            other_bot_present: false,
+            other_bot_present,
             recipient: None,
         };
 
@@ -1052,7 +1086,7 @@ impl EventHandler for Handler {
             .submit(thread_key, thread_channel, adapter, buf_msg)
             .await
         {
-            error!("reaction equivalency dispatcher submit error: {e}");
+            error!("reaction mapping dispatcher submit error: {e}");
         }
     }
 
