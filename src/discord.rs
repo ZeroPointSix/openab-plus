@@ -986,14 +986,15 @@ impl EventHandler for Handler {
             return;
         }
 
-        // Snapshot participation state before spawn (positive-only cache; safe to read early).
-        let bot_involved = {
-            let cache = self.participated_threads.lock().await;
-            cache.get(&channel_id.to_string())
-                .is_some_and(|ts| ts.elapsed() < self.session_ttl)
-        };
-        // Snapshot multibot state (irreversible, safe to read early).
-        let other_bot_present = self.multibot_cache.is_multibot(&channel_id.to_string());
+        // Snapshot participation state — use same API-backed check as message().
+        let (bot_involved, _) = self
+            .bot_participated_in_thread(&ctx.http, channel_id, bot_id)
+            .await;
+        // Snapshot multibot state: check both in-memory and disk cache (matches message()).
+        let other_bot_present = {
+            let cache = self.multibot_threads.lock().await;
+            cache.contains_key(&channel_id.to_string())
+        } || self.multibot_cache.is_multibot(&channel_id.to_string());
 
         // In multibot threads, reaction target message's author determines which bot responds.
         // message_author_id is provided by Discord in REACTION_ADD events.
