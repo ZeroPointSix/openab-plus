@@ -44,6 +44,7 @@ Reaction mapping respects all existing access control policies:
 
 ## Limitations
 
+- **Bot's own reactions are always ignored** — the bot's status emoji (👀, 🤔, 🆗, etc.) will never trigger mapping, even if they match a configured key. This prevents feedback loops.
 - **Unicode emoji only** — custom server emoji (`:custom_name:`) are silently ignored.
 - **Thread-only** (in `involved`/`multibot-mentions` mode) — reactions in non-thread channels are ignored unless `allow_user_messages` is set to a mode that allows them.
 - **No reaction removal handling** — only `reaction_add` events trigger mapping; removing a reaction has no effect.
