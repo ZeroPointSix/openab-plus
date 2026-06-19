@@ -328,12 +328,12 @@ Fine-tune reaction timing behavior (milliseconds).
 | `done_hold_ms` | `1500` | How long to show the done emoji before removing (if `remove_after_reply`). |
 | `error_hold_ms` | `2500` | How long to show the error emoji before removing. |
 
-### `[reactions.equivalency]`
+### `[reactions.mapping]`
 
 Map emoji reactions to text commands. When a user reacts with a configured emoji on any message in a monitored channel, the bot treats it as if the user sent the corresponding text message.
 
 ```toml
-[reactions.equivalency]
+[reactions.mapping]
 "👍" = "OK"
 "👎" = "不行"
 "🔄" = "重新 review"

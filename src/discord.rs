@@ -925,9 +925,9 @@ impl EventHandler for Handler {
             _ => return, // custom emojis not supported
         };
 
-        // Look up equivalency mapping.
-        let equivalency = &self.router.reactions_config().equivalency;
-        let prompt = match equivalency.get(&emoji_str) {
+        // Look up mapping.
+        let mapping = &self.router.reactions_config().mapping;
+        let prompt = match mapping.get(&emoji_str) {
             Some(text) => text.clone(),
             None => return, // emoji not mapped
         };

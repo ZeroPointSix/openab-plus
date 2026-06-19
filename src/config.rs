@@ -659,10 +659,10 @@ pub struct ReactionsConfig {
     pub emojis: ReactionEmojis,
     #[serde(default)]
     pub timing: ReactionTiming,
-    /// Emoji-to-text equivalency mapping. When a user reacts with a mapped emoji,
+    /// Emoji-to-text mapping. When a user reacts with a mapped emoji,
     /// it is treated as if they sent the corresponding text message.
     #[serde(default)]
-    pub equivalency: HashMap<String, String>,
+    pub mapping: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -792,7 +792,7 @@ impl Default for ReactionsConfig {
             tool_display: ToolDisplay::default(),
             emojis: ReactionEmojis::default(),
             timing: ReactionTiming::default(),
-            equivalency: HashMap::new(),
+            mapping: HashMap::new(),
         }
     }
 }
