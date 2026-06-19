@@ -969,125 +969,123 @@ impl EventHandler for Handler {
             .get_or_init(|| Arc::new(DiscordAdapter::new(ctx.http.clone())))
             .clone();
 
-        // Fetch user info for sender context.
-        let (sender_name, display_name, is_bot_confirmed) =
-            match user_id.to_user(&ctx.http).await {
-                Ok(user) => {
-                    let display = user.global_name.as_ref().unwrap_or(&user.name).clone();
-                    (user.name.clone(), display, user.bot)
-                }
-                Err(_) => {
-                    let fallback = user_id.to_string();
-                    (fallback.clone(), fallback, is_reactor_bot)
-                }
-            };
-
-        // Determine thread context from the reacted message's channel.
         let channel_id = reaction.channel_id;
-        let in_allowed_channel =
-            self.allow_all_channels || self.allowed_channels.contains(&channel_id.get());
+        let message_id = reaction.message_id;
+        let allow_all_channels = self.allow_all_channels;
+        let allowed_channels = self.allowed_channels.clone();
+        let multibot_threads = self.multibot_threads.lock().await
+            .contains_key(&channel_id.to_string());
+        let multibot_disk = self.multibot_cache.is_multibot(&channel_id.to_string());
+        let other_bot_present = multibot_threads || multibot_disk;
+        let dispatcher = self.dispatcher.clone();
+        let ctl_registry = self.ctl_registry.clone();
+        let http = ctx.http.clone();
 
-        // Thread detection: match detect_thread() logic — thread channel_id in
-        // allowlist OR parent in allowlist OR allow_all_channels.
-        let (thread_channel, _thread_parent_id) = match channel_id.to_channel(&ctx.http).await {
-            Ok(serenity::model::channel::Channel::Guild(gc)) => {
-                if gc.thread_metadata.is_some() {
-                    let parent = gc.parent_id.map(|p| p.get());
-                    let in_allowed_thread = in_allowed_channel
-                        || self.allow_all_channels
-                        || parent.is_some_and(|pid| self.allowed_channels.contains(&pid));
-                    if !in_allowed_thread {
-                        return;
+        tokio::spawn(async move {
+            // Fetch user info for sender context.
+            let (sender_name, display_name, is_bot_confirmed) =
+                match user_id.to_user(&http).await {
+                    Ok(user) => {
+                        let display = user.global_name.as_ref().unwrap_or(&user.name).clone();
+                        (user.name.clone(), display, user.bot)
                     }
-                    (
+                    Err(_) => {
+                        let fallback = user_id.to_string();
+                        (fallback.clone(), fallback, is_reactor_bot)
+                    }
+                };
+
+            let in_allowed_channel =
+                allow_all_channels || allowed_channels.contains(&channel_id.get());
+
+            // Thread detection: match detect_thread() logic.
+            let thread_channel = match channel_id.to_channel(&http).await {
+                Ok(serenity::model::channel::Channel::Guild(gc)) => {
+                    if gc.thread_metadata.is_some() {
+                        let parent = gc.parent_id.map(|p| p.get());
+                        let in_allowed_thread = in_allowed_channel
+                            || allow_all_channels
+                            || parent.is_some_and(|pid| allowed_channels.contains(&pid));
+                        if !in_allowed_thread {
+                            return;
+                        }
                         ChannelRef {
                             platform: "discord".into(),
                             channel_id: channel_id.get().to_string(),
                             thread_id: None,
                             parent_id: parent.map(|p| p.to_string()),
                             origin_event_id: None,
-                        },
-                        parent.map(|p| p.to_string()),
-                    )
-                } else {
-                    if !in_allowed_channel {
-                        return;
-                    }
-                    (
+                        }
+                    } else {
+                        if !in_allowed_channel {
+                            return;
+                        }
                         ChannelRef {
                             platform: "discord".into(),
                             channel_id: channel_id.get().to_string(),
                             thread_id: None,
                             parent_id: None,
                             origin_event_id: None,
-                        },
-                        None,
-                    )
+                        }
+                    }
                 }
+                _ => return,
+            };
+
+            let trigger_msg = MessageRef {
+                channel: ChannelRef {
+                    platform: "discord".into(),
+                    channel_id: channel_id.get().to_string(),
+                    thread_id: None,
+                    parent_id: None,
+                    origin_event_id: None,
+                },
+                message_id: message_id.to_string(),
+            };
+
+            let sender = SenderContext {
+                schema: "openab.sender.v1".into(),
+                sender_id: user_id.to_string(),
+                sender_name: sender_name.clone(),
+                display_name,
+                channel: "discord".into(),
+                channel_id: thread_channel
+                    .parent_id
+                    .as_deref()
+                    .unwrap_or(&thread_channel.channel_id)
+                    .to_string(),
+                thread_id: thread_channel.parent_id.as_ref().map(|_| thread_channel.channel_id.clone()),
+                is_bot: is_bot_confirmed,
+                timestamp: Some(chrono::Utc::now().to_rfc3339()),
+                message_id: Some(message_id.to_string()),
+                receiver_id: Some(bot_id.to_string()),
+            };
+
+            let sender_id = sender.sender_id.clone();
+            let sender_name_clone = sender.sender_name.clone();
+            let sender_json = serde_json::to_string(&sender).unwrap();
+            let thread_key = dispatcher.key("discord", &thread_channel.channel_id, &sender_id);
+            let estimated_tokens = crate::dispatch::estimate_tokens(&prompt, &[]);
+            let buf_msg = crate::dispatch::BufferedMessage {
+                sender_json,
+                sender_name: sender_name_clone,
+                prompt,
+                extra_blocks: Vec::new(),
+                trigger_msg,
+                arrived_at: std::time::Instant::now(),
+                estimated_tokens,
+                other_bot_present,
+                recipient: None,
+            };
+
+            crate::ctl::register_thread(&ctl_registry, &thread_channel.channel_id, "discord").await;
+            if let Err(e) = dispatcher
+                .submit(thread_key, thread_channel, adapter, buf_msg)
+                .await
+            {
+                error!("reaction mapping dispatcher submit error: {e}");
             }
-            _ => return, // DM or unknown channel — not supported
-        };
-
-        // Check multibot state for this thread (consistent with message handler).
-        let other_bot_present = {
-            let cache = self.multibot_threads.lock().await;
-            cache.contains_key(&channel_id.to_string())
-        } || self.multibot_cache.is_multibot(&channel_id.to_string());
-
-        let message_id = reaction.message_id;
-        let trigger_msg = MessageRef {
-            channel: ChannelRef {
-                platform: "discord".into(),
-                channel_id: channel_id.get().to_string(),
-                thread_id: None,
-                parent_id: None,
-                origin_event_id: None,
-            },
-            message_id: message_id.to_string(),
-        };
-
-        let sender = SenderContext {
-            schema: "openab.sender.v1".into(),
-            sender_id: user_id.to_string(),
-            sender_name: sender_name.clone(),
-            display_name,
-            channel: "discord".into(),
-            channel_id: thread_channel
-                .parent_id
-                .as_deref()
-                .unwrap_or(&thread_channel.channel_id)
-                .to_string(),
-            thread_id: thread_channel.parent_id.as_ref().map(|_| thread_channel.channel_id.clone()),
-            is_bot: is_bot_confirmed,
-            timestamp: Some(chrono::Utc::now().to_rfc3339()),
-            message_id: Some(message_id.to_string()),
-            receiver_id: Some(bot_id.to_string()),
-        };
-
-        let dispatcher = self.dispatcher.clone();
-        let sender_id = sender.sender_id.clone();
-        let sender_name_clone = sender.sender_name.clone();
-        let sender_json = serde_json::to_string(&sender).unwrap();
-        let thread_key = dispatcher.key("discord", &thread_channel.channel_id, &sender_id);
-        let estimated_tokens = crate::dispatch::estimate_tokens(&prompt, &[]);
-        let buf_msg = crate::dispatch::BufferedMessage {
-            sender_json,
-            sender_name: sender_name_clone,
-            prompt,
-            extra_blocks: Vec::new(),
-            trigger_msg,
-            arrived_at: std::time::Instant::now(),
-            estimated_tokens,
-            other_bot_present,
-            recipient: None,
-        };
-
-        if let Err(e) = dispatcher
-            .submit(thread_key, thread_channel, adapter, buf_msg)
-            .await
-        {
-            error!("reaction mapping dispatcher submit error: {e}");
-        }
+        });
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
