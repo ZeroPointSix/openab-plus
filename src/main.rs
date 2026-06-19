@@ -14,8 +14,6 @@ use openab_core::secrets;
 use openab_core::setup;
 #[cfg(feature = "slack")]
 use openab_core::slack;
-use openab_core::stt;
-
 use clap::Parser;
 #[cfg(feature = "discord")]
 use serenity::gateway::GatewayError;
