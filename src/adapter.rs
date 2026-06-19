@@ -1759,6 +1759,58 @@ mod tests {
         // because <@1234> is "<@1234>" not "<@123>4"
         assert!(!chunk_contains_mention("hello <@1234> world", "<@123>"));
     }
+
+    #[test]
+    fn pipeline_split_then_propagate() {
+        // End-to-end: split a message that exceeds limit, then propagate mentions.
+        use crate::format::split_message;
+        let mention = "<@99999>";
+        let body = "x".repeat(80);
+        let content = format!("{mention} {body}");
+        let limit = 50;
+        let mentions = extract_mentions(&content);
+        let reserve = mention_footer_len(&mentions);
+        let chunks = split_message(&content, limit.saturating_sub(reserve));
+        let result = propagate_mentions_to_chunks(chunks, &mentions, limit);
+        // Every chunk must carry the mention and fit within limit.
+        for chunk in &result {
+            assert!(chunk.contains(mention), "chunk missing mention: {chunk}");
+            assert!(chunk.chars().count() <= limit, "chunk exceeds limit");
+        }
+    }
+
+    #[test]
+    fn extract_mentions_unclosed_fence() {
+        // Unclosed code fence — everything after it is "inside" fence, so no mentions extracted.
+        let content = "hello <@111>\n```\n<@222>\n<@333>";
+        let mentions = extract_mentions(content);
+        assert_eq!(mentions, vec!["<@111>"]);
+    }
+
+    #[test]
+    fn saturating_sub_large_reserve() {
+        // When mention_reserve exceeds the limit, saturating_sub yields 0.
+        // split_message with limit=0 puts nothing in first chunk but must not panic.
+        use crate::format::split_message;
+        let mentions = vec!["<@111111111111111111>".to_string(); 200];
+        let reserve = mention_footer_len(&mentions);
+        let limit: usize = 100;
+        // saturating_sub → 0
+        let effective = limit.saturating_sub(reserve);
+        assert_eq!(effective, 0);
+        let chunks = split_message("short", effective);
+        // Should not panic; propagation returns chunks unchanged when they'd exceed limit.
+        let result = propagate_mentions_to_chunks(chunks, &mentions, limit);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn role_vs_user_mention_distinction() {
+        // <@&123> (role) and <@123> (user) are distinct mentions.
+        let content = "<@123> hello <@&123>";
+        let mentions = extract_mentions(content);
+        assert_eq!(mentions, vec!["<@123>", "<@&123>"]);
+    }
 }
 
 #[cfg(test)]
