@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-15
 - **Author:** @pahud
-- **Supersedes:** Deployment model from [ADR: Custom Gateway](./custom-gateway.md)
+- **Amends:** Deployment model from [ADR: Custom Gateway](./custom-gateway.md) — outbound-only + gateway sidecar remains the default; unified mode is an opt-in alternative path.
 - **Implementation:** [PR #1146](https://github.com/openabdev/openab/pull/1146)
 
 ---
@@ -70,6 +70,13 @@ feishu     = ["dep:openab-gateway", "openab-gateway/feishu"]
 googlechat = ["dep:openab-gateway", "openab-gateway/googlechat"]
 wecom      = ["dep:openab-gateway", "openab-gateway/wecom"]
 teams      = ["dep:openab-gateway", "openab-gateway/teams"]
+```
+
+The `dep:openab-gateway` syntax requires the gateway crate as an optional dependency:
+
+```toml
+[dependencies]
+openab-gateway = { path = "crates/openab-gateway", default-features = false, optional = true }
 ```
 
 Users who want the unified single-binary experience:
@@ -231,8 +238,8 @@ For image tagging conventions (`stable/beta/latest/semver/pr<N>`), see [docs/ima
 
 - Default behavior is **unchanged** — existing two-binary deployments continue to work with no migration
 - The `unified` feature is purely additive — opting in requires only a build flag or image swap
-- No breaking change to config schema — `[telegram]`, `[line]` sections work in both modes
-- `[gateway]` config section continues to work for users who keep the two-binary model
+- No breaking change to config schema — `[gateway]` section continues to work for users who keep the two-binary model
+- Platform-specific config sections (`[telegram]`, `[line]`, etc.) are **unified-mode additions** — they are only read when the corresponding adapter is compiled in via feature flags
 
 ---
 
