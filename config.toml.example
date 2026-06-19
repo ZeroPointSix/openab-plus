@@ -192,7 +192,7 @@ error_hold_ms = 2500
 # --- Emoji reaction mapping ---
 # Map emoji reactions to text commands. Reacting with a mapped emoji
 # is equivalent to sending the corresponding text message.
-# Requires GUILD_MESSAGE_REACTIONS privileged intent enabled in Discord Developer Portal.
+# Requires GUILD_MESSAGE_REACTIONS intent enabled in Discord Developer Portal.
 # [reactions.mapping]
 # "👍" = "OK"
 # "👎" = "不行"

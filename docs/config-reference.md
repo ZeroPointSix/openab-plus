@@ -341,7 +341,7 @@ Map emoji reactions to text commands. When a user reacts with a configured emoji
 ```
 
 **Requirements:**
-- Enable the `GUILD_MESSAGE_REACTIONS` privileged intent in the Discord Developer Portal.
+- Enable the `GUILD_MESSAGE_REACTIONS` intent in the Discord Developer Portal.
 - Only unicode emoji are supported (custom server emoji are ignored).
 - The bot's own reactions are always ignored (prevents feedback loops).
 - Channel/thread access control still applies — reactions in non-monitored channels are ignored.
