@@ -950,7 +950,14 @@ impl EventHandler for Handler {
                 AllowBots::Off => return,
                 // For reactions there is no @mention concept — treat as "not mentioned".
                 AllowBots::Mentions => return,
-                AllowBots::All => {}
+                AllowBots::All => {
+                    // When trusted_bot_ids is configured, only those bots are allowed.
+                    if !self.trusted_bot_ids.is_empty()
+                        && !self.trusted_bot_ids.contains(&user_id.get())
+                    {
+                        return;
+                    }
+                }
             }
         }
 
@@ -982,12 +989,13 @@ impl EventHandler for Handler {
             cache.get(&channel_id.to_string())
                 .is_some_and(|ts| ts.elapsed() < self.session_ttl)
         };
+        // Snapshot multibot state (irreversible, safe to read early).
+        let other_bot_present = self.multibot_cache.is_multibot(&channel_id.to_string());
 
         let message_id = reaction.message_id;
         let allow_all_channels = self.allow_all_channels;
         let allowed_channels = self.allowed_channels.clone();
         let allow_user_messages = self.allow_user_messages;
-        let multibot_cache = self.multibot_cache.clone();
         let dispatcher = self.dispatcher.clone();
         let ctl_registry = self.ctl_registry.clone();
         let http = ctx.http.clone();
@@ -1046,18 +1054,24 @@ impl EventHandler for Handler {
             // allow_user_messages gating (post thread-detection):
             // In Involved/MultibotMentions mode, only respond in threads
             // where the bot has participated. Non-thread channels are rejected.
+            // MultibotMentions additionally rejects when other bots are present.
             match allow_user_messages {
                 AllowUsers::Mentions => return,
-                AllowUsers::Involved | AllowUsers::MultibotMentions => {
+                AllowUsers::Involved => {
                     if !is_thread || !bot_involved {
                         return;
                     }
                 }
+                AllowUsers::MultibotMentions => {
+                    if !is_thread || !bot_involved {
+                        return;
+                    }
+                    // In multibot threads, require @mention (which reactions can't provide).
+                    if other_bot_present {
+                        return;
+                    }
+                }
             }
-
-            // Check multibot state.
-            let other_bot_present =
-                multibot_cache.is_multibot(&channel_id.to_string());
 
             let trigger_msg = MessageRef {
                 channel: ChannelRef {
