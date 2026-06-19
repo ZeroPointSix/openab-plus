@@ -1767,7 +1767,7 @@ mod tests {
         let mention = "<@99999>";
         let body = "x".repeat(80);
         let content = format!("{mention} {body}");
-        let limit = 50;
+        let limit: usize = 50;
         let mentions = extract_mentions(&content);
         let reserve = mention_footer_len(&mentions);
         let chunks = split_message(&content, limit.saturating_sub(reserve));
