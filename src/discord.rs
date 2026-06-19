@@ -971,28 +971,23 @@ impl EventHandler for Handler {
 
         let channel_id = reaction.channel_id;
 
-        // allow_user_messages gating: reactions are only processed in threads
-        // where the bot is already involved (participated or owns the thread).
-        // This prevents reactions from pulling the bot into new conversations.
-        match self.allow_user_messages {
-            AllowUsers::Mentions => return,
-            AllowUsers::Involved | AllowUsers::MultibotMentions => {
-                let (involved, _) = self
-                    .bot_participated_in_thread(&ctx.http, channel_id, bot_id)
-                    .await;
-                if !involved {
-                    return;
-                }
-            }
+        // AllowUsers::Mentions means reactions cannot trigger (no @mention possible).
+        if self.allow_user_messages == AllowUsers::Mentions {
+            return;
         }
+
+        // Snapshot participation state before spawn (positive-only cache; safe to read early).
+        let bot_involved = {
+            let cache = self.participated_threads.lock().await;
+            cache.get(&channel_id.to_string())
+                .is_some_and(|ts| ts.elapsed() < self.session_ttl)
+        };
 
         let message_id = reaction.message_id;
         let allow_all_channels = self.allow_all_channels;
         let allowed_channels = self.allowed_channels.clone();
-        let multibot_threads = self.multibot_threads.lock().await
-            .contains_key(&channel_id.to_string());
-        let multibot_disk = self.multibot_cache.is_multibot(&channel_id.to_string());
-        let other_bot_present = multibot_threads || multibot_disk;
+        let allow_user_messages = self.allow_user_messages;
+        let multibot_cache = self.multibot_cache.clone();
         let dispatcher = self.dispatcher.clone();
         let ctl_registry = self.ctl_registry.clone();
         let http = ctx.http.clone();
@@ -1015,7 +1010,7 @@ impl EventHandler for Handler {
                 allow_all_channels || allowed_channels.contains(&channel_id.get());
 
             // Thread detection: match detect_thread() logic.
-            let thread_channel = match channel_id.to_channel(&http).await {
+            let (thread_channel, is_thread) = match channel_id.to_channel(&http).await {
                 Ok(serenity::model::channel::Channel::Guild(gc)) => {
                     if gc.thread_metadata.is_some() {
                         let parent = gc.parent_id.map(|p| p.get());
@@ -1025,28 +1020,44 @@ impl EventHandler for Handler {
                         if !in_allowed_thread {
                             return;
                         }
-                        ChannelRef {
+                        (ChannelRef {
                             platform: "discord".into(),
                             channel_id: channel_id.get().to_string(),
                             thread_id: None,
                             parent_id: parent.map(|p| p.to_string()),
                             origin_event_id: None,
-                        }
+                        }, true)
                     } else {
                         if !in_allowed_channel {
                             return;
                         }
-                        ChannelRef {
+                        (ChannelRef {
                             platform: "discord".into(),
                             channel_id: channel_id.get().to_string(),
                             thread_id: None,
                             parent_id: None,
                             origin_event_id: None,
-                        }
+                        }, false)
                     }
                 }
                 _ => return,
             };
+
+            // allow_user_messages gating (post thread-detection):
+            // In Involved/MultibotMentions mode, only respond in threads
+            // where the bot has participated. Non-thread channels are rejected.
+            match allow_user_messages {
+                AllowUsers::Mentions => return,
+                AllowUsers::Involved | AllowUsers::MultibotMentions => {
+                    if !is_thread || !bot_involved {
+                        return;
+                    }
+                }
+            }
+
+            // Check multibot state.
+            let other_bot_present =
+                multibot_cache.is_multibot(&channel_id.to_string());
 
             let trigger_msg = MessageRef {
                 channel: ChannelRef {
