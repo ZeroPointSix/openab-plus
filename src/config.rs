@@ -1521,4 +1521,90 @@ cancel_strategy = "noop"
         let ac = cfg.agentcore.unwrap();
         assert_eq!(ac.cancel_strategy, AgentCoreCancelStrategy::Noop);
     }
+
+    #[test]
+    fn reactions_mapping_unicode_keys() {
+        let toml = r#"
+[discord]
+bot_token = "t"
+
+[agent]
+command = "echo"
+
+[reactions.mapping]
+"👍" = "OK"
+"✅" = "approve"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert_eq!(cfg.reactions.mapping.get("👍").unwrap(), "OK");
+        assert_eq!(cfg.reactions.mapping.get("✅").unwrap(), "approve");
+    }
+
+    #[test]
+    fn reactions_mapping_shortcode_resolution() {
+        let toml = r#"
+[discord]
+bot_token = "t"
+
+[agent]
+command = "echo"
+
+[reactions.mapping]
+":thumbsup:" = "OK"
+":white_check_mark:" = "approve"
+":rocket:" = "deploy"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        // Shortcodes should be resolved to unicode
+        assert_eq!(cfg.reactions.mapping.get("👍").unwrap(), "OK");
+        assert_eq!(cfg.reactions.mapping.get("✅").unwrap(), "approve");
+        assert_eq!(cfg.reactions.mapping.get("🚀").unwrap(), "deploy");
+        // Original shortcode keys should not remain
+        assert!(cfg.reactions.mapping.get(":thumbsup:").is_none());
+    }
+
+    #[test]
+    fn reactions_mapping_unknown_shortcode_kept_as_is() {
+        let toml = r#"
+[discord]
+bot_token = "t"
+
+[agent]
+command = "echo"
+
+[reactions.mapping]
+":nonexistent_emoji_xyz:" = "nope"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        // Unknown shortcode kept as-is (won't match any reaction)
+        assert_eq!(
+            cfg.reactions.mapping.get(":nonexistent_emoji_xyz:").unwrap(),
+            "nope"
+        );
+    }
+
+    #[test]
+    fn reactions_mapping_mixed_unicode_and_shortcodes() {
+        let toml = r#"
+[discord]
+bot_token = "t"
+
+[agent]
+command = "echo"
+
+[reactions.mapping]
+"👎" = "reject"
+":rocket:" = "deploy"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert_eq!(cfg.reactions.mapping.get("👎").unwrap(), "reject");
+        assert_eq!(cfg.reactions.mapping.get("🚀").unwrap(), "deploy");
+        assert_eq!(cfg.reactions.mapping.len(), 2);
+    }
+
+    #[test]
+    fn reactions_mapping_empty_by_default() {
+        let cfg = parse_config(MINIMAL_TOML, "test").unwrap();
+        assert!(cfg.reactions.mapping.is_empty());
+    }
 }
