@@ -1,9 +1,10 @@
 # ADR: Separate Binaries with Opt-In Unified Build
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-15
 - **Author:** @pahud
 - **Supersedes:** Deployment model from [ADR: Custom Gateway](./custom-gateway.md)
+- **Implementation:** [PR #1146](https://github.com/openabdev/openab/pull/1146)
 
 ---
 
@@ -31,28 +32,38 @@ Restructure the project as a **Cargo workspace** that keeps the two-binary model
 
 ```
 openab/
-├── Cargo.toml              (workspace root)
+├── Cargo.toml              (workspace root + binary crate)
+├── src/                    (core modules — Discord, Slack, ACP, Dispatcher,
+│                            SessionPool, ChatAdapter trait)
 ├── crates/
-│   ├── openab-core/        (ChatAdapter trait, ACP, Dispatcher, SessionPool,
-│   │                        Discord adapter, Slack adapter)
-│   └── openab-gateway/     (platform adapters: Telegram, LINE, Feishu,
+│   └── openab-gateway/     (webhook adapters: Telegram, LINE, Feishu,
 │                             Google Chat, WeCom, Teams — impl ChatAdapter)
-├── src/                    (final binary — thin main.rs wiring both crates)
 └── gateway/                (standalone gateway binary — kept for backward compat)
 ```
 
-### Feature Flags (on the final binary crate)
+> **Note:** Extracting `openab-core` as a separate library crate was considered but deferred
+> to Phase 2 — it would require changing visibility on 30+ internal modules. The current
+> approach keeps core in the root crate and only extracts gateway adapters.
+
+### Feature Flags (on the root binary crate)
 
 ```toml
 [features]
-# Default: core only (Discord + Slack). Gateway ships as separate binary.
-default = ["discord", "slack"]
+# Default: core adapters (Discord + Slack) + infrastructure.
+default = ["discord", "slack", "secrets-aws", "agentcore"]
 
 # Opt-in: compile all gateway adapters into a single unified binary
 unified = ["telegram", "line", "feishu", "googlechat", "wecom", "teams"]
 
-discord    = ["openab-core/discord"]
-slack      = ["openab-core/slack"]
+# Core adapters (directly in root crate)
+discord    = ["dep:serenity"]
+slack      = []
+
+# Infrastructure
+secrets-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
+agentcore   = ["dep:aws-config", "dep:aws-sigv4", ...]
+
+# Gateway adapters (each pulls in the gateway crate as optional dep)
 telegram   = ["dep:openab-gateway", "openab-gateway/telegram"]
 line       = ["dep:openab-gateway", "openab-gateway/line"]
 feishu     = ["dep:openab-gateway", "openab-gateway/feishu"]
@@ -165,38 +176,46 @@ cargo build --features telegram,line       # core + specific adapters only
 
 ### Dockerfile Build Arg
 
-A single Dockerfile supports both modes via `BUILD_MODE` arg:
+The root Dockerfile supports both modes via `BUILD_MODE` and `FEATURES` args:
 
 ```dockerfile
 ARG BUILD_MODE=default
 ARG FEATURES=""
 
-FROM rust:1.87 AS builder
+FROM rust:1-bookworm AS builder
 ARG BUILD_MODE
 ARG FEATURES
 
-WORKDIR /src
+WORKDIR /build
 COPY . .
 
 RUN if [ "$BUILD_MODE" = "unified" ]; then \
       cargo build --release --features unified; \
     elif [ -n "$FEATURES" ]; then \
-      cargo build --release --features "$FEATURES"; \
+      cargo build --release --no-default-features --features "$FEATURES"; \
     else \
       cargo build --release; \
     fi
 ```
 
+**Build semantics differ between root and agent Dockerfiles:**
+
+| Dockerfile | `FEATURES` behavior | Rationale |
+|------------|--------------------|-----------| 
+| Root (`Dockerfile`) | `--no-default-features --features "$FEATURES"` | Explicit control — user specifies exactly which adapters |
+| Agent (`Dockerfile.<agent>`) | `--features "$FEATURES"` (additive) | Adds adapters on top of defaults (Discord + Slack) |
+
 ```bash
-# Default: separate core binary
-docker build -t openab:latest .
+# Root Dockerfile examples:
+docker build -t openab:latest .                                    # default
+docker build --build-arg BUILD_MODE=unified -t openab:unified .    # all adapters
+docker build --build-arg FEATURES=telegram,line -t openab:custom . # ONLY these (no Discord/Slack)
 
-# Unified: all adapters in one binary
-docker build --build-arg BUILD_MODE=unified -t openab:unified .
-
-# Custom: pick specific adapters
-docker build --build-arg FEATURES=telegram,line -t openab:custom .
+# Agent Dockerfile examples (additive — Discord + Slack always included):
+docker build -f Dockerfile.claude --build-arg FEATURES=telegram -t openab-claude:tg .
 ```
+
+For image tagging conventions (`stable/beta/latest/semver/pr<N>`), see [docs/image-tags.md](../image-tags.md).
 
 ---
 
