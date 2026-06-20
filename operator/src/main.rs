@@ -6,6 +6,7 @@ mod create;
 mod get;
 mod delete;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -130,11 +131,10 @@ async fn main() -> anyhow::Result<()> {
             delete::run(&config, &resource, &name, &cluster, &namespace).await
         }
         Commands::Exec { agent, command } => {
-            let resolved = ecsctl::alias::resolve(&config, &agent).await?;
+            let resolved = resolve_agent(&config, &agent).await?;
             let cmd = if command.is_empty() {
                 None
             } else {
-                // Join args with single-quote escaping to prevent shell interpretation
                 let joined = command.iter().map(|a| {
                     format!("'{}'", a.replace('\'', "'\\''"))
                 }).collect::<Vec<_>>().join(" ");
@@ -188,4 +188,29 @@ async fn main() -> anyhow::Result<()> {
             bootstrap::run(&cfg, delete, status, imports).await
         }
     }
+}
+
+/// Resolve agent name to cluster/task_id/container for ECS Exec.
+/// Looks up service "oab-prod-<name>" in cluster "oab".
+async fn resolve_agent(config: &aws_config::SdkConfig, name: &str) -> anyhow::Result<String> {
+    // If already in cluster/task/container format, pass through
+    if name.contains('/') {
+        return Ok(name.to_string());
+    }
+
+    let ecs = aws_sdk_ecs::Client::new(config);
+    let service_name = format!("oab-prod-{name}");
+
+    let tasks = ecs.list_tasks()
+        .cluster("oab")
+        .service_name(&service_name)
+        .desired_status(aws_sdk_ecs::types::DesiredStatus::Running)
+        .send().await
+        .context(format!("failed to list tasks for {service_name}"))?;
+
+    let task_arn = tasks.task_arns().first()
+        .context(format!("no running tasks for agent '{name}'"))?;
+
+    let task_id = task_arn.rsplit('/').next().unwrap_or(task_arn);
+    Ok(format!("oab/{task_id}/openab"))
 }
