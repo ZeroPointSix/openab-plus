@@ -5,12 +5,17 @@ use aws_sdk_secretsmanager::Client as SmClient;
 use std::io::{self, Write};
 
 const BACKENDS: &[(&str, &str)] = &[
-    ("kiro", "public.ecr.aws/oablab/kiro"),
-    ("claude-code", "public.ecr.aws/oablab/claude-code"),
-    ("codex", "public.ecr.aws/oablab/codex"),
-    ("gemini", "public.ecr.aws/oablab/gemini"),
-    ("copilot", "public.ecr.aws/oablab/copilot"),
-    ("opencode", "public.ecr.aws/oablab/opencode"),
+    ("kiro", "ghcr.io/openabdev/openab"),
+    ("claude-code", "ghcr.io/openabdev/openab-claude"),
+    ("codex", "ghcr.io/openabdev/openab-codex"),
+    ("gemini", "ghcr.io/openabdev/openab-gemini"),
+    ("copilot", "ghcr.io/openabdev/openab-copilot"),
+    ("opencode", "ghcr.io/openabdev/openab-opencode"),
+    ("hermes", "ghcr.io/openabdev/openab-hermes"),
+    ("grok", "ghcr.io/openabdev/openab-grok"),
+    ("cursor", "ghcr.io/openabdev/openab-cursor"),
+    ("mimocode", "ghcr.io/openabdev/openab-mimocode"),
+    ("antigravity", "ghcr.io/openabdev/openab-antigravity"),
 ];
 
 const CHANNELS: &[&str] = &["stable", "beta"];
