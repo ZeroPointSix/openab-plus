@@ -106,14 +106,31 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
 
     // 8. Security group (always create a dedicated one)
     let sg_name = format!("oab-{name}");
-    let resp = ec2.create_security_group()
+    let sg_id = match ec2.create_security_group()
         .group_name(&sg_name)
         .description(format!("OAB agent {name}"))
         .vpc_id(&vpc.id)
         .send().await
-        .context("failed to create security group")?;
-    let sg_id = resp.group_id().unwrap_or_default().to_string();
-    eprintln!("   → Created security group: {sg_id} ({sg_name})\n");
+    {
+        Ok(resp) => {
+            let id = resp.group_id().unwrap_or_default().to_string();
+            eprintln!("   → Created security group: {id} ({sg_name})\n");
+            id
+        }
+        Err(_) => {
+            // SG already exists — look it up
+            let existing = ec2.describe_security_groups()
+                .filters(aws_sdk_ec2::types::Filter::builder().name("group-name").values(&sg_name).build())
+                .filters(aws_sdk_ec2::types::Filter::builder().name("vpc-id").values(&vpc.id).build())
+                .send().await?;
+            let id = existing.security_groups().first()
+                .and_then(|sg| sg.group_id())
+                .context("SG exists but could not be found")?
+                .to_string();
+            eprintln!("   → Using existing security group: {id} ({sg_name})\n");
+            id
+        }
+    };
 
     // ─── Generate config.toml ──────────────────────────────────────────────
     let config_toml = generate_config(backend, name, namespace, stt_enabled);
