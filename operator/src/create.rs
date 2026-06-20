@@ -104,27 +104,16 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     }
     eprintln!();
 
-    // 8. Security group
-    let sgs = list_security_groups(&ec2, &vpc.id).await?;
-    let mut sg_labels: Vec<String> = vec!["Create new (oab-{name})".to_string()];
-    sg_labels.extend(sgs.iter().map(|s| format!("{} ({})", s.id, s.name)));
-    let sg_labels_ref: Vec<&str> = sg_labels.iter().map(|s| s.as_str()).collect();
-    let sg_choice = prompt_select("Security group", &sg_labels_ref)?;
-
-    let sg_id = if sg_choice.starts_with("Create new") {
-        let sg_name = format!("oab-{name}");
-        let resp = ec2.create_security_group()
-            .group_name(&sg_name)
-            .description(format!("OAB agent {name}"))
-            .vpc_id(&vpc.id)
-            .send().await
-            .context("failed to create security group")?;
-        let id = resp.group_id().unwrap_or_default().to_string();
-        eprintln!("   → Created security group: {id}\n");
-        id
-    } else {
-        sgs.iter().find(|s| sg_choice.contains(&s.id)).unwrap().id.clone()
-    };
+    // 8. Security group (always create a dedicated one)
+    let sg_name = format!("oab-{name}");
+    let resp = ec2.create_security_group()
+        .group_name(&sg_name)
+        .description(format!("OAB agent {name}"))
+        .vpc_id(&vpc.id)
+        .send().await
+        .context("failed to create security group")?;
+    let sg_id = resp.group_id().unwrap_or_default().to_string();
+    eprintln!("   → Created security group: {sg_id} ({sg_name})\n");
 
     // ─── Generate config.toml ──────────────────────────────────────────────
     let config_toml = generate_config(backend, name, namespace, stt_enabled);
@@ -305,20 +294,6 @@ async fn select_subnets(ec2: &Ec2Client, vpc_id: &str) -> Result<Vec<SubnetInfo>
         anyhow::bail!("no subnets found in VPC {vpc_id}");
     }
     Ok(selected)
-}
-
-struct SgInfo { id: String, name: String }
-
-async fn list_security_groups(ec2: &Ec2Client, vpc_id: &str) -> Result<Vec<SgInfo>> {
-    let resp = ec2.describe_security_groups()
-        .filters(aws_sdk_ec2::types::Filter::builder().name("vpc-id").values(vpc_id).build())
-        .send().await?;
-    Ok(resp.security_groups().iter().map(|sg| {
-        SgInfo {
-            id: sg.group_id().unwrap_or_default().to_string(),
-            name: sg.group_name().unwrap_or_default().to_string(),
-        }
-    }).collect())
 }
 
 fn generate_config(_backend: &str, name: &str, namespace: &str, stt_enabled: bool) -> String {
