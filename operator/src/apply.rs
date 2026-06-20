@@ -319,6 +319,10 @@ async fn apply_ecs(
         );
     }
 
+    // Register alias: agent name → cluster/service/container
+    let alias_target = format!("oab/{}/openab", service_name);
+    ecsctl::alias::set(&m.metadata.name, &alias_target).await?;
+
     if wait {
         eprintln!("  ⏳ Waiting for {} to stabilize...", m.metadata.name);
         ecsctl::apply::wait_for_stable(ecs, "oab", &service_name).await?;
