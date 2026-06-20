@@ -182,13 +182,21 @@ async fn apply_ecs(
         .collect();
 
     // 4. Register task definition
-    let container = ContainerDefinition::builder()
+    let mut container_builder = ContainerDefinition::builder()
         .name("openab")
         .image(&m.spec.image)
         .essential(true)
         .set_environment(Some(env_vars))
-        .set_secrets(if secrets.is_empty() { None } else { Some(secrets) })
-        .build();
+        .set_secrets(if secrets.is_empty() { None } else { Some(secrets) });
+
+    if !m.spec.config_from.is_empty() {
+        container_builder = container_builder
+            .entry_point("sh")
+            .entry_point("-c")
+            .command("aws s3 cp $CONFIG_S3_PATH /etc/openab/config.toml && exec openab run -c /etc/openab/config.toml");
+    }
+
+    let container = container_builder.build();
 
     let task_def = ecs
         .register_task_definition()
