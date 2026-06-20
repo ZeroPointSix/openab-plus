@@ -164,11 +164,25 @@ async fn apply_ecs(
         KeyValuePair::builder().name("NAMESPACE").value(&m.metadata.namespace).build(),
         KeyValuePair::builder().name("NAME").value(&m.metadata.name).build(),
     ];
-    if !m.spec.config_from.is_empty() {
-        env_vars.push(KeyValuePair::builder().name("CONFIG_S3_PATH").value(&m.spec.config_from).build());
-    }
     if let Some(ref bootstrap) = m.spec.bootstrap_from {
         env_vars.push(KeyValuePair::builder().name("BOOTSTRAP_FROM").value(bootstrap).build());
+    }
+
+    // Read and embed config.toml as base64 env var
+    let has_config = !m.spec.config_from.is_empty();
+    if has_config {
+        // Resolve config content: if S3 path, download; otherwise treat as local
+        let config_content = if let Some(s3_path) = m.spec.config_from.strip_prefix("s3://") {
+            let (bucket, key) = s3_path.split_once('/').context("invalid configFrom S3 URI")?;
+            let resp = s3.get_object().bucket(bucket).key(key).send().await
+                .context("failed to download config from S3")?;
+            resp.body.collect().await?.into_bytes().to_vec()
+        } else {
+            std::fs::read(&m.spec.config_from).context("failed to read local config file")?
+        };
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&config_content);
+        env_vars.push(KeyValuePair::builder().name("CONFIG_B64").value(&b64).build());
     }
 
     // 3. Build secrets from map
@@ -189,11 +203,11 @@ async fn apply_ecs(
         .set_environment(Some(env_vars))
         .set_secrets(if secrets.is_empty() { None } else { Some(secrets) });
 
-    if !m.spec.config_from.is_empty() {
+    if has_config {
         container_builder = container_builder
             .entry_point("sh")
             .entry_point("-c")
-            .command("aws s3 cp $CONFIG_S3_PATH /etc/openab/config.toml && exec openab run -c /etc/openab/config.toml");
+            .command("echo $CONFIG_B64 | base64 -d > /etc/openab/config.toml && exec openab run -c /etc/openab/config.toml");
     }
 
     let container = container_builder.build();
