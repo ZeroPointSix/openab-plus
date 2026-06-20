@@ -20,6 +20,14 @@ const BACKENDS: &[(&str, &str)] = &[
 
 const CHANNELS: &[&str] = &["stable", "beta"];
 
+const VALID_FARGATE_SIZING: &[(u32, &[u32])] = &[
+    (256, &[512, 1024, 2048]),
+    (512, &[1024, 2048, 3072, 4096]),
+    (1024, &[2048, 3072, 4096, 5120, 6144, 7168, 8192]),
+    (2048, &[4096, 5120, 6144, 7168, 8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384]),
+    (4096, &[8192, 9216, 10240, 11264, 12288, 13312, 14336, 15360, 16384, 17408, 18432, 19456, 20480, 21504, 22528, 23552, 24576, 25600, 26624, 27648, 28672, 29696, 30720]),
+];
+
 pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, auto_apply: bool) -> Result<()> {
     eprintln!("🤖 Creating agent: {name}\n");
 
@@ -66,7 +74,19 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     let cap = prompt_select("Capacity provider", &["FARGATE_SPOT (cost-optimized)", "FARGATE (on-demand)"])?;
     let capacity_provider = if cap.starts_with("FARGATE_SPOT") { "FARGATE_SPOT" } else { "FARGATE" };
 
-    // 6. VPC
+    // 6. CPU/Memory sizing
+    let cpu_options: Vec<String> = VALID_FARGATE_SIZING.iter().map(|(c, _)| c.to_string()).collect();
+    let cpu_labels: Vec<&str> = cpu_options.iter().map(|s| s.as_str()).collect();
+    let cpu_choice = prompt_select("CPU (units)", &cpu_labels)?;
+    let cpu: u32 = cpu_choice.parse().unwrap();
+
+    let mem_values = VALID_FARGATE_SIZING.iter().find(|(c, _)| *c == cpu).unwrap().1;
+    let mem_options: Vec<String> = mem_values.iter().map(|m| m.to_string()).collect();
+    let mem_labels: Vec<&str> = mem_options.iter().map(|s| s.as_str()).collect();
+    let mem_choice = prompt_select("Memory (MiB)", &mem_labels)?;
+    let memory: u32 = mem_choice.parse().unwrap();
+
+    // 7. VPC
     let ec2 = Ec2Client::new(config);
     let vpcs = list_vpcs(&ec2).await?;
     if vpcs.is_empty() {
@@ -76,7 +96,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     let vpc_choice = prompt_select("VPC", &vpc_labels)?;
     let vpc = vpcs.iter().find(|v| v.label == vpc_choice).unwrap();
 
-    // 7. Subnets (auto-select: private+NAT > private > public, 2-3 AZ)
+    // 8. Subnets (auto-select: private+NAT > private > public, 2-3 AZ)
     let subnets = select_subnets(&ec2, &vpc.id).await?;
     eprintln!("   Subnets (auto-selected):");
     for s in &subnets {
@@ -123,7 +143,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     std::fs::write(format!("{dir}/config.toml"), &config_toml)?;
 
     let subnet_ids: Vec<String> = subnets.iter().map(|s| s.id.clone()).collect();
-    let manifest_yaml = generate_manifest(name, namespace, &image, &config_from, capacity_provider, &subnet_ids, &sg_id);
+    let manifest_yaml = generate_manifest(name, namespace, &image, &config_from, capacity_provider, &subnet_ids, &sg_id, cpu, memory);
     std::fs::write(format!("{dir}/manifest.yaml"), &manifest_yaml)?;
 
     // ─── Summary ───────────────────────────────────────────────────────────
@@ -131,7 +151,7 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     eprintln!("Summary:");
     eprintln!("  Agent:    {name}");
     eprintln!("  Image:    {image}");
-    eprintln!("  CPU/Mem:  256 / 512");
+    eprintln!("  CPU/Mem:  {} / {}", cpu, memory);
     eprintln!("  Runtime:  ECS {capacity_provider}");
     eprintln!("  Subnets:  {}", subnet_ids.join(", "));
     eprintln!("  SG:       {sg_id}");
@@ -359,7 +379,7 @@ usercron_path = "cronjob.toml"
     )
 }
 
-fn generate_manifest(name: &str, namespace: &str, image: &str, config_from: &str, cap: &str, subnets: &[String], sg: &str) -> String {
+fn generate_manifest(name: &str, namespace: &str, image: &str, config_from: &str, cap: &str, subnets: &[String], sg: &str, cpu: u32, memory: u32) -> String {
     let subnets_yaml = subnets.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
     format!(
         r#"apiVersion: oab.dev/v2
@@ -370,8 +390,8 @@ metadata:
 spec:
   image: {image}
   resources:
-    cpu: "256"
-    memory: "512"
+    cpu: "{cpu}"
+    memory: "{memory}"
   configFrom: {config_from}
   runtime:
     type: ecs
