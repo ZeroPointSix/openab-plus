@@ -371,6 +371,7 @@ usercron_path = "cronjob.toml"
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn generate_manifest(name: &str, namespace: &str, image: &str, config_from: &str, cap: &str, subnets: &[String], sg: &str, cpu: u32, memory: u32) -> String {
     let subnets_yaml = subnets.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
     format!(
