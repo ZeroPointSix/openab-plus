@@ -48,7 +48,7 @@ enum Commands {
         /// Optional resource name
         name: Option<String>,
         /// ECS cluster name
-        #[arg(long, default_value = "default")]
+        #[arg(long, default_value = "oab")]
         cluster: String,
     },
     /// Delete an OAB service
@@ -58,15 +58,15 @@ enum Commands {
         /// Resource name
         name: String,
         /// ECS cluster name
-        #[arg(long, default_value = "default")]
+        #[arg(long, default_value = "oab")]
         cluster: String,
         /// Namespace
         #[arg(long, default_value = "prod")]
         namespace: String,
     },
-    /// Execute a command in an agent container (via ecsctl)
+    /// Execute a command in an agent container
     Exec {
-        /// Agent name (alias)
+        /// Agent name
         agent: String,
         /// Command to run (default: /bin/sh). Use -- to separate args.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
