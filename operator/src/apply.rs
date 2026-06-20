@@ -199,9 +199,10 @@ async fn apply_ecs(
     let log_config = LogConfiguration::builder()
         .log_driver(LogDriver::Awslogs)
         .options("awslogs-group", "/oab/agents")
-        .options("awslogs-region", aws_config.region().map(|r| r.as_ref()).unwrap_or("us-east-1"))
+        .options("awslogs-region", config.region().map(|r| r.as_ref()).unwrap_or("us-east-1"))
         .options("awslogs-stream-prefix", &service_name)
-        .build();
+        .build()
+        .context("failed to build log configuration")?;
 
     let mut container_builder = ContainerDefinition::builder()
         .name("openab")
