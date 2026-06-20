@@ -355,7 +355,7 @@ async fn create(config: &aws_config::SdkConfig, imports: ImportOptions) -> Resul
             _ => {
                 let resp = ec2.create_security_group()
                     .group_name(SG_NAME)
-                    .description("OAB agent containers — managed by oabctl bootstrap")
+                    .description("OAB agent containers - managed by oabctl bootstrap")
                     .vpc_id(&vid)
                     .send().await
                     .context("failed to create security group")?;
