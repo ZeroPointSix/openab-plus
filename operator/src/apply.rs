@@ -216,7 +216,7 @@ async fn apply_ecs(
         container_builder = container_builder
             .entry_point("sh")
             .entry_point("-c")
-            .command("mkdir -p /etc/openab && echo $CONFIG_B64 | base64 -d > /etc/openab/config.toml && exec openab run -c /etc/openab/config.toml");
+            .command("mkdir -p $HOME/.config/openab && echo $CONFIG_B64 | base64 -d > $HOME/.config/openab/config.toml && exec openab run -c $HOME/.config/openab/config.toml");
     }
 
     let container = container_builder.build();
@@ -225,7 +225,6 @@ async fn apply_ecs(
     let sts = aws_sdk_sts::Client::new(config);
     let account_id = sts.get_caller_identity().send().await?
         .account().unwrap_or_default().to_string();
-    let region = config.region().map(|r| r.as_ref()).unwrap_or("us-east-1");
     let execution_role = format!("arn:aws:iam::{account_id}:role/oab-task-execution");
     let task_role = format!("arn:aws:iam::{account_id}:role/oab-task-role");
 
