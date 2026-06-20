@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use aws_sdk_ec2::Client as Ec2Client;
+use aws_sdk_ec2::error::ProvideErrorMetadata;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_secretsmanager::Client as SmClient;
 use std::io::{self, Write};

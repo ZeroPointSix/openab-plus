@@ -225,6 +225,7 @@ async fn apply_ecs(
     let container = container_builder.build();
 
     // Resolve account ID for role ARNs
+    // NOTE: Role names must match those created by `oabctl bootstrap`
     let sts = aws_sdk_sts::Client::new(config);
     let account_id = sts.get_caller_identity().send().await?
         .account().unwrap_or_default().to_string();
@@ -250,6 +251,7 @@ async fn apply_ecs(
         .runtime_platform(
             aws_sdk_ecs::types::RuntimePlatform::builder()
                 .operating_system_family(aws_sdk_ecs::types::OsFamily::Linux)
+                // TODO: make configurable via manifest spec.resources.arch for ARM64/Graviton
                 .cpu_architecture(aws_sdk_ecs::types::CpuArchitecture::X8664)
                 .build()
         )
