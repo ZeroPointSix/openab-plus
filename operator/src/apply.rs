@@ -3,7 +3,7 @@ use crate::manifest::{OABFleetManifest, OABServiceManifest, RawManifest, Runtime
 use anyhow::{Context, Result};
 use aws_sdk_ecs::types::{
     AssignPublicIp, AwsVpcConfiguration, CapacityProviderStrategyItem, ContainerDefinition,
-    KeyValuePair, NetworkConfiguration, Secret,
+    KeyValuePair, LogConfiguration, LogDriver, NetworkConfiguration, Secret,
 };
 use aws_sdk_s3::primitives::ByteStream;
 use std::path::Path;
@@ -196,12 +196,20 @@ async fn apply_ecs(
         .collect();
 
     // 4. Register task definition
+    let log_config = LogConfiguration::builder()
+        .log_driver(LogDriver::Awslogs)
+        .options("awslogs-group", "/oab/agents")
+        .options("awslogs-region", aws_config.region().map(|r| r.as_ref()).unwrap_or("us-east-1"))
+        .options("awslogs-stream-prefix", &service_name)
+        .build();
+
     let mut container_builder = ContainerDefinition::builder()
         .name("openab")
         .image(&m.spec.image)
         .essential(true)
         .set_environment(Some(env_vars))
-        .set_secrets(if secrets.is_empty() { None } else { Some(secrets) });
+        .set_secrets(if secrets.is_empty() { None } else { Some(secrets) })
+        .log_configuration(log_config);
 
     if has_config {
         container_builder = container_builder
