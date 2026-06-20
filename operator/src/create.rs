@@ -117,7 +117,13 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
             eprintln!("   → Created security group: {id} ({sg_name})\n");
             id
         }
-        Err(_) => {
+        Err(e) => {
+            let is_duplicate = e.as_service_error()
+                .map(|se| se.code() == Some("InvalidGroup.Duplicate"))
+                .unwrap_or(false);
+            if !is_duplicate {
+                return Err(anyhow::anyhow!("failed to create security group: {e}"));
+            }
             // SG already exists — look it up
             let existing = ec2.describe_security_groups()
                 .filters(aws_sdk_ec2::types::Filter::builder().name("group-name").values(&sg_name).build())
@@ -149,7 +155,10 @@ pub async fn run(config: &aws_config::SdkConfig, name: &str, namespace: &str, au
     std::fs::write(format!("{dir}/config.toml"), &config_toml)?;
 
     let subnet_ids: Vec<String> = subnets.iter().map(|s| s.id.clone()).collect();
-    let manifest_yaml = generate_manifest(name, namespace, &image, &config_from, capacity_provider, &subnet_ids, &sg_id, cpu, memory);
+    let manifest_yaml = generate_manifest(&ManifestParams {
+        name, namespace, image: &image, config_from: &config_from,
+        cap: capacity_provider, subnets: &subnet_ids, sg: &sg_id, cpu, memory,
+    });
     std::fs::write(format!("{dir}/manifest.yaml"), &manifest_yaml)?;
 
     // ─── Summary ───────────────────────────────────────────────────────────
@@ -371,9 +380,20 @@ usercron_path = "cronjob.toml"
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn generate_manifest(name: &str, namespace: &str, image: &str, config_from: &str, cap: &str, subnets: &[String], sg: &str, cpu: u32, memory: u32) -> String {
-    let subnets_yaml = subnets.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
+struct ManifestParams<'a> {
+    name: &'a str,
+    namespace: &'a str,
+    image: &'a str,
+    config_from: &'a str,
+    cap: &'a str,
+    subnets: &'a [String],
+    sg: &'a str,
+    cpu: u32,
+    memory: u32,
+}
+
+fn generate_manifest(p: &ManifestParams) -> String {
+    let subnets_yaml = p.subnets.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
     format!(
         r#"apiVersion: oab.dev/v2
 kind: OABService
@@ -392,7 +412,15 @@ spec:
     networking:
       subnets: [{subnets_yaml}]
       securityGroups: ["{sg}"]
-"#
+"#,
+        name = p.name,
+        namespace = p.namespace,
+        image = p.image,
+        cpu = p.cpu,
+        memory = p.memory,
+        config_from = p.config_from,
+        cap = p.cap,
+        sg = p.sg,
     )
 }
 

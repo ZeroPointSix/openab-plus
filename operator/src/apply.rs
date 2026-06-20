@@ -182,6 +182,9 @@ async fn apply_ecs(
         };
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&config_content);
+        if b64.len() > 8192 {
+            anyhow::bail!("config.toml too large for env injection ({} bytes encoded, max 8192). Use S3 sidecar pattern instead.", b64.len());
+        }
         env_vars.push(KeyValuePair::builder().name("CONFIG_B64").value(&b64).build());
     }
 
@@ -227,6 +230,12 @@ async fn apply_ecs(
         .account().unwrap_or_default().to_string();
     let execution_role = format!("arn:aws:iam::{account_id}:role/oab-task-execution");
     let task_role = format!("arn:aws:iam::{account_id}:role/oab-task-role");
+
+    let iam = aws_sdk_iam::Client::new(config);
+    iam.get_role().role_name("oab-task-execution").send().await
+        .context("IAM role 'oab-task-execution' not found — run `oabctl bootstrap` first")?;
+    iam.get_role().role_name("oab-task-role").send().await
+        .context("IAM role 'oab-task-role' not found — run `oabctl bootstrap` first")?;
 
     let task_def = ecs
         .register_task_definition()
