@@ -221,14 +221,30 @@ async fn apply_ecs(
 
     let container = container_builder.build();
 
+    // Resolve account ID for role ARNs
+    let sts = aws_sdk_sts::Client::new(config);
+    let account_id = sts.get_caller_identity().send().await?
+        .account().unwrap_or_default().to_string();
+    let region = config.region().map(|r| r.as_ref()).unwrap_or("us-east-1");
+    let execution_role = format!("arn:aws:iam::{account_id}:role/oab-task-execution");
+    let task_role = format!("arn:aws:iam::{account_id}:role/oab-task-role");
+
     let task_def = ecs
         .register_task_definition()
         .family(&service_name)
+        .execution_role_arn(&execution_role)
+        .task_role_arn(&task_role)
         .requires_compatibilities(aws_sdk_ecs::types::Compatibility::Fargate)
         .network_mode(aws_sdk_ecs::types::NetworkMode::Awsvpc)
         .cpu(&m.spec.resources.cpu)
         .memory(&m.spec.resources.memory)
         .container_definitions(container)
+        .runtime_platform(
+            aws_sdk_ecs::types::RuntimePlatform::builder()
+                .operating_system_family(aws_sdk_ecs::types::OsFamily::Linux)
+                .cpu_architecture(aws_sdk_ecs::types::CpuArchitecture::X8664)
+                .build()
+        )
         .send()
         .await
         .context("failed to register task definition")?;
