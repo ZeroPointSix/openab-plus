@@ -216,7 +216,7 @@ async fn apply_ecs(
         container_builder = container_builder
             .entry_point("sh")
             .entry_point("-c")
-            .command("echo $CONFIG_B64 | base64 -d > /etc/openab/config.toml && exec openab run -c /etc/openab/config.toml");
+            .command("mkdir -p /etc/openab && echo $CONFIG_B64 | base64 -d > /etc/openab/config.toml && exec openab run -c /etc/openab/config.toml");
     }
 
     let container = container_builder.build();
