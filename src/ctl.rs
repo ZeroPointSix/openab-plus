@@ -7,7 +7,7 @@
 //! Phase 1 supported keys:
 //! - `thread.name` — rename the current Discord/Slack thread
 
-use crate::adapter::{ChannelRef, ChatAdapter};
+use openab_core::adapter::{ChannelRef, ChatAdapter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -231,20 +231,10 @@ impl CtlHandler for RuntimeHandler {
                     parent_id: None,
                     origin_event_id: None,
                 };
-                match adapter.archive_thread(&channel, archived).await {
-                    Ok(()) => Response {
-                        ok: true,
-                        message: format!(
-                            "thread {}",
-                            if archived { "archived" } else { "unarchived" }
-                        ),
-                        value: None,
-                    },
-                    Err(e) => Response {
-                        ok: false,
-                        message: format!("archive failed: {e}"),
-                        value: None,
-                    },
+                Response {
+                    ok: false,
+                    message: "archive_thread not supported in workspace mode".into(),
+                    value: None,
                 }
             }
             "agent.status" => {
