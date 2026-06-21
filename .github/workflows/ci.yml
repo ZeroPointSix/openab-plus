@@ -45,6 +45,8 @@ jobs:
         run: cargo check --workspace
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
+      - name: cargo clippy (unified)
+        run: cargo clippy --workspace --features unified -- -D warnings
       - name: cargo test
         run: cargo test --workspace
 
