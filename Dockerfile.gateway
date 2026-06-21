@@ -1,0 +1,48 @@
+# Dockerfile.gateway — Standalone gateway image (backward-compatible)
+#
+# Builds the unified binary with all gateway adapters enabled.
+# This replaces the old standalone gateway/ binary with the workspace-integrated version.
+#
+# Usage:
+#   docker build -f Dockerfile.gateway -t openab-gateway .
+#   docker build -f Dockerfile.gateway --build-arg FEATURES=telegram,line -t openab-gateway:slim .
+
+ARG FEATURES=""
+
+FROM rust:1-bookworm AS builder
+ARG FEATURES
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
+COPY crates/openab-gateway/Cargo.toml crates/openab-gateway/Cargo.toml
+RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
+    && echo 'fn main() {}' > src/main.rs \
+    && echo '' > crates/openab-core/src/lib.rs \
+    && echo '' > crates/openab-gateway/src/lib.rs \
+    && cargo build --release --features unified \
+    && rm -rf src crates/openab-core/src crates/openab-gateway/src
+COPY crates/ crates/
+COPY src/ src/
+RUN touch src/main.rs && \
+    if [ -n "$FEATURES" ]; then \
+      cargo build --release --no-default-features --features "$FEATURES"; \
+    else \
+      cargo build --release --features unified; \
+    fi
+
+# --- Runtime stage ---
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tini && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash -u 1000 gateway
+WORKDIR /home/gateway
+
+COPY --from=builder --chown=gateway:gateway /build/target/release/openab /usr/local/bin/openab
+
+USER gateway
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD pgrep -x openab || exit 1
+
+ENTRYPOINT ["tini", "--"]
+CMD ["openab", "run", "-c", "/etc/openab/config.toml"]

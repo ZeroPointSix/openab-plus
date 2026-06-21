@@ -918,7 +918,17 @@ impl AdapterRouter {
                     };
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
-                    let chunks = format::split_message(&final_content, message_limit);
+                    let chunks = if adapter.platform() == "discord" {
+                        let mentions = extract_mentions(&final_content);
+                        let mention_reserve = mention_footer_len(&mentions);
+                        let chunks = format::split_message(
+                            &final_content,
+                            message_limit.saturating_sub(mention_reserve),
+                        );
+                        propagate_mentions_to_chunks(chunks, &mentions, message_limit)
+                    } else {
+                        format::split_message(&final_content, message_limit)
+                    };
                     // Track delivery health across all final write paths. Any failure
                     // here means the user's view is incomplete; we propagate Err at the
                     // end of the closure so dispatch surfaces set_error (❌) instead of
@@ -1298,6 +1308,98 @@ fn compose_display(
     }
     out.push_str(text.trim_end());
     out
+}
+
+fn extract_mentions(content: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut in_fence = false;
+
+    for line in content.split('\n') {
+        if line.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i + 2 < bytes.len() {
+            if bytes[i] == b'<' && bytes[i + 1] == b'@' {
+                let (prefix_end, is_role) = if i + 2 < bytes.len() && bytes[i + 2] == b'&' {
+                    (i + 3, true)
+                } else if i + 2 < bytes.len() && bytes[i + 2] == b'!' {
+                    (i + 3, false)
+                } else {
+                    (i + 2, false)
+                };
+                if prefix_end < bytes.len() && bytes[prefix_end].is_ascii_digit() {
+                    if let Some(end) = line[prefix_end..].find('>') {
+                        if line[prefix_end..prefix_end + end]
+                            .chars()
+                            .all(|c| c.is_ascii_digit())
+                        {
+                            let uid = &line[prefix_end..prefix_end + end];
+                            let normalized = if is_role {
+                                format!("<@&{uid}>")
+                            } else {
+                                format!("<@{uid}>")
+                            };
+                            if !mentions.contains(&normalized) {
+                                mentions.push(normalized);
+                            }
+                            i = prefix_end + end + 1;
+                            continue;
+                        }
+                    }
+                }
+                i = prefix_end;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    mentions
+}
+
+fn mention_footer_len(mentions: &[String]) -> usize {
+    if mentions.is_empty() {
+        return 0;
+    }
+    1 + mentions.iter().map(|m| m.len()).sum::<usize>() + mentions.len().saturating_sub(1)
+}
+
+fn propagate_mentions_to_chunks(
+    chunks: Vec<String>,
+    mentions: &[String],
+    limit: usize,
+) -> Vec<String> {
+    if mentions.is_empty() || chunks.len() <= 1 {
+        return chunks;
+    }
+    chunks
+        .into_iter()
+        .map(|chunk| {
+            let missing: Vec<&String> = mentions
+                .iter()
+                .filter(|m| !chunk.contains(m.as_str()))
+                .collect();
+            if missing.is_empty() {
+                chunk
+            } else {
+                let footer = format!(
+                    "\n{}",
+                    missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" ")
+                );
+                if chunk.chars().count() + footer.chars().count() <= limit {
+                    format!("{chunk}{footer}")
+                } else {
+                    chunk
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

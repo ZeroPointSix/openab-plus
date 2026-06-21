@@ -299,6 +299,33 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "slack"))]
     let shared_slack_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
 
+    // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
+    let ctl_shard: Arc<std::sync::OnceLock<serenity::gateway::ShardMessenger>> =
+        Arc::new(std::sync::OnceLock::new());
+
+    // Thread registry: thread_id → platform. Populated on message dispatch.
+    let ctl_registry = ctl::new_registry();
+
+    // Spawn control socket server for `openab set/get` IPC
+    let ctl_handle = {
+        let mut adapters = std::collections::HashMap::new();
+        if let Some(ref a) = shared_discord_adapter {
+            adapters.insert("discord".into(), a.clone());
+        }
+        if let Some(ref a) = shared_slack_adapter {
+            adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
+        if adapters.is_empty() {
+            None
+        } else {
+            Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
+                adapters,
+                ctl_registry.clone(),
+                ctl_shard.clone(),
+            ))))
+        }
+    };
+
     // Validate cronjob config at startup
     let mut configured_platforms: Vec<&str> = Vec::new();
     if cfg.discord.is_some() {
@@ -629,6 +656,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Cleanup
     cleanup_handle.abort();
+    if let Some(h) = ctl_handle {
+        h.abort();
+        let _ = std::fs::remove_file(ctl::socket_path());
+    }
     let _ = shutdown_tx.send(true);
     if let Some(handle) = slack_handle {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;

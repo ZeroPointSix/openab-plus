@@ -659,6 +659,10 @@ pub struct ReactionsConfig {
     pub emojis: ReactionEmojis,
     #[serde(default)]
     pub timing: ReactionTiming,
+    /// Emoji-to-text mapping. When a user reacts with a mapped emoji,
+    /// it is treated as if they sent the corresponding text message.
+    #[serde(default)]
+    pub mapping: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -923,6 +927,25 @@ async fn load_config_from_url(url: &str) -> anyhow::Result<Config> {
 fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
     let mut config: Config = toml::from_str(expanded)
         .map_err(|e| anyhow::anyhow!("failed to parse config from {source}: {e}"))?;
+
+    // Resolve Discord shortcodes in reactions.mapping keys.
+    // Allows operators to write `:thumbsup: = "OK"` instead of `"👍" = "OK"`.
+    config.reactions.mapping = config
+        .reactions
+        .mapping
+        .into_iter()
+        .map(|(key, val)| {
+            let resolved = if key.starts_with(':') && key.ends_with(':') && key.len() > 2 {
+                let shortcode = &key[1..key.len() - 1];
+                emojis::get_by_shortcode(shortcode)
+                    .map(|e| e.as_str().to_string())
+                    .unwrap_or(key)
+            } else {
+                key
+            };
+            (resolved, val)
+        })
+        .collect();
 
     // If [agentcore] is set and [agent] command was not explicitly provided,
     // synthesize agent config to spawn the bundled agentcore-acp adapter.
