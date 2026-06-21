@@ -142,6 +142,7 @@ pub fn new_registry() -> ThreadRegistry {
 }
 
 /// Register a thread→platform mapping. Called by adapters on message dispatch.
+#[allow(dead_code)]
 pub async fn register_thread(registry: &ThreadRegistry, thread_id: &str, platform: &str) {
     registry.write().await.insert(thread_id.to_string(), platform.to_string());
 }
@@ -206,14 +207,14 @@ impl CtlHandler for RuntimeHandler {
                 }
             }
             "thread.archived" => {
-                let Some((adapter, tid)) = self.resolve(thread_id).await else {
+                let Some((_adapter, tid)) = self.resolve(thread_id).await else {
                     return Response {
                         ok: false,
                         message: "unknown thread (use --thread or register via message dispatch)".into(),
                         value: None,
                     };
                 };
-                let archived = match value {
+                let _archived = match value {
                     "true" | "1" | "yes" => true,
                     "false" | "0" | "no" => false,
                     _ => {
@@ -224,7 +225,7 @@ impl CtlHandler for RuntimeHandler {
                         };
                     }
                 };
-                let channel = ChannelRef {
+                let _channel = ChannelRef {
                     platform: String::new(),
                     channel_id: tid,
                     thread_id: None,
