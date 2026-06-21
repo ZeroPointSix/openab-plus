@@ -16,7 +16,7 @@ RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
     && rm -rf src crates/openab-core/src crates/openab-gateway/src
 COPY crates/ crates/
 COPY src/ src/
-RUN touch src/main.rs && cargo build --release --features agentcore
+RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/lib.rs && cargo build --release --features agentcore
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim
