@@ -647,6 +647,9 @@ async fn main() -> anyhow::Result<()> {
         shutdown_signal().await;
         info!("shutdown signal received");
     }
+    // When discord feature is disabled at compile time, use this fallback block.
+    // (When discord feature IS enabled but no [discord] config exists, the `else`
+    // branch of the `if let Some(discord_cfg)` above handles shutdown instead.)
     #[cfg(not(feature = "discord"))]
     {
         info!("running without discord, press ctrl+c to stop");

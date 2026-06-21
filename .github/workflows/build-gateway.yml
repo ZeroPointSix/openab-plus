@@ -58,9 +58,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
-          build-args: |
-            BUILD_MODE=unified
+          file: Dockerfile.gateway
           platforms: ${{ matrix.platform.os }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ inputs.dry_run != true }}
           cache-from: type=gha,scope=gateway-${{ matrix.platform.os }}

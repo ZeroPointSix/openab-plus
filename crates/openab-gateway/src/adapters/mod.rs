@@ -4,6 +4,8 @@ pub mod telegram;
 pub mod line;
 #[cfg(feature = "feishu")]
 pub mod feishu;
+#[cfg(feature = "feishu")]
+pub mod feishu_card;
 #[cfg(feature = "googlechat")]
 pub mod googlechat;
 #[cfg(feature = "wecom")]

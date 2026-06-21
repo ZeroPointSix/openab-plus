@@ -1,7 +1,7 @@
-# Dockerfile.gateway — Standalone gateway image (backward-compatible)
+# Dockerfile.gateway — Standalone gateway binary (backward-compatible)
 #
-# Builds the unified binary with all gateway adapters enabled.
-# This replaces the old standalone gateway/ binary with the workspace-integrated version.
+# Builds the openab-gateway binary that bridges webhook platforms to OAB via WebSocket.
+# This is the same functionality as the old standalone gateway/ directory.
 #
 # Usage:
 #   docker build -f Dockerfile.gateway -t openab-gateway .
@@ -18,31 +18,33 @@ COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
 COPY crates/openab-gateway/Cargo.toml crates/openab-gateway/Cargo.toml
 RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
     && echo 'fn main() {}' > src/main.rs \
+    && echo 'fn main() {}' > crates/openab-gateway/src/main.rs \
     && echo '' > crates/openab-core/src/lib.rs \
     && echo '' > crates/openab-gateway/src/lib.rs \
-    && cargo build --release --features unified \
+    && cargo build --release -p openab-gateway \
     && rm -rf src crates/openab-core/src crates/openab-gateway/src
 COPY crates/ crates/
 COPY src/ src/
-RUN touch src/main.rs && \
+RUN touch crates/openab-gateway/src/main.rs crates/openab-gateway/src/lib.rs && \
     if [ -n "$FEATURES" ]; then \
-      cargo build --release --no-default-features --features "$FEATURES"; \
+      cargo build --release -p openab-gateway --no-default-features --features "$FEATURES"; \
     else \
-      cargo build --release --features unified; \
+      cargo build --release -p openab-gateway; \
     fi
 
 # --- Runtime stage ---
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tini && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash -u 1000 gateway
 WORKDIR /home/gateway
 
-COPY --from=builder --chown=gateway:gateway /build/target/release/openab /usr/local/bin/openab
+COPY --from=builder --chown=gateway:gateway /build/target/release/openab-gateway /usr/local/bin/openab-gateway
 
 USER gateway
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD pgrep -x openab || exit 1
+  CMD curl -sf http://localhost:8080/health || exit 1
 
 ENTRYPOINT ["tini", "--"]
-CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
+CMD ["openab-gateway"]

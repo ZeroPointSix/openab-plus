@@ -1,3 +1,4 @@
+use crate::media::format_bytes;
 use crate::schema::*;
 use axum::extract::State;
 use prost::Message as ProstMessage;
@@ -7,6 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
+
+use super::feishu_card;
 
 /// Timing-safe string comparison to prevent side-channel attacks on tokens.
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -82,6 +85,45 @@ pub enum AllowUsers {
     MultibotMentions,
 }
 
+/// Streaming delivery strategy for the Feishu adapter.
+///
+/// Controls how the gateway renders streaming (`edit_message`) replies:
+/// - `Post`   — current production behavior: PATCH a `post` message in place,
+///   with the PR #1122 230072 edit-cap recovery as a backstop.
+/// - `Card`   — always drive a CardKit v2 interactive streaming card
+///   (no 20-edit cap; native markdown / table rendering).
+/// - `Auto`   — start as `post`, single-direction promote to `card` when the
+///   content warrants it (long text, code fences, or tables).
+///
+/// Defaults to `Auto` (S6 switched the feature on): short replies stay as a
+/// `post` (native reply UI), while long / code-fence / table replies promote
+/// to a CardKit streaming card. `FEISHU_CARD_STREAMING_MODE=post` is the
+/// no-recompile kill-switch back to today's post-only behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamingMode {
+    Post,
+    Card,
+    #[default]
+    Auto,
+}
+
+impl StreamingMode {
+    /// Parse from the `FEISHU_CARD_STREAMING_MODE` env value.
+    ///
+    /// - `""` or `"auto"` → `Auto` (matches `Default::default()`, so an empty
+    ///   env var and an unset env var have identical semantics).
+    /// - `"card"` → `Card`.
+    /// - Any other value (including unknown strings) → `Post` (safe fallback,
+    ///   preserves today's behavior for operators who set an unrecognised value).
+    fn parse(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "" | "auto" => StreamingMode::Auto,
+            "card" => StreamingMode::Card,
+            _ => StreamingMode::Post,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FeishuConfig {
     pub app_id: String,
@@ -106,6 +148,22 @@ pub struct FeishuConfig {
     /// tracking entirely — all messages will require @mention.
     /// Converted from `FEISHU_SESSION_TTL_HOURS` (user-facing, in hours) to seconds internally.
     pub session_ttl_secs: u64,
+    /// Streaming delivery strategy. Defaults to `Post` (today's behavior).
+    /// `FEISHU_CARD_STREAMING_MODE` = post | card | auto.
+    pub streaming_mode: StreamingMode,
+    /// When a CardKit streaming attempt fails (HTTP 5xx, rate limit, element
+    /// cap, or any unexpected errcode), fall back to the `post` path (which
+    /// keeps the PR #1122 cap-recovery). `FEISHU_CARD_FALLBACK_TO_POST`,
+    /// defaults to `true` (double safety net).
+    pub card_fallback_to_post: bool,
+    /// In `auto` mode, the byte threshold at which a plain-text reply is large
+    /// enough to promote from `post` to `card`. `FEISHU_CARD_PROMOTE_BYTES`,
+    /// defaults to 4000 (mirrors `message_limit`, i.e. a single post message).
+    pub card_promote_bytes: usize,
+    /// Idle-timer window (milliseconds) after which a streaming card with no
+    /// further edits is finalized by the gateway reaper.
+    /// `FEISHU_CARD_IDLE_FINALIZE_MS`, defaults to 3000.
+    pub card_idle_finalize_ms: u64,
     /// Override the API base URL. Used in tests to point at a mock server.
     /// Always None in production (not read from env).
     pub api_base_override: Option<String>,
@@ -177,6 +235,27 @@ impl FeishuConfig {
             .unwrap_or(24)
             * 3600;
 
+        // --- Card streaming. S6 flipped the default to Auto: when the env var
+        // is unset or empty, card streaming is on in auto mode (short → post,
+        // long / code / table → card). FEISHU_CARD_STREAMING_MODE=post is the
+        // no-recompile kill-switch back to today's post-only behavior. ---
+        let streaming_mode = std::env::var("FEISHU_CARD_STREAMING_MODE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| StreamingMode::parse(&v))
+            .unwrap_or_default();
+        let card_fallback_to_post = std::env::var("FEISHU_CARD_FALLBACK_TO_POST")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+        let card_promote_bytes = std::env::var("FEISHU_CARD_PROMOTE_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4000);
+        let card_idle_finalize_ms = std::env::var("FEISHU_CARD_IDLE_FINALIZE_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000);
+
         Some(Self {
             app_id,
             app_secret,
@@ -195,6 +274,10 @@ impl FeishuConfig {
             dedupe_ttl_secs,
             message_limit,
             session_ttl_secs,
+            streaming_mode,
+            card_fallback_to_post,
+            card_promote_bytes,
+            card_idle_finalize_ms,
             api_base_override: None,
         })
     }
@@ -558,7 +641,7 @@ pub use event_types::*;
 // ---------------------------------------------------------------------------
 
 pub struct DedupeCache {
-    seen: std::sync::Mutex<HashMap<String, Instant>>,
+    seen: parking_lot::Mutex<HashMap<String, Instant>>,
     ttl_secs: u64,
     max_size: usize,
 }
@@ -566,7 +649,7 @@ pub struct DedupeCache {
 impl DedupeCache {
     pub fn new(ttl_secs: u64) -> Self {
         Self {
-            seen: std::sync::Mutex::new(HashMap::new()),
+            seen: parking_lot::Mutex::new(HashMap::new()),
             ttl_secs,
             max_size: 10_000,
         }
@@ -574,7 +657,7 @@ impl DedupeCache {
 
     /// Returns true if this id was already seen (duplicate).
     pub fn is_duplicate(&self, id: &str) -> bool {
-        let mut map = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.seen.lock();
         // Lazy sweep
         if map.len() >= self.max_size {
             map.retain(|_, ts| ts.elapsed().as_secs() < self.ttl_secs);
@@ -699,17 +782,17 @@ pub struct FeishuAdapter {
     pub bot_open_id: Arc<RwLock<Option<String>>>,
     pub dedupe: Arc<DedupeCache>,
     pub rate_limiter: Arc<RateLimiter>,
-    pub name_cache: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    pub name_cache: Arc<parking_lot::Mutex<HashMap<String, String>>>,
     /// Per-channel bot turn counter. Key = chat_id, Value = (count, last_reset).
     /// Human message resets count to 0. Prevents runaway bot-to-bot loops.
-    pub bot_turns: Arc<std::sync::Mutex<HashMap<String, u32>>>, // eviction: human msg resets; follow-up can add TTL like participated_threads
+    pub bot_turns: Arc<parking_lot::Mutex<HashMap<String, u32>>>, // eviction: human msg resets; follow-up can add TTL like participated_threads
     /// Positive-only cache: thread_id (root_id) → last_replied_at.
     /// When bot has replied in a thread, subsequent messages in that thread
     /// bypass @mention gating (like Discord's "involved" mode).
-    pub participated_threads: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    pub participated_threads: Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
     /// Positive-only cache: thread_id → first_seen for threads where other bots
     /// have posted. Used by multibot-mentions mode to require @mention.
-    pub multibot_threads: Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    pub multibot_threads: Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
     /// Per-message edit count tracker for Feishu's 20-edits-per-message hard cap
     /// (errcode 230072 — "The message has reached the number of times it can be edited").
     /// Insertion-order FIFO eviction: when over `EDIT_COUNTS_CACHE_MAX`, the
@@ -719,7 +802,12 @@ pub struct FeishuAdapter {
     /// 4096 newer messages have been inserted behind it; that resets its count
     /// to 1, which is acceptable — it only loses the local preemptive margin and
     /// the on-wire 230072 sentinel still backstops.)
-    pub edit_counts: Arc<std::sync::Mutex<EditCountsCache>>,
+    pub edit_counts: Arc<parking_lot::Mutex<EditCountsCache>>,
+    /// Active card-streaming sessions (S5), keyed by the placeholder post
+    /// message_id (`om_post`) that core believes it is editing. A session
+    /// exists only after a reply is promoted from post to card; empty unless
+    /// `streaming_mode` is `card` / `auto`. FIFO eviction lives in the registry.
+    pub stream_sessions: Arc<parking_lot::Mutex<feishu_card::FeishuStreamRegistry>>,
     pub client: reqwest::Client,
 }
 
@@ -748,11 +836,14 @@ impl FeishuAdapter {
             dedupe,
             rate_limiter,
             bot_open_id: Arc::new(RwLock::new(None)),
-            name_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            bot_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            participated_threads: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            multibot_threads: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            edit_counts: Arc::new(std::sync::Mutex::new(EditCountsCache::default())),
+            name_cache: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            bot_turns: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            participated_threads: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            multibot_threads: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            edit_counts: Arc::new(parking_lot::Mutex::new(EditCountsCache::default())),
+            stream_sessions: Arc::new(parking_lot::Mutex::new(
+                feishu_card::FeishuStreamRegistry::default(),
+            )),
             client: reqwest::Client::new(),
         }
     }
@@ -903,10 +994,10 @@ async fn ws_connect_loop(
     client: &reqwest::Client,
     event_tx: &broadcast::Sender<String>,
     shutdown_rx: &mut watch::Receiver<bool>,
-    name_cache: &Arc<std::sync::Mutex<HashMap<String, String>>>,
-    bot_turns: &Arc<std::sync::Mutex<HashMap<String, u32>>>,
-    participated_threads: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
-    multibot_threads: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    name_cache: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
+    bot_turns: &Arc<parking_lot::Mutex<HashMap<String, u32>>>,
+    participated_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
+    multibot_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
 ) -> anyhow::Result<()> {
     let api_base = config.api_base();
 
@@ -992,12 +1083,12 @@ async fn handle_ws_message(
     dedupe: &Arc<DedupeCache>,
     config: &FeishuConfig,
     event_tx: &broadcast::Sender<String>,
-    name_cache: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    name_cache: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
     token_cache: &Arc<FeishuTokenCache>,
     client: &reqwest::Client,
-    bot_turns: &Arc<std::sync::Mutex<HashMap<String, u32>>>,
-    participated_threads: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
-    multibot_threads: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    bot_turns: &Arc<parking_lot::Mutex<HashMap<String, u32>>>,
+    participated_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
+    multibot_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
 ) {
     let envelope: FeishuEventEnvelope = match serde_json::from_str(text) {
         Ok(e) => e,
@@ -1051,7 +1142,7 @@ async fn handle_ws_message(
         // Bot turn tracking: prevent runaway bot-to-bot loops
         let channel_id = &gateway_event.channel.id;
         {
-            let mut turns = bot_turns.lock().unwrap_or_else(|e| e.into_inner());
+            let mut turns = bot_turns.lock();
             if gateway_event.sender.is_bot {
                 let count = turns.entry(channel_id.to_string()).or_insert(0);
                 *count += 1;
@@ -1095,9 +1186,7 @@ async fn handle_ws_message(
                             download_feishu_audio(client, &api_base, &token, message_id, file_key).await
                         }
                     };
-                    if let Some(att) = attachment {
-                        gateway_event.content.attachments.push(att);
-                    }
+                    gateway_event.content.attachments.push(attachment);
                 }
             }
         }
@@ -1121,13 +1210,13 @@ async fn handle_ws_message(
 /// Resolve user display name from open_id via Contact API, with caching.
 async fn resolve_user_name(
     open_id: &str,
-    name_cache: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    name_cache: &Arc<parking_lot::Mutex<HashMap<String, String>>>,
     token_cache: &Arc<FeishuTokenCache>,
     client: &reqwest::Client,
     api_base: &str,
 ) -> String {
     {
-        let cache = name_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = name_cache.lock();
         if let Some(name) = cache.get(open_id) {
             return name.clone();
         }
@@ -1152,7 +1241,7 @@ async fn resolve_user_name(
     // Only cache successful resolutions — don't cache fallback open_id
     // so retries can succeed after permissions are granted.
     if let Some(ref name) = resolved {
-        let mut cache = name_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = name_cache.lock();
         if cache.len() < 10_000 {
             cache.insert(open_id.to_string(), name.clone());
         }
@@ -1228,10 +1317,10 @@ pub enum EditOutcome {
 /// lowest-count entries) so active streams are not bumped out from under
 /// themselves.
 fn increment_edit_count(
-    cache: &Arc<std::sync::Mutex<EditCountsCache>>,
+    cache: &Arc<parking_lot::Mutex<EditCountsCache>>,
     message_id: &str,
 ) {
-    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut c = cache.lock();
     let was_new = !c.counts.contains_key(message_id);
     let entry = c.counts.entry(message_id.to_string()).or_insert(0);
     if *entry != u32::MAX {
@@ -1247,10 +1336,10 @@ fn increment_edit_count(
 /// call and signal `EditOutcome::CapReached` directly so the core finalize
 /// path can take over.
 fn mark_edit_cap(
-    cache: &Arc<std::sync::Mutex<EditCountsCache>>,
+    cache: &Arc<parking_lot::Mutex<EditCountsCache>>,
     message_id: &str,
 ) {
-    let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut c = cache.lock();
     let was_new = !c.counts.contains_key(message_id);
     c.counts.insert(message_id.to_string(), u32::MAX);
     if was_new {
@@ -1278,10 +1367,10 @@ fn evict_if_overcap(c: &mut EditCountsCache) {
 /// Return true if this message_id has already reached the edit cap (either
 /// tracked locally or marked via 230072 sentinel).
 fn is_edit_cap_reached(
-    cache: &Arc<std::sync::Mutex<EditCountsCache>>,
+    cache: &Arc<parking_lot::Mutex<EditCountsCache>>,
     message_id: &str,
 ) -> bool {
-    let c = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let c = cache.lock();
     c.counts
         .get(message_id)
         .is_some_and(|&n| n >= FEISHU_EDIT_CAP)
@@ -1437,6 +1526,61 @@ async fn delete_feishu_message(
             Err(format!("request error: {e}"))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming path decision (S2): post vs card
+// ---------------------------------------------------------------------------
+
+/// Decide whether a streaming snapshot should be rendered as a CardKit card
+/// rather than a `post` message.
+///
+/// Pure function over the *full* (non-delta) accumulated text, the configured
+/// mode, and the promote threshold. This is the content-based half of the
+/// `auto` promotion rule; the other trigger — hitting the PATCH 20-edit cap —
+/// lives in the S5 wiring, not here.
+///
+/// - `Post` never promotes (today's behavior).
+/// - `Card` always uses a card.
+/// - `Auto` promotes when the text is large, or contains a code fence or a
+///   markdown table — exactly the cases where `markdown_to_post` degrades
+///   (tables are dropped entirely; see Issue #1124).
+///
+/// Wired into `handle_card_edit` (S5).
+fn should_use_card(text: &str, mode: StreamingMode, promote_bytes: usize) -> bool {
+    match mode {
+        StreamingMode::Post => false,
+        StreamingMode::Card => true,
+        StreamingMode::Auto => {
+            text.len() >= promote_bytes || has_code_fence(text) || has_markdown_table(text)
+        }
+    }
+}
+
+/// True if the text contains a fenced code block opener (```), detected the
+/// same way `markdown_to_post` detects fences: a line whose first
+/// non-whitespace characters are three backticks. Inline code (single
+/// backticks) is deliberately not matched.
+fn has_code_fence(text: &str) -> bool {
+    text.split('\n')
+        .any(|line| line.trim_start().starts_with("```"))
+}
+
+/// True if the text contains a GFM table delimiter row, e.g. `|---|---|` or
+/// `| :--- | ---: |`. The delimiter row is the defining feature of a markdown
+/// table and is precisely what `markdown_to_post` cannot render (Issue #1124).
+///
+/// Heuristic: a line composed solely of pipes, dashes, colons and spaces, that
+/// contains at least one pipe and at least one dash. This excludes thematic
+/// breaks (`---`, no pipe), bullet lists (no pipe), and prose lines that merely
+/// happen to contain a pipe (non-delimiter characters present).
+fn has_markdown_table(text: &str) -> bool {
+    text.split('\n').any(|line| {
+        let t = line.trim();
+        t.contains('|')
+            && t.contains('-')
+            && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1679,7 +1823,7 @@ pub async fn download_feishu_image(
     token: &str,
     message_id: &str,
     image_key: &str,
-) -> Option<crate::schema::Attachment> {
+) -> crate::schema::Attachment {
     let url = format!(
         "{}/open-apis/im/v1/messages/{}/resources/{}?type=image",
         api_base, message_id, image_key
@@ -1688,45 +1832,101 @@ pub async fn download_feishu_image(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(image_key, error = %e, "feishu image download failed");
-            return None;
+            return crate::schema::Attachment::rejected(
+                "image",
+                format!("{}.jpg", image_key),
+                "application/octet-stream",
+                0,
+                "download failed: network error",
+            );
         }
     };
     if !resp.status().is_success() {
-        tracing::warn!(image_key, status = %resp.status(), "feishu image download failed");
-        return None;
+        let status = resp.status();
+        tracing::warn!(image_key, status = %status, "feishu image download failed");
+        return crate::schema::Attachment::rejected(
+            "image",
+            format!("{}.jpg", image_key),
+            "application/octet-stream",
+            0,
+            format!("download failed: HTTP {}", status.as_u16()),
+        );
     }
     // Early gate: reject oversized downloads before buffering the full body
     if let Some(cl) = resp.headers().get(reqwest::header::CONTENT_LENGTH) {
         if let Ok(size) = cl.to_str().unwrap_or("0").parse::<u64>() {
             if size > IMAGE_MAX_DOWNLOAD {
                 tracing::warn!(image_key, size, "feishu image Content-Length exceeds 10MB limit, skipping download");
-                return None;
+                return crate::schema::Attachment::rejected(
+                    "image",
+                    format!("{}.jpg", image_key),
+                    "application/octet-stream",
+                    size,
+                    format!("size exceeded: {} exceeds {}", format_bytes(size), format_bytes(IMAGE_MAX_DOWNLOAD)),
+                );
             }
         }
     }
-    let bytes = resp.bytes().await.ok()?;
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(image_key, error = %e, "feishu image body read failed");
+            return crate::schema::Attachment::rejected(
+                "image",
+                format!("{}.jpg", image_key),
+                "application/octet-stream",
+                0,
+                "download failed: body read error",
+            );
+        }
+    };
     // Fallback check (Content-Length may be absent or misreported)
     if bytes.len() as u64 > IMAGE_MAX_DOWNLOAD {
         tracing::warn!(image_key, size = bytes.len(), "feishu image exceeds 10MB limit");
-        return None;
+        return crate::schema::Attachment::rejected(
+            "image",
+            format!("{}.jpg", image_key),
+            "application/octet-stream",
+            bytes.len() as u64,
+            format!("size exceeded: {} exceeds {}", format_bytes(bytes.len() as u64), format_bytes(IMAGE_MAX_DOWNLOAD)),
+        );
     }
     let (compressed, mime) = match resize_and_compress(&bytes) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(image_key, error = %e, "feishu image resize failed");
-            return None;
+            return crate::schema::Attachment::rejected(
+                "image",
+                format!("{}.jpg", image_key),
+                "application/octet-stream",
+                bytes.len() as u64,
+                "processing failed: image encoding error",
+            );
         }
     };
-    let path = crate::store::store_media(&compressed).await?;
+    let path = match crate::store::store_media(&compressed).await {
+        Some(p) => p,
+        None => {
+            tracing::warn!(image_key, "feishu image store failed");
+            return crate::schema::Attachment::rejected(
+                "image",
+                format!("{}.jpg", image_key),
+                "application/octet-stream",
+                compressed.len() as u64,
+                "processing failed: storage error",
+            );
+        }
+    };
     let ext = if mime == "image/gif" { "gif" } else { "jpg" };
-    Some(crate::schema::Attachment {
+    crate::schema::Attachment {
         attachment_type: "image".into(),
         filename: format!("{}.{}", image_key, ext),
         mime_type: mime,
         data: String::new(),
         size: compressed.len() as u64,
         path: Some(path),
-    })
+        status: None,
+    }
 }
 
 /// Download a Feishu file by message_id + file_key → base64 Attachment (text files only).
@@ -1737,7 +1937,7 @@ pub async fn download_feishu_file(
     message_id: &str,
     file_key: &str,
     file_name: &str,
-) -> Option<crate::schema::Attachment> {
+) -> crate::schema::Attachment {
     // Only download text-like files
     let ext = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
     const TEXT_EXTS: &[&str] = &[
@@ -1747,7 +1947,13 @@ pub async fn download_feishu_file(
     ];
     if !TEXT_EXTS.contains(&ext.as_str()) {
         tracing::debug!(file_name, "skipping non-text file attachment");
-        return None;
+        return crate::schema::Attachment::rejected(
+            "text_file",
+            file_name.to_string(),
+            "application/octet-stream",
+            0,
+            format!("unsupported format: {}", ext),
+        );
     }
     let url = format!(
         "{}/open-apis/im/v1/messages/{}/resources/{}?type=file",
@@ -1757,37 +1963,87 @@ pub async fn download_feishu_file(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(file_name, error = %e, "feishu file download failed");
-            return None;
+            return crate::schema::Attachment::rejected(
+                "text_file",
+                file_name.to_string(),
+                "application/octet-stream",
+                0,
+                "download failed: network error",
+            );
         }
     };
     if !resp.status().is_success() {
-        tracing::warn!(file_name, status = %resp.status(), "feishu file download failed");
-        return None;
+        let status = resp.status();
+        tracing::warn!(file_name, status = %status, "feishu file download failed");
+        return crate::schema::Attachment::rejected(
+            "text_file",
+            file_name.to_string(),
+            "application/octet-stream",
+            0,
+            format!("download failed: HTTP {}", status.as_u16()),
+        );
     }
     // Early gate: reject oversized downloads before buffering the full body
     if let Some(cl) = resp.headers().get(reqwest::header::CONTENT_LENGTH) {
         if let Ok(size) = cl.to_str().unwrap_or("0").parse::<u64>() {
             if size > FILE_MAX_DOWNLOAD {
                 tracing::warn!(file_name, size, "feishu file Content-Length exceeds 512KB limit, skipping download");
-                return None;
+                return crate::schema::Attachment::rejected(
+                    "text_file",
+                    file_name.to_string(),
+                    "application/octet-stream",
+                    size,
+                    format!("size exceeded: {} exceeds {}", format_bytes(size), format_bytes(FILE_MAX_DOWNLOAD)),
+                );
             }
         }
     }
-    let bytes = resp.bytes().await.ok()?;
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(file_name, error = %e, "feishu file body read failed");
+            return crate::schema::Attachment::rejected(
+                "text_file",
+                file_name.to_string(),
+                "application/octet-stream",
+                0,
+                "download failed: body read error",
+            );
+        }
+    };
     // Fallback check (Content-Length may be absent or misreported)
     if bytes.len() as u64 > FILE_MAX_DOWNLOAD {
         tracing::warn!(file_name, size = bytes.len(), "feishu file exceeds 512KB limit");
-        return None;
+        return crate::schema::Attachment::rejected(
+            "text_file",
+            file_name.to_string(),
+            "application/octet-stream",
+            bytes.len() as u64,
+            format!("size exceeded: {} exceeds {}", format_bytes(bytes.len() as u64), format_bytes(FILE_MAX_DOWNLOAD)),
+        );
     }
-    let path = crate::store::store_media(&bytes).await?;
-    Some(crate::schema::Attachment {
+    let path = match crate::store::store_media(&bytes).await {
+        Some(p) => p,
+        None => {
+            tracing::warn!(file_name, "feishu file store failed");
+            return crate::schema::Attachment::rejected(
+                "text_file",
+                file_name.to_string(),
+                "application/octet-stream",
+                bytes.len() as u64,
+                "processing failed: storage error",
+            );
+        }
+    };
+    crate::schema::Attachment {
         attachment_type: "text_file".into(),
         filename: file_name.to_string(),
         mime_type: "text/plain".into(),
         data: String::new(),
         size: bytes.len() as u64,
         path: Some(path),
-    })
+        status: None,
+    }
 }
 
 const AUDIO_MAX_DOWNLOAD: u64 = 25 * 1024 * 1024; // 25 MB (Whisper API limit)
@@ -1799,7 +2055,7 @@ pub async fn download_feishu_audio(
     token: &str,
     message_id: &str,
     file_key: &str,
-) -> Option<crate::schema::Attachment> {
+) -> crate::schema::Attachment {
     use urlencoding::encode;
     let url = format!(
         "{}/open-apis/im/v1/messages/{}/resources/{}?type=file",
@@ -1809,12 +2065,25 @@ pub async fn download_feishu_audio(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(file_key, error = %e, "feishu audio download failed");
-            return None;
+            return crate::schema::Attachment::rejected(
+                "audio",
+                format!("{}.ogg", file_key),
+                "audio/ogg",
+                0,
+                "download failed: network error",
+            );
         }
     };
     if !resp.status().is_success() {
-        tracing::warn!(file_key, status = %resp.status(), "feishu audio download failed");
-        return None;
+        let status = resp.status();
+        tracing::warn!(file_key, status = %status, "feishu audio download failed");
+        return crate::schema::Attachment::rejected(
+            "audio",
+            format!("{}.ogg", file_key),
+            "audio/ogg",
+            0,
+            format!("download failed: HTTP {}", status.as_u16()),
+        );
     }
     let content_type = resp
         .headers()
@@ -1826,25 +2095,62 @@ pub async fn download_feishu_audio(
         if let Ok(size) = cl.to_str().unwrap_or("0").parse::<u64>() {
             if size > AUDIO_MAX_DOWNLOAD {
                 tracing::warn!(file_key, size, "feishu audio exceeds 25MB limit");
-                return None;
+                return crate::schema::Attachment::rejected(
+                    "audio",
+                    format!("{}.ogg", file_key),
+                    "audio/ogg",
+                    size,
+                    format!("size exceeded: {} exceeds {}", format_bytes(size), format_bytes(AUDIO_MAX_DOWNLOAD)),
+                );
             }
         }
     }
-    let bytes = resp.bytes().await.ok()?;
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(file_key, error = %e, "feishu audio body read failed");
+            return crate::schema::Attachment::rejected(
+                "audio",
+                format!("{}.ogg", file_key),
+                "audio/ogg",
+                0,
+                "download failed: body read error",
+            );
+        }
+    };
     if bytes.len() as u64 > AUDIO_MAX_DOWNLOAD {
         tracing::warn!(file_key, size = bytes.len(), "feishu audio exceeds 25MB limit");
-        return None;
+        return crate::schema::Attachment::rejected(
+            "audio",
+            format!("{}.ogg", file_key),
+            "audio/ogg",
+            bytes.len() as u64,
+            format!("size exceeded: {} exceeds {}", format_bytes(bytes.len() as u64), format_bytes(AUDIO_MAX_DOWNLOAD)),
+        );
     }
     tracing::debug!(file_key, size = bytes.len(), "feishu audio downloaded");
-    let path = crate::store::store_media(&bytes).await?;
-    Some(crate::schema::Attachment {
+    let path = match crate::store::store_media(&bytes).await {
+        Some(p) => p,
+        None => {
+            tracing::warn!(file_key, "feishu audio store failed");
+            return crate::schema::Attachment::rejected(
+                "audio",
+                format!("{}.ogg", file_key),
+                "audio/ogg",
+                bytes.len() as u64,
+                "processing failed: storage error",
+            );
+        }
+    };
+    crate::schema::Attachment {
         attachment_type: "audio".into(),
         filename: format!("{}.ogg", file_key),
         mime_type: content_type,
         data: String::new(),
         size: bytes.len() as u64,
         path: Some(path),
-    })
+        status: None,
+    }
 }
 
 /// Send a post (rich text) message to a feishu chat_id.
@@ -2071,7 +2377,7 @@ async fn remove_reaction(adapter: &FeishuAdapter, message_id: &str, emoji: &str)
 /// (non-expired) participation entry in the cache.
 fn check_thread_participated(
     envelope: &FeishuEventEnvelope,
-    cache: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    cache: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
     session_ttl_secs: u64,
 ) -> bool {
     envelope
@@ -2082,7 +2388,7 @@ fn check_thread_participated(
         .map(|tid| {
             // Intentionally recover from poisoned mutex — cache data loss is acceptable
             // and preferable to panicking the gateway.
-            let c = cache.lock().unwrap_or_else(|e| e.into_inner());
+            let c = cache.lock();
             c.get(tid).is_some_and(|ts| ts.elapsed().as_secs() < session_ttl_secs)
         })
         .unwrap_or(false)
@@ -2103,8 +2409,8 @@ fn detect_and_mark_multibot(
     envelope: &FeishuEventEnvelope,
     bot_open_id: Option<&str>,
     config: &FeishuConfig,
-    participated_threads: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
-    multibot_threads: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    participated_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
+    multibot_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
 ) -> bool {
     let self_participated = check_thread_participated(
         envelope, participated_threads, config.session_ttl_secs,
@@ -2145,7 +2451,7 @@ fn detect_and_mark_multibot(
 
                 if mentions_other_bot {
                     info!(thread_id = %tid, "multibot thread detected via @mention");
-                    let mut cache = multibot_threads.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut cache = multibot_threads.lock();
                     cache.entry(tid.to_string()).or_insert_with(Instant::now);
                     if cache.len() > PARTICIPATION_CACHE_MAX {
                         cache.retain(|_, ts| ts.elapsed().as_secs() < config.session_ttl_secs);
@@ -2165,7 +2471,7 @@ fn detect_and_mark_multibot(
             } else {
                 thread_id_for_check
                     .map(|tid| {
-                        let cache = multibot_threads.lock().unwrap_or_else(|e| e.into_inner());
+                        let cache = multibot_threads.lock();
                         cache
                             .get(tid)
                             .is_none_or(|ts| ts.elapsed().as_secs() >= config.session_ttl_secs)
@@ -2179,7 +2485,7 @@ fn detect_and_mark_multibot(
 /// Record that the bot has participated in a thread. Evicts oldest entries
 /// when the cache exceeds PARTICIPATION_CACHE_MAX.
 fn record_participation(
-    cache: &Arc<std::sync::Mutex<HashMap<String, Instant>>>,
+    cache: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
     thread_id: &str,
     session_ttl_secs: u64,
 ) {
@@ -2188,7 +2494,7 @@ fn record_participation(
     }
     // Intentionally recover from poisoned mutex — cache data loss is acceptable
     // and preferable to panicking the gateway.
-    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = cache.lock();
     map.insert(thread_id.to_string(), Instant::now());
     // Evict if over capacity: first drop expired entries, then oldest half if still over
     if map.len() > PARTICIPATION_CACHE_MAX {
@@ -2263,58 +2569,10 @@ pub async fn handle_reply(
                 return;
             }
             "edit_message" => {
-                let outcome = edit_feishu_message(
-                    adapter,
-                    &reply.reply_to,
-                    &reply.content.text,
-                ).await;
-                // Translate outcome → (success, message_id, error). For
-                // CapReached we deliberately do NOT append-new at the gateway
-                // layer (see the rationale on the CapReached arm below); we
-                // signal failure so core's finalize path owns recovery.
-                let (success, message_id, error) = match outcome {
-                    EditOutcome::Edited => {
-                        (true, Some(reply.reply_to.clone()), None)
-                    }
-                    EditOutcome::CapReached => {
-                        // Do NOT append-new fallback at the gateway layer. Core's
-                        // cosmetic streaming loop flushes every ~1500ms — if every
-                        // post-cap edit spawned a new message, the user would be
-                        // spammed with 20+ duplicate continuation messages over the
-                        // remainder of a long reply.
-                        //
-                        // Instead, signal failure so:
-                        //   1. core's mid-stream cosmetic edit loop hits its
-                        //      consecutive-failures break (3 strikes) and stops
-                        //      attempting edits, freezing the placeholder mid-content
-                        //   2. the final delivery path in src/adapter.rs sees the
-                        //      placeholder edit fail and falls back to send_message
-                        //      so the user gets the full reply as a fresh message
-                        //
-                        // Net UX: half-edited placeholder + one complete continuation
-                        // message + ✅ done reaction (vs. today's mid-truncation + 🆗
-                        // false success, or naive append-fallback's 25-message spam).
-                        (
-                            false,
-                            None,
-                            Some("edit_cap_reached".to_string()),
-                        )
-                    }
-                    EditOutcome::Failed(err) => (false, None, Some(err)),
-                };
-                if let Some(ref req_id) = reply.request_id {
-                    let resp = crate::schema::GatewayResponse {
-                        schema: "openab.gateway.response.v1".into(),
-                        request_id: req_id.clone(),
-                        success,
-                        thread_id: None,
-                        message_id,
-                        error,
-                    };
-                    if let Ok(json) = serde_json::to_string(&resp) {
-                        let _ = event_tx.send(json);
-                    }
-                }
+                // Card-streaming aware: promote post→card, stream to an existing
+                // card, or PATCH the post (today's behavior + #1122 cap recovery).
+                // Always reports om_post back to core so the swap stays invisible.
+                handle_card_edit(reply, adapter, event_tx).await;
                 return;
             }
             "create_topic" | "set_reaction" => {
@@ -2322,29 +2580,27 @@ pub async fn handle_reply(
                 return;
             }
             "delete_message" => {
-                let result = delete_feishu_message(adapter, &reply.reply_to).await;
+                // If this reply was promoted to a card, the original post
+                // placeholder was already deleted at promotion — delete the card
+                // message instead. Otherwise delete the id directly (today's
+                // behavior). The card_message_id comes from our own session state
+                // (gateway-internal, trusted) so it bypasses the shape check.
+                let card_msg = {
+                    let mut reg = adapter
+                        .stream_sessions
+                        .lock();
+                    reg.remove(&reply.reply_to).map(|s| s.card_message_id)
+                };
+                let target = card_msg.as_deref().unwrap_or(&reply.reply_to);
+                let result = delete_feishu_message(adapter, target).await;
                 let (success, error) = match result {
                     Ok(()) => (true, None),
                     Err(e) => (false, Some(e)),
                 };
                 // Dormant by design: core's delete_message is fire-and-forget
-                // (request_id = None), so this response branch is currently
-                // never taken. Kept for symmetry with the other handlers and so
-                // delete becomes observable for free if a future caller (or
-                // another gateway client) sets request_id.
-                if let Some(ref req_id) = reply.request_id {
-                    let resp = crate::schema::GatewayResponse {
-                        schema: "openab.gateway.response.v1".into(),
-                        request_id: req_id.clone(),
-                        success,
-                        thread_id: None,
-                        message_id: None,
-                        error,
-                    };
-                    if let Ok(json) = serde_json::to_string(&resp) {
-                        let _ = event_tx.send(json);
-                    }
-                }
+                // (request_id = None), so this branch is currently never taken.
+                // Kept for symmetry and free observability if a caller sets one.
+                emit_response(event_tx, &reply.request_id, success, None, error);
                 return;
             }
             _ => {}
@@ -2375,6 +2631,16 @@ pub async fn handle_reply(
     let api_base = adapter.config.api_base();
     let text = &reply.content.text;
     let limit = adapter.config.message_limit;
+
+    // Card mode: send the first reply straight as a card (no post placeholder,
+    // no "message revoked" notice). Falls through to the post path if the card
+    // create/send fails.
+    if adapter.config.streaming_mode == StreamingMode::Card
+        && try_send_initial_card(reply, adapter, event_tx, &token, &api_base).await
+    {
+        return;
+    }
+
     // quote_message_id (agent-controlled reply-to) takes priority over thread_id
     let reply_target = reply.quote_message_id.as_deref()
         .or(reply.channel.thread_id.as_deref());
@@ -2491,6 +2757,402 @@ pub async fn handle_reply(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Card streaming wiring (S5)
+// ---------------------------------------------------------------------------
+
+/// Emit a GatewayResponse back to core, but only if the reply carried a
+/// request_id (fire-and-forget replies don't expect one).
+fn emit_response(
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+    request_id: &Option<String>,
+    success: bool,
+    message_id: Option<String>,
+    error: Option<String>,
+) {
+    if let Some(req_id) = request_id {
+        let resp = crate::schema::GatewayResponse {
+            schema: "openab.gateway.response.v1".into(),
+            request_id: req_id.clone(),
+            success,
+            thread_id: None,
+            message_id,
+            error,
+        };
+        if let Ok(json) = serde_json::to_string(&resp) {
+            let _ = event_tx.send(json);
+        }
+    }
+}
+
+/// Handle an `edit_message` command with card-streaming awareness.
+///
+/// Operates on the FULL accumulated `text` (never a delta — #565). Decision tree:
+/// - Session exists (already promoted) → stream the full text to the card.
+/// - No session + `should_use_card` → promote post→card.
+/// - No session + post path → PATCH the post (today's behavior + #1122 cap
+///   recovery); if the 20-edit cap is hit AND mode != post, treat the cap as
+///   "long enough" and promote.
+///
+/// `message_id` reported back to core is always the original `om_post`
+/// placeholder, so the post→card swap stays invisible to core (no schema change).
+async fn handle_card_edit(
+    reply: &GatewayReply,
+    adapter: &FeishuAdapter,
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+) {
+    let om_post = reply.reply_to.clone();
+    let text = &reply.content.text;
+    let mode = adapter.config.streaming_mode;
+
+    // Snapshot session state under the lock; the std Mutex guard is dropped
+    // before any .await (a guard held across await would not be Send).
+    enum Existing {
+        None,
+        Finalized,
+        Active { card_id: String, seq: i64 },
+    }
+    let existing = {
+        let mut reg = adapter
+            .stream_sessions
+            .lock();
+        match reg.get_mut(&om_post) {
+            None => Existing::None,
+            Some(s) if s.finalized => Existing::Finalized,
+            Some(s) => {
+                // Remember the latest full text so the idle reaper can rebuild a
+                // static card at finalize (fixes streaming-mode table rendering).
+                s.last_text = text.clone();
+                Existing::Active {
+                    card_id: s.card_id.clone(),
+                    seq: s.next_sequence(),
+                }
+            }
+        }
+    };
+
+    match existing {
+        // Idle reaper already closed the stream; content is complete. Further
+        // cosmetic edits are no-ops that still "succeed" (core keeps om_post).
+        Existing::Finalized => {
+            emit_response(event_tx, &reply.request_id, true, Some(om_post), None);
+        }
+        Existing::Active { card_id, seq } => {
+            let token = match adapter.token_cache.get_token(&adapter.client).await {
+                Ok(t) => t,
+                Err(e) => {
+                    emit_response(
+                        event_tx,
+                        &reply.request_id,
+                        false,
+                        None,
+                        Some(format!("token error: {e}")),
+                    );
+                    return;
+                }
+            };
+            let outcome = feishu_card::update_card_stream(
+                &adapter.client,
+                &adapter.config.api_base(),
+                &token,
+                &card_id,
+                feishu_card::STREAM_ELEMENT_ID,
+                text,
+                seq,
+            )
+            .await;
+            match outcome {
+                // Success: the post→card swap stays invisible — core keeps om_post.
+                feishu_card::CardOutcome::Updated => {
+                    emit_response(event_tx, &reply.request_id, true, Some(om_post), None);
+                }
+                // Rate limited: skip this frame. Every update sends the FULL text,
+                // so the next flush carries the latest content and nothing is lost.
+                // Report success to keep core moving.
+                feishu_card::CardOutcome::RateLimited => {
+                    emit_response(event_tx, &reply.request_id, true, Some(om_post), None);
+                }
+                // Hard failure: drop the session, clean the half card (if fallback
+                // is enabled), and report failure so core's finalize path delivers
+                // the full reply as a fresh message (reusing #1122 recovery).
+                feishu_card::CardOutcome::Failed { code, message } => {
+                    let card_msg = {
+                        let mut reg = adapter
+                            .stream_sessions
+                            .lock();
+                        reg.remove(&om_post).map(|s| s.card_message_id)
+                    };
+                    if adapter.config.card_fallback_to_post {
+                        if let Some(cmid) = card_msg {
+                            let _ = delete_feishu_message(adapter, &cmid).await;
+                        }
+                    }
+                    tracing::warn!(code, msg = %message, "feishu card update failed; dropping session");
+                    emit_response(
+                        event_tx,
+                        &reply.request_id,
+                        false,
+                        None,
+                        Some(format!("card_update_failed: {code}")),
+                    );
+                }
+            }
+        }
+        Existing::None => {
+            if should_use_card(text, mode, adapter.config.card_promote_bytes) {
+                promote_and_respond(reply, adapter, event_tx).await;
+                return;
+            }
+            // Post path: today's behavior + #1122 cap recovery.
+            match edit_feishu_message(adapter, &om_post, text).await {
+                EditOutcome::Edited => {
+                    emit_response(event_tx, &reply.request_id, true, Some(om_post), None);
+                }
+                EditOutcome::CapReached => {
+                    if mode != StreamingMode::Post {
+                        // Long plain text hit the 18-edit cap with no fence/table:
+                        // treat the cap signal as "long enough" → promote to card.
+                        promote_and_respond(reply, adapter, event_tx).await;
+                    } else {
+                        emit_response(
+                            event_tx,
+                            &reply.request_id,
+                            false,
+                            None,
+                            Some("edit_cap_reached".into()),
+                        );
+                    }
+                }
+                EditOutcome::Failed(err) => {
+                    emit_response(event_tx, &reply.request_id, false, None, Some(err));
+                }
+            }
+        }
+    }
+}
+
+/// Promote a streaming reply from post to a CardKit card: create + send the
+/// card, delete the old post placeholder, register the session. Order matters —
+/// the placeholder is deleted only AFTER the card is confirmed sent, so a
+/// create/send failure leaves the post intact for a clean post-edit fallback.
+async fn promote_and_respond(
+    reply: &GatewayReply,
+    adapter: &FeishuAdapter,
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+) {
+    let om_post = reply.reply_to.clone();
+    let text = &reply.content.text;
+    let api_base = adapter.config.api_base();
+    let token = match adapter.token_cache.get_token(&adapter.client).await {
+        Ok(t) => t,
+        Err(e) => {
+            emit_response(
+                event_tx,
+                &reply.request_id,
+                false,
+                None,
+                Some(format!("token error: {e}")),
+            );
+            return;
+        }
+    };
+
+    // 1. Create the card entity seeded with the current full text.
+    let card_id = match feishu_card::create_streaming_card(&adapter.client, &api_base, &token, text)
+        .await
+    {
+        Ok(id) => id,
+        Err(outcome) => {
+            tracing::warn!(?outcome, "feishu card promote: create failed; post-edit fallback");
+            return promote_fallback_post(reply, adapter, event_tx).await;
+        }
+    };
+
+    // 2. Send the interactive card message into the same thread.
+    let reply_target = reply
+        .quote_message_id
+        .as_deref()
+        .or(reply.channel.thread_id.as_deref());
+    let card_msg_id = match feishu_card::send_card_message(
+        &adapter.client,
+        &api_base,
+        &token,
+        &reply.channel.id,
+        reply_target,
+        &card_id,
+    )
+    .await
+    {
+        Some(id) => id,
+        None => {
+            tracing::warn!("feishu card promote: send failed; post-edit fallback");
+            return promote_fallback_post(reply, adapter, event_tx).await;
+        }
+    };
+
+    // 3. Delete the old post placeholder (best effort; shape pre-validated).
+    let _ = delete_feishu_message(adapter, &om_post).await;
+
+    // 4. Register the session keyed by om_post (core stays oblivious). Seed
+    //    last_text with the current full text for the finalize rebuild.
+    {
+        let mut reg = adapter
+            .stream_sessions
+            .lock();
+        reg.promote(&om_post, card_id, card_msg_id, text.to_string());
+    }
+    tracing::info!(om_post = %om_post, "feishu reply promoted post → card");
+
+    // 5. Core keeps editing om_post.
+    emit_response(event_tx, &reply.request_id, true, Some(om_post), None);
+}
+
+/// Fallback when promotion fails: edit the (still-present) post placeholder as
+/// today. Always emits a GatewayResponse.
+async fn promote_fallback_post(
+    reply: &GatewayReply,
+    adapter: &FeishuAdapter,
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+) {
+    let om_post = reply.reply_to.clone();
+    match edit_feishu_message(adapter, &om_post, &reply.content.text).await {
+        EditOutcome::Edited => {
+            emit_response(event_tx, &reply.request_id, true, Some(om_post), None)
+        }
+        EditOutcome::CapReached => emit_response(
+            event_tx,
+            &reply.request_id,
+            false,
+            None,
+            Some("edit_cap_reached".into()),
+        ),
+        EditOutcome::Failed(err) => {
+            emit_response(event_tx, &reply.request_id, false, None, Some(err))
+        }
+    }
+}
+
+/// In card mode, send the very first reply straight as a card — no post
+/// placeholder, no "message revoked" notice. The session is keyed by the
+/// card's own message_id (the id core will edit), so there is no post→card
+/// swap at all. Returns true if the card was sent and a response emitted;
+/// false if it failed and the caller should fall back to the post path.
+async fn try_send_initial_card(
+    reply: &GatewayReply,
+    adapter: &FeishuAdapter,
+    event_tx: &tokio::sync::broadcast::Sender<String>,
+    token: &str,
+    api_base: &str,
+) -> bool {
+    let text = &reply.content.text;
+    let card_id =
+        match feishu_card::create_streaming_card(&adapter.client, api_base, token, text).await {
+            Ok(id) => id,
+            Err(outcome) => {
+                tracing::warn!(?outcome, "feishu initial card create failed; post fallback");
+                return false;
+            }
+        };
+    let reply_target = reply
+        .quote_message_id
+        .as_deref()
+        .or(reply.channel.thread_id.as_deref());
+    let card_msg_id = match feishu_card::send_card_message(
+        &adapter.client,
+        api_base,
+        token,
+        &reply.channel.id,
+        reply_target,
+        &card_id,
+    )
+    .await
+    {
+        Some(id) => id,
+        None => {
+            tracing::warn!("feishu initial card send failed; post fallback");
+            return false;
+        }
+    };
+    // Session keyed by the card's own message_id — core edits this id directly,
+    // so subsequent edit_message calls land on the Active path with no swap.
+    {
+        let mut reg = adapter
+            .stream_sessions
+            .lock();
+        reg.promote(&card_msg_id, card_id, card_msg_id.clone(), text.to_string());
+    }
+    // Mirror the post path's self-echo dedupe + thread participation tracking.
+    adapter.dedupe.is_duplicate(&card_msg_id);
+    if let Some(tid) = reply.channel.thread_id.as_deref() {
+        record_participation(
+            &adapter.participated_threads,
+            tid,
+            adapter.config.session_ttl_secs,
+        );
+    }
+    tracing::info!(card_msg_id = %card_msg_id, "feishu first reply sent directly as card (no placeholder)");
+    emit_response(event_tx, &reply.request_id, true, Some(card_msg_id), None);
+    true
+}
+
+/// Background idle-finalize reaper for card streaming. Periodically scans for
+/// sessions idle ≥ `idle_ms`, rebuilds each as a STATIC card via
+/// `finish_card_stream` (so the typewriter cursor settles and markdown
+/// re-renders), and marks them finalized. Finalized sessions are kept (not
+/// removed) so a late cosmetic edit is a clean no-op; FIFO eviction reclaims
+/// them eventually. Spawned once at startup (main.rs), only when
+/// `streaming_mode != post`.
+pub async fn run_idle_reaper(
+    stream_sessions: Arc<parking_lot::Mutex<feishu_card::FeishuStreamRegistry>>,
+    token_cache: Arc<FeishuTokenCache>,
+    client: reqwest::Client,
+    api_base: String,
+    idle_ms: u64,
+) {
+    let tick = std::time::Duration::from_millis(idle_ms.clamp(250, 1000));
+    loop {
+        tokio::time::sleep(tick).await;
+        let keys = {
+            let reg = stream_sessions.lock();
+            reg.idle_keys(idle_ms)
+        };
+        for key in keys {
+            // Mark finalized + grab (card_id, next seq) under the lock so two
+            // reaper ticks can't double-finalize the same session.
+            let target = {
+                let mut reg = stream_sessions.lock();
+                match reg.get_mut(&key) {
+                    Some(s) if !s.finalized => {
+                        s.mark_finalized();
+                        Some((s.card_id.clone(), s.last_text.clone(), s.next_sequence()))
+                    }
+                    _ => None,
+                }
+            };
+            let Some((card_id, text, seq)) = target else {
+                continue;
+            };
+            let token = match token_cache.get_token(&client).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(err = %e, "feishu reaper: token error, skip finalize");
+                    continue;
+                }
+            };
+            match feishu_card::finish_card_stream(&client, &api_base, &token, &card_id, &text, seq)
+                .await
+            {
+                feishu_card::CardOutcome::Updated => {
+                    tracing::info!(card_id = %card_id, "feishu card stream finalized (idle)");
+                }
+                other => {
+                    tracing::warn!(card_id = %card_id, ?other, "feishu card finalize failed");
+                }
+            }
+        }
+    }
+}
+
 /// Split text into chunks of at most `limit` bytes, breaking at newline or
 /// space boundaries when possible. Safe for multi-byte UTF-8 (e.g. Chinese).
 fn split_text(text: &str, limit: usize) -> Vec<&str> {
@@ -2532,7 +3194,7 @@ const WEBHOOK_BODY_LIMIT: usize = 1_048_576;
 
 /// Simple per-IP rate limiter state.
 pub struct RateLimiter {
-    counts: std::sync::Mutex<HashMap<String, (u64, Instant)>>,
+    counts: parking_lot::Mutex<HashMap<String, (u64, Instant)>>,
     window_secs: u64,
     max_requests: u64,
 }
@@ -2540,7 +3202,7 @@ pub struct RateLimiter {
 impl RateLimiter {
     pub fn new(window_secs: u64, max_requests: u64) -> Self {
         Self {
-            counts: std::sync::Mutex::new(HashMap::new()),
+            counts: parking_lot::Mutex::new(HashMap::new()),
             window_secs,
             max_requests,
         }
@@ -2548,7 +3210,7 @@ impl RateLimiter {
 
     /// Returns true if the request should be rejected (rate exceeded).
     pub fn check(&self, key: &str) -> bool {
-        let mut map = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self.counts.lock();
         // Lazy cleanup
         if map.len() > 4096 {
             map.retain(|_, (_, ts)| ts.elapsed().as_secs() < self.window_secs);
@@ -2792,9 +3454,7 @@ pub async fn webhook(
                                 download_feishu_audio(&feishu.client, &api_base, &token, message_id, file_key).await
                             }
                         };
-                        if let Some(att) = attachment {
-                            gateway_event.content.attachments.push(att);
-                        }
+                        gateway_event.content.attachments.push(attachment);
                     }
                 }
             }
@@ -2846,8 +3506,112 @@ mod tests {
             dedupe_ttl_secs: 300,
             message_limit: 4000,
             session_ttl_secs: 86400,
+            streaming_mode: StreamingMode::Post,
+            card_fallback_to_post: true,
+            card_promote_bytes: 4000,
+            card_idle_finalize_ms: 3000,
             api_base_override: None,
         }
+    }
+
+    // --- Streaming mode config tests (S1) ---
+
+    #[test]
+    fn streaming_mode_default_is_auto() {
+        // S6 switched the feature on: the type default is now Auto, so an
+        // unset env var enables card streaming in auto mode.
+        assert_eq!(StreamingMode::default(), StreamingMode::Auto);
+    }
+
+    #[test]
+    fn streaming_mode_parse() {
+        // Empty → Auto, matching Default::default() (unset env var == empty env var).
+        assert_eq!(StreamingMode::parse(""), StreamingMode::Auto);
+        assert_eq!(StreamingMode::parse("auto"), StreamingMode::Auto);
+        assert_eq!(StreamingMode::parse("AUTO"), StreamingMode::Auto);
+        assert_eq!(StreamingMode::parse("post"), StreamingMode::Post);
+        assert_eq!(StreamingMode::parse("POST"), StreamingMode::Post);
+        // Unknown / garbage values must not silently enable the feature.
+        assert_eq!(StreamingMode::parse("garbage"), StreamingMode::Post);
+        assert_eq!(StreamingMode::parse("on"), StreamingMode::Post);
+    }
+
+    #[test]
+    fn streaming_mode_parse_card_and_auto() {
+        assert_eq!(StreamingMode::parse("card"), StreamingMode::Card);
+        assert_eq!(StreamingMode::parse("CARD"), StreamingMode::Card);
+        assert_eq!(StreamingMode::parse("auto"), StreamingMode::Auto);
+        assert_eq!(StreamingMode::parse("Auto"), StreamingMode::Auto);
+        // Surrounding whitespace is tolerated (env values often carry it).
+        assert_eq!(StreamingMode::parse("  card  "), StreamingMode::Card);
+        assert_eq!(StreamingMode::parse(" auto "), StreamingMode::Auto);
+    }
+
+    // --- should_use_card tests (S2) ---
+
+    #[test]
+    fn should_use_card_post_mode_never_promotes() {
+        // Post mode is today's behavior: nothing ever promotes, regardless of
+        // size, fences, or tables.
+        let big = "x".repeat(10_000);
+        assert!(!should_use_card(&big, StreamingMode::Post, 4000));
+        assert!(!should_use_card(
+            "```rust\nfn main() {}\n```",
+            StreamingMode::Post,
+            4000
+        ));
+        assert!(!should_use_card(
+            "| a | b |\n| --- | --- |\n| 1 | 2 |",
+            StreamingMode::Post,
+            4000
+        ));
+    }
+
+    #[test]
+    fn should_use_card_card_mode_always_promotes() {
+        assert!(should_use_card("hi", StreamingMode::Card, 4000));
+        assert!(should_use_card("", StreamingMode::Card, 4000));
+    }
+
+    #[test]
+    fn should_use_card_auto_promotes_on_length() {
+        // At/over threshold promotes; just under stays post.
+        let at = "x".repeat(4000);
+        assert!(should_use_card(&at, StreamingMode::Auto, 4000));
+        let under = "x".repeat(3999);
+        assert!(!should_use_card(&under, StreamingMode::Auto, 4000));
+    }
+
+    #[test]
+    fn should_use_card_auto_promotes_on_code_fence() {
+        assert!(should_use_card("here:\n```\ncode\n```", StreamingMode::Auto, 4000));
+        assert!(should_use_card("```python\nprint(1)\n```", StreamingMode::Auto, 4000));
+        // Indented fence (markdown_to_post trims leading whitespace too).
+        assert!(should_use_card("  ```\ncode", StreamingMode::Auto, 4000));
+        // Inline single backticks are NOT a fence.
+        assert!(!should_use_card("use `cargo` to build", StreamingMode::Auto, 4000));
+    }
+
+    #[test]
+    fn should_use_card_auto_promotes_on_table() {
+        let table = "| Name | Age |\n| --- | --- |\n| Bob | 30 |";
+        assert!(should_use_card(table, StreamingMode::Auto, 4000));
+        // Colon-aligned delimiter row.
+        let aligned = "| a | b |\n| :--- | ---: |\n| 1 | 2 |";
+        assert!(should_use_card(aligned, StreamingMode::Auto, 4000));
+        // A bare delimiter row alone is enough signal to promote.
+        assert!(should_use_card("|---|---|", StreamingMode::Auto, 4000));
+    }
+
+    #[test]
+    fn should_use_card_auto_plain_short_text_stays_post() {
+        assert!(!should_use_card("just a short reply", StreamingMode::Auto, 4000));
+        // A line with a pipe but no delimiter row is not a table.
+        assert!(!should_use_card("a | b but not a table", StreamingMode::Auto, 4000));
+        // Bullet list with dashes is not a table (no pipe).
+        assert!(!should_use_card("- item one\n- item two", StreamingMode::Auto, 4000));
+        // Thematic break (---) is not a table (no pipe).
+        assert!(!should_use_card("above\n\n---\n\nbelow", StreamingMode::Auto, 4000));
     }
 
     // --- Token tests ---
@@ -3217,7 +3981,7 @@ mod tests {
 
         let config = test_config();
         let token_cache = Arc::new(FeishuTokenCache::with_base(&config, &server.uri()));
-        let name_cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let name_cache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let client = reqwest::Client::new();
 
         let name = resolve_user_name("ou_user1", &name_cache, &token_cache, &client, &server.uri()).await;
@@ -3248,7 +4012,7 @@ mod tests {
 
         let config = test_config();
         let token_cache = Arc::new(FeishuTokenCache::with_base(&config, &server.uri()));
-        let name_cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let name_cache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let client = reqwest::Client::new();
 
         let name = resolve_user_name("ou_unknown", &name_cache, &token_cache, &client, &server.uri()).await;
@@ -3426,16 +4190,16 @@ mod tests {
 
     #[test]
     fn record_participation_and_eviction() {
-        let cache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cache = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         // Record a thread
         record_participation(&cache, "thread_1", 86400);
-        assert_eq!(cache.lock().unwrap().len(), 1);
+        assert_eq!(cache.lock().len(), 1);
         // Fill beyond PARTICIPATION_CACHE_MAX
         for i in 0..PARTICIPATION_CACHE_MAX + 10 {
             record_participation(&cache, &format!("thread_{i}"), 86400);
         }
         // After eviction, should be roughly half
-        assert!(cache.lock().unwrap().len() <= PARTICIPATION_CACHE_MAX);
+        assert!(cache.lock().len() <= PARTICIPATION_CACHE_MAX);
     }
 
     // --- Multibot-mentions mode tests ---
@@ -3618,8 +4382,8 @@ mod tests {
 
     // --- Edit-cap helpers (F3/F4/F8/F10): no network required ---
 
-    fn fresh_cache() -> Arc<std::sync::Mutex<EditCountsCache>> {
-        Arc::new(std::sync::Mutex::new(EditCountsCache::default()))
+    fn fresh_cache() -> Arc<parking_lot::Mutex<EditCountsCache>> {
+        Arc::new(parking_lot::Mutex::new(EditCountsCache::default()))
     }
 
     #[test]
@@ -3688,7 +4452,7 @@ mod tests {
         mark_edit_cap(&cache, "om_msg1");
         increment_edit_count(&cache, "om_msg1");
         // Increment must not push past u32::MAX sentinel.
-        let map = cache.lock().unwrap();
+        let map = cache.lock();
         assert_eq!(map.counts.get("om_msg1").copied(), Some(u32::MAX));
     }
 
@@ -3709,7 +4473,7 @@ mod tests {
         // survive.
         increment_edit_count(&cache, "om_active_recent");
 
-        let map = cache.lock().unwrap();
+        let map = cache.lock();
         // FIFO eviction: the newest insert must still be present.
         assert!(
             map.counts.contains_key("om_active_recent"),
@@ -3826,7 +4590,7 @@ mod tests {
             matches!(outcome, EditOutcome::Edited),
             "HTTP 200 + code 0 must yield Edited"
         );
-        let map = adapter.edit_counts.lock().unwrap();
+        let map = adapter.edit_counts.lock();
         assert_eq!(map.counts.get("om_ok").copied(), Some(1));
     }
 
@@ -3854,7 +4618,7 @@ mod tests {
             "HTTP 200 + code 99991 must yield Failed, not Edited"
         );
         // Failure must NOT increment the edit count.
-        let map = adapter.edit_counts.lock().unwrap();
+        let map = adapter.edit_counts.lock();
         assert_eq!(map.counts.get("om_err").copied(), None);
     }
 
@@ -3924,5 +4688,291 @@ mod tests {
             event_rx.try_recv().is_err(),
             "no response expected when request_id is absent"
         );
+    }
+
+    #[tokio::test]
+    async fn download_feishu_file_rejects_non_text_extension() {
+        let client = reqwest::Client::new();
+        let att = download_feishu_file(
+            &client,
+            "https://unused",
+            "fake-token",
+            "msg_id",
+            "file_key",
+            "report.pdf",
+        )
+        .await;
+        assert!(att.status.is_some(), "non-text extension must have status set");
+        let reason = att.status.unwrap();
+        assert!(reason.contains("unsupported format"), "got: {reason}");
+    }
+
+    // --- Card streaming wiring (S5) ---
+
+    fn token_mock() -> Mock {
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "tenant_access_token": "t-test", "expire": 7200
+            })))
+    }
+
+    fn edit_reply(
+        reply_to: &str,
+        text: &str,
+        thread_id: Option<&str>,
+        request_id: Option<&str>,
+    ) -> crate::schema::GatewayReply {
+        crate::schema::GatewayReply {
+            schema: "openab.gateway.reply.v1".into(),
+            reply_to: reply_to.into(),
+            platform: "feishu".into(),
+            channel: crate::schema::ReplyChannel {
+                id: "oc_chat".into(),
+                thread_id: thread_id.map(|s| s.into()),
+            },
+            content: crate::schema::Content {
+                content_type: "text".into(),
+                text: text.into(),
+                attachments: vec![],
+            },
+            command: Some("edit_message".into()),
+            request_id: request_id.map(|s| s.into()),
+            quote_message_id: None,
+        }
+    }
+
+    /// Post mode (default) must keep today's behavior: PATCH the post in place,
+    /// never create a card session.
+    #[tokio::test]
+    async fn s5_edit_post_mode_patches_without_session() {
+        let server = MockServer::start().await;
+        token_mock().mount(&server).await;
+        Mock::given(method("PUT"))
+            .and(path("/open-apis/im/v1/messages/om_ph1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"code": 0})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = test_config();
+        config.api_base_override = Some(server.uri());
+        config.streaming_mode = StreamingMode::Post;
+        let adapter = FeishuAdapter::new(config);
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+
+        handle_reply(&edit_reply("om_ph1", "short reply", None, Some("r1")), &adapter, &tx).await;
+
+        assert!(
+            adapter.stream_sessions.lock().is_empty(),
+            "post mode must not create a session"
+        );
+        let resp: crate::schema::GatewayResponse =
+            serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.message_id.as_deref(), Some("om_ph1"));
+    }
+
+    /// Card mode: the first edit promotes post→card (create + send + delete old
+    /// placeholder) and registers a session keyed by the placeholder id.
+    #[tokio::test]
+    async fn s5_edit_card_mode_promotes_and_registers_session() {
+        let server = MockServer::start().await;
+        token_mock().mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/cardkit/v1/cards"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "data": {"card_id": "card777"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages/om_root/reply"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "data": {"message_id": "om_cardmsg"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/open-apis/im/v1/messages/om_ph2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"code": 0})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = test_config();
+        config.api_base_override = Some(server.uri());
+        config.streaming_mode = StreamingMode::Card;
+        let adapter = FeishuAdapter::new(config);
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+
+        handle_reply(
+            &edit_reply("om_ph2", "promote me", Some("om_root"), Some("r2")),
+            &adapter,
+            &tx,
+        )
+        .await;
+
+        {
+            let reg = adapter.stream_sessions.lock();
+            let s = reg.get("om_ph2").expect("session created on promote");
+            assert_eq!(s.card_id, "card777");
+            assert_eq!(s.card_message_id, "om_cardmsg");
+        }
+        let resp: crate::schema::GatewayResponse =
+            serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(resp.success);
+        // The swap is invisible to core: it keeps editing the placeholder id.
+        assert_eq!(resp.message_id.as_deref(), Some("om_ph2"));
+    }
+
+    /// An existing (promoted) session streams the FULL accumulated text plus a
+    /// strictly increasing sequence — the #565 guard at the wiring level.
+    #[tokio::test]
+    async fn s5_edit_existing_session_streams_full_content() {
+        let server = MockServer::start().await;
+        token_mock().mount(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/open-apis/cardkit/v1/cards/card777/elements/md_stream/content",
+            ))
+            // Exact body match: full content (not a delta) + sequence 1.
+            .and(body_json(serde_json::json!({
+                "content": "full snapshot v2",
+                "sequence": 1
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"code": 0})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = test_config();
+        config.api_base_override = Some(server.uri());
+        config.streaming_mode = StreamingMode::Card;
+        let adapter = FeishuAdapter::new(config);
+        adapter.stream_sessions.lock().promote(
+            "om_ph3",
+            "card777".into(),
+            "om_cardmsg".into(),
+            "seed".into(),
+        );
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+
+        handle_reply(
+            &edit_reply("om_ph3", "full snapshot v2", None, Some("r3")),
+            &adapter,
+            &tx,
+        )
+        .await;
+
+        let resp: crate::schema::GatewayResponse =
+            serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.message_id.as_deref(), Some("om_ph3"));
+    }
+
+    /// A hard card-update failure drops the session (and cleans the half card)
+    /// so core's finalize path delivers the full reply as a fresh message —
+    /// the #63-style cleanup path.
+    #[tokio::test]
+    async fn s5_edit_card_failure_drops_session() {
+        let server = MockServer::start().await;
+        token_mock().mount(&server).await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/open-apis/cardkit/v1/cards/card_x/elements/md_stream/content",
+            ))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "code": 300317, "msg": "sequence did not increment"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // fallback_to_post = true (default) → clean the half card.
+        Mock::given(method("DELETE"))
+            .and(path("/open-apis/im/v1/messages/om_cardmsg"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"code": 0})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = test_config();
+        config.api_base_override = Some(server.uri());
+        config.streaming_mode = StreamingMode::Card;
+        let adapter = FeishuAdapter::new(config);
+        adapter.stream_sessions.lock().promote(
+            "om_ph4",
+            "card_x".into(),
+            "om_cardmsg".into(),
+            "seed".into(),
+        );
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+
+        handle_reply(&edit_reply("om_ph4", "v", None, Some("r4")), &adapter, &tx).await;
+
+        assert!(
+            !adapter.stream_sessions.lock().contains("om_ph4"),
+            "failed card update must drop the session"
+        );
+        let resp: crate::schema::GatewayResponse =
+            serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(!resp.success, "failure must surface so core finalize takes over");
+    }
+
+    /// Card mode: the FIRST reply (command=None) goes straight to a card with no
+    /// post placeholder and no revoke. Session is keyed by the card's own id.
+    #[tokio::test]
+    async fn s5_card_mode_first_send_is_card_no_placeholder() {
+        let server = MockServer::start().await;
+        token_mock().mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/cardkit/v1/cards"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "data": {"card_id": "cardZ"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "data": {"message_id": "om_cardZ"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = test_config();
+        config.api_base_override = Some(server.uri());
+        config.streaming_mode = StreamingMode::Card;
+        let adapter = FeishuAdapter::new(config);
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let reply = crate::schema::GatewayReply {
+            schema: "openab.gateway.reply.v1".into(),
+            reply_to: "evt_1".into(),
+            platform: "feishu".into(),
+            channel: crate::schema::ReplyChannel {
+                id: "oc_chat".into(),
+                thread_id: None,
+            },
+            content: crate::schema::Content {
+                content_type: "text".into(),
+                text: "first chunk".into(),
+                attachments: vec![],
+            },
+            command: None,
+            request_id: Some("r1".into()),
+            quote_message_id: None,
+        };
+
+        handle_reply(&reply, &adapter, &tx).await;
+
+        // Session keyed by the card's own message_id (no post→card swap).
+        {
+            let reg = adapter.stream_sessions.lock();
+            let s = reg.get("om_cardZ").expect("session keyed by card message id");
+            assert_eq!(s.card_id, "cardZ");
+        }
+        let resp: crate::schema::GatewayResponse =
+            serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.message_id.as_deref(), Some("om_cardZ"));
     }
 }
