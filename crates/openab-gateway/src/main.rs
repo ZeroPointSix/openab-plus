@@ -77,6 +77,7 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
                             "OAB → gateway reply"
                         );
                         match reply.platform.as_str() {
+                            #[cfg(feature = "telegram")]
                             "telegram" => {
                                 if let Some(ref token) = state_for_recv.telegram_bot_token {
                                     adapters::telegram::handle_reply(
@@ -92,6 +93,7 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
                                     warn!("reply for telegram but adapter not configured");
                                 }
                             }
+                            #[cfg(feature = "line")]
                             "line" => {
                                 if let Some(ref access_token) = state_for_recv.line_access_token {
                                     adapters::line::dispatch_line_reply(
@@ -191,11 +193,15 @@ async fn main() -> Result<()> {
         .route("/health", get(health));
 
     // Telegram adapter
+    #[cfg(feature = "telegram")]
     let telegram_bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
+    #[cfg(feature = "telegram")]
     let telegram_secret_token = std::env::var("TELEGRAM_SECRET_TOKEN").ok();
+    #[cfg(feature = "telegram")]
     let telegram_rich_messages = std::env::var("TELEGRAM_RICH_MESSAGES")
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
+    #[cfg(feature = "telegram")]
     if telegram_bot_token.is_some() {
         let webhook_path =
             std::env::var("TELEGRAM_WEBHOOK_PATH").unwrap_or_else(|_| "/webhook/telegram".into());
@@ -205,12 +211,27 @@ async fn main() -> Result<()> {
         info!(path = %webhook_path, "telegram adapter enabled");
         app = app.route(&webhook_path, post(adapters::telegram::webhook));
     }
+    #[cfg(not(feature = "telegram"))]
+    let telegram_bot_token: Option<String> = None;
+    #[cfg(not(feature = "telegram"))]
+    let telegram_secret_token: Option<String> = None;
+    #[cfg(not(feature = "telegram"))]
+    let telegram_rich_messages = false;
 
     // LINE adapter
+    #[cfg(feature = "line")]
     let line_channel_secret = std::env::var("LINE_CHANNEL_SECRET").ok();
+    #[cfg(feature = "line")]
     let line_access_token = std::env::var("LINE_CHANNEL_ACCESS_TOKEN").ok();
-    info!("line adapter enabled");
-    app = app.route("/webhook/line", post(adapters::line::webhook));
+    #[cfg(feature = "line")]
+    {
+        info!("line adapter enabled");
+        app = app.route("/webhook/line", post(adapters::line::webhook));
+    }
+    #[cfg(not(feature = "line"))]
+    let line_channel_secret: Option<String> = None;
+    #[cfg(not(feature = "line"))]
+    let line_access_token: Option<String> = None;
 
     // Teams adapter
     #[cfg(feature = "teams")]
