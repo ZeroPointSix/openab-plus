@@ -792,6 +792,7 @@ impl Default for ReactionsConfig {
             tool_display: ToolDisplay::default(),
             emojis: ReactionEmojis::default(),
             timing: ReactionTiming::default(),
+            mapping: HashMap::new(),
         }
     }
 }
