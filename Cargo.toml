@@ -42,3 +42,6 @@ feishu = ["dep:openab-gateway", "openab-gateway/feishu"]
 googlechat = ["dep:openab-gateway", "openab-gateway/googlechat"]
 wecom = ["dep:openab-gateway", "openab-gateway/wecom"]
 teams = ["dep:openab-gateway", "openab-gateway/teams"]
+
+[dev-dependencies]
+tempfile = "3.27.0"
