@@ -1409,7 +1409,7 @@ mod tests {
         })).unwrap()
     }
 
-    fn default_filter(allowed_channels: &HashSet<String>, allowed_users: &HashSet<String>, trusted_bot_ids: &HashSet<String>) -> EventFilterParams<'_> {
+    fn default_filter<'a>(allowed_channels: &'a HashSet<String>, allowed_users: &'a HashSet<String>, trusted_bot_ids: &'a HashSet<String>) -> EventFilterParams<'a> {
         EventFilterParams {
             allow_all_channels: true,
             allowed_channels,
