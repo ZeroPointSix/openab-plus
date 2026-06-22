@@ -1,0 +1,44 @@
+name: Docker Smoke Test (Unified)
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile.unified'
+      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.*'
+      - 'openab-agent/**'
+      - 'agy-acp/**'
+
+jobs:
+  smoke-test-unified:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: kiro, agent: "kiro-cli" }
+          - { name: claude, agent: "claude" }
+          - { name: codex, agent: "codex-acp" }
+          - { name: copilot, agent: "copilot" }
+          - { name: cursor, agent: "cursor-agent" }
+          - { name: gemini, agent: "gemini" }
+          - { name: grok, agent: "grok" }
+          - { name: hermes, agent: "hermes-acp" }
+          - { name: mimocode, agent: "mimo" }
+          - { name: opencode, agent: "opencode" }
+          - { name: antigravity, agent: "agy-acp" }
+          - { name: pi, agent: "pi-acp" }
+          - { name: native, agent: "openab-agent" }
+          - { name: agentcore, agent: "openab" }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build unified target
+        run: docker build --target ${{ matrix.target.name }} -t openab-unified-${{ matrix.target.name }} -f Dockerfile.unified .
+
+      - name: Verify openab binary exists
+        run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }} openab
+
+      - name: Verify agent CLI exists
+        run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }} ${{ matrix.target.agent }}
