@@ -554,3 +554,42 @@ bot_token = "${DISCORD_BOT_TOKEN}"
 ```
 
 Undefined variables resolve to an empty string.
+
+---
+
+## Unified Mode Environment Variables
+
+When running with `BUILD_MODE=unified`, the binary embeds a webhook server for gateway platforms. These env vars control its behavior:
+
+### Server
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GATEWAY_LISTEN` | `0.0.0.0:8080` | Bind address for the embedded webhook server |
+
+### Security Gating
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GATEWAY_ALLOW_ALL_CHANNELS` | `true` | Accept events from any channel. **Set to `false` in production** and use `GATEWAY_ALLOWED_CHANNELS`. |
+| `GATEWAY_ALLOWED_CHANNELS` | _(empty)_ | Comma-separated channel IDs to allow (when `ALLOW_ALL_CHANNELS=false`) |
+| `GATEWAY_ALLOW_ALL_USERS` | `true` | Accept events from any user. **Set to `false` in production** and use `GATEWAY_ALLOWED_USERS`. |
+| `GATEWAY_ALLOWED_USERS` | _(empty)_ | Comma-separated user IDs to allow (when `ALLOW_ALL_USERS=false`) |
+| `GATEWAY_ALLOW_BOT_MESSAGES` | `false` | Allow messages from all bots (for multi-agent scenarios) |
+| `GATEWAY_TRUSTED_BOT_IDS` | _(empty)_ | Comma-separated bot IDs to allow even when `ALLOW_BOT_MESSAGES=false` |
+| `GATEWAY_BOT_USERNAME` | _(empty)_ | Bot's username for @mention detection in groups |
+
+### Platform Adapters
+
+Each platform is auto-enabled when its env vars are present:
+
+| Platform | Required Env Var | Optional |
+|----------|-----------------|----------|
+| Telegram | `TELEGRAM_BOT_TOKEN` | `TELEGRAM_SECRET_TOKEN`, `TELEGRAM_WEBHOOK_PATH`, `TELEGRAM_RICH_MESSAGES` |
+| LINE | `LINE_CHANNEL_SECRET` | `LINE_CHANNEL_ACCESS_TOKEN` |
+| Feishu | `FEISHU_APP_ID` | `FEISHU_WEBHOOK_PATH` |
+| Google Chat | `GOOGLE_CHAT_ENABLED=true` | `GOOGLE_CHAT_SA_KEY_JSON`, `GOOGLE_CHAT_AUDIENCE` |
+| WeCom | `WECOM_CORP_ID` | _(see wecom config)_ |
+| Teams | `TEAMS_APP_ID` | `TEAMS_WEBHOOK_PATH` |
+
+> ⚠️ **Production checklist**: Set `GATEWAY_ALLOW_ALL_CHANNELS=false` and `GATEWAY_ALLOW_ALL_USERS=false` with explicit allowlists. The defaults are permissive for development convenience.
