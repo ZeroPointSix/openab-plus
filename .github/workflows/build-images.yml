@@ -25,7 +25,6 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  ALL_VARIANTS: 'kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore'
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
