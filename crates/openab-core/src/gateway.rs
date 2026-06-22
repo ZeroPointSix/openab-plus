@@ -736,9 +736,9 @@ pub async fn run_gateway_adapter(
     let gateway_url = params.url;
     let bot_username = params.bot_username;
     let allow_all_channels = params.allow_all_channels;
-    let allowed_channels = params.allowed_channels;
+    let allowed_channels: HashSet<String> = params.allowed_channels.into_iter().collect();
     let allow_all_users = params.allow_all_users;
-    let allowed_users = params.allowed_users;
+    let allowed_users: HashSet<String> = params.allowed_users.into_iter().collect();
     let streaming = params.streaming;
     let streaming_placeholder = params.streaming_placeholder;
     let stt_config = params.stt;
