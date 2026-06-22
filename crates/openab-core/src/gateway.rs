@@ -894,6 +894,11 @@ pub async fn run_gateway_adapter(
                                                 .decode(&att.data)
                                                 .map_err(|e| e.to_string())
                                         } else {
+                                            tracing::warn!(
+                                                filename = %att.filename,
+                                                mime = %att.mime_type,
+                                                "gateway: attachment has no path or data, skipping"
+                                            );
                                             Err("no path or data".into())
                                         };
 
@@ -1010,6 +1015,7 @@ pub async fn run_gateway_adapter(
                                                 Ok(tc) => tc,
                                                 Err(e) => {
                                                     warn!("create_thread failed, using channel: {e}");
+                                                    let _ = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await;
                                                     channel.clone()
                                                 }
                                             }
@@ -1097,6 +1103,8 @@ pub struct GatewayEventContext {
     pub allowed_channels: HashSet<String>,
     pub allow_all_users: bool,
     pub allowed_users: HashSet<String>,
+    pub allow_bot_messages: bool,
+    pub trusted_bot_ids: HashSet<String>,
     pub bot_username: Option<String>,
     pub stt_config: crate::config::SttConfig,
 }
@@ -1115,7 +1123,7 @@ pub async fn process_gateway_event(
         .map_err(|e| anyhow::anyhow!("invalid gateway event JSON: {e}"))?;
 
     // Bot filter
-    if event.sender.is_bot {
+    if event.sender.is_bot && !ctx.allow_bot_messages && !ctx.trusted_bot_ids.contains(&event.sender.id) {
         return Ok(false);
     }
 
@@ -1205,6 +1213,11 @@ pub async fn process_gateway_event(
                 .decode(&att.data)
                 .map_err(|e| e.to_string())
         } else {
+            tracing::warn!(
+                filename = %att.filename,
+                mime = %att.mime_type,
+                "gateway: attachment has no path or data, skipping"
+            );
             Err("no path or data".into())
         };
 
@@ -1308,6 +1321,7 @@ pub async fn process_gateway_event(
                 Ok(tc) => tc,
                 Err(e) => {
                     tracing::warn!("create_thread failed, using channel: {e}");
+                    let _ = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await;
                     channel.clone()
                 }
             }

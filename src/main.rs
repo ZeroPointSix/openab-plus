@@ -607,6 +607,17 @@ async fn main() -> anyhow::Result<()> {
                     .collect();
             let gw_bot_username = std::env::var("GATEWAY_BOT_USERNAME").ok();
 
+            let gw_allow_bot_messages = std::env::var("GATEWAY_ALLOW_BOT_MESSAGES")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false);
+            let gw_trusted_bot_ids: std::collections::HashSet<String> =
+                std::env::var("GATEWAY_TRUSTED_BOT_IDS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+
             let event_ctx = Arc::new(GatewayEventContext {
                 adapter: unified_adapter,
                 dispatcher: unified_dispatcher,
@@ -621,6 +632,8 @@ async fn main() -> anyhow::Result<()> {
                     &gw_allowed_users.iter().cloned().collect::<Vec<_>>(),
                 ),
                 allowed_users: gw_allowed_users,
+                allow_bot_messages: gw_allow_bot_messages,
+                trusted_bot_ids: gw_trusted_bot_ids,
                 bot_username: gw_bot_username,
                 stt_config: cfg.stt.clone(),
             });
