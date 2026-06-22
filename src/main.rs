@@ -502,63 +502,8 @@ async fn main() -> anyhow::Result<()> {
             // This reuses 100% of existing adapter code (signature verify, parsing, etc).
             let (event_tx, _) = tokio::sync::broadcast::channel::<String>(256);
 
-            // Build gateway AppState (same as standalone binary)
-            let gw_state = Arc::new(openab_gateway::AppState {
-                telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").ok(),
-                telegram_secret_token: std::env::var("TELEGRAM_SECRET_TOKEN").ok(),
-                telegram_rich_messages: std::env::var("TELEGRAM_RICH_MESSAGES")
-                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                    .unwrap_or(true),
-                line_channel_secret: std::env::var("LINE_CHANNEL_SECRET").ok(),
-                line_access_token: std::env::var("LINE_CHANNEL_ACCESS_TOKEN").ok(),
-                #[cfg(feature = "teams")]
-                teams: openab_gateway::adapters::teams::TeamsConfig::from_env()
-                    .map(openab_gateway::adapters::teams::TeamsAdapter::new),
-                teams_service_urls: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-                #[cfg(feature = "feishu")]
-                feishu: openab_gateway::adapters::feishu::FeishuConfig::from_env()
-                    .map(openab_gateway::adapters::feishu::FeishuAdapter::new),
-                #[cfg(feature = "googlechat")]
-                google_chat: {
-                    if has_googlechat {
-                        let token_cache = std::env::var("GOOGLE_CHAT_SA_KEY_JSON")
-                            .ok()
-                            .or_else(|| {
-                                std::env::var("GOOGLE_CHAT_SA_KEY_FILE")
-                                    .ok()
-                                    .and_then(|path| std::fs::read_to_string(&path).ok())
-                            })
-                            .and_then(|json| {
-                                openab_gateway::adapters::googlechat::GoogleChatTokenCache::new(&json)
-                                    .map_err(|e| tracing::warn!("googlechat SA key error: {e}"))
-                                    .ok()
-                            });
-                        let access_token = std::env::var("GOOGLE_CHAT_ACCESS_TOKEN").ok();
-                        let jwt_verifier = std::env::var("GOOGLE_CHAT_AUDIENCE").ok().map(|aud| {
-                            info!("unified: googlechat JWT verification enabled (audience={aud})");
-                            openab_gateway::adapters::googlechat::GoogleChatJwtVerifier::new(aud)
-                        });
-                        Some(openab_gateway::adapters::googlechat::GoogleChatAdapter::new(
-                            token_cache, access_token, jwt_verifier,
-                        ))
-                    } else {
-                        None
-                    }
-                },
-                #[cfg(feature = "wecom")]
-                wecom: openab_gateway::adapters::wecom::WecomConfig::from_env()
-                    .map(openab_gateway::adapters::wecom::WecomAdapter::new),
-                ws_token: None, // not needed in unified mode (no WS endpoint)
-                event_tx: event_tx.clone(),
-                reply_token_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-                line_webhook_semaphore: Arc::new(tokio::sync::Semaphore::new(
-                    openab_gateway::LINE_WEBHOOK_CONCURRENCY_MAX,
-                )),
-                client: reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .expect("HTTP client must build"),
-            });
+            // Build gateway AppState from env vars (shared factory with standalone gateway)
+            let gw_state = Arc::new(openab_gateway::AppState::from_env(event_tx.clone(), None));
 
             // Build axum router with platform webhook routes
             let mut app = axum::Router::new()
