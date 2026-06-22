@@ -89,7 +89,11 @@ impl AppState {
                     .or_else(|| {
                         std::env::var("GOOGLE_CHAT_SA_KEY_FILE")
                             .ok()
-                            .and_then(|path| std::fs::read_to_string(&path).ok())
+                            .and_then(|path| {
+                                std::fs::read_to_string(&path).map_err(|e| {
+                                    warn!("failed to read GOOGLE_CHAT_SA_KEY_FILE '{}': {e}", path);
+                                }).ok()
+                            })
                     })
                     .and_then(|json| {
                         adapters::googlechat::GoogleChatTokenCache::new(&json)
@@ -294,7 +298,11 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
                 .or_else(|| {
                     std::env::var("GOOGLE_CHAT_SA_KEY_FILE")
                         .ok()
-                        .and_then(|path| std::fs::read_to_string(&path).ok())
+                        .and_then(|path| {
+                            std::fs::read_to_string(&path).map_err(|e| {
+                                warn!("failed to read GOOGLE_CHAT_SA_KEY_FILE '{}': {e}", path);
+                            }).ok()
+                        })
                 })
                 .and_then(|json| {
                     adapters::googlechat::GoogleChatTokenCache::new(&json)

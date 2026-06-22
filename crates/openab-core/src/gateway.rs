@@ -1385,3 +1385,132 @@ fn format_size(n: u64) -> String {
         format!("{} B", n)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn make_event(is_bot: bool, sender_id: &str, channel_id: &str, channel_type: &str, thread_id: Option<&str>, mentions: Vec<&str>) -> GatewayEvent {
+        serde_json::from_value(serde_json::json!({
+            "schema": "openab.gateway.event.v1",
+            "event_id": "evt1",
+            "timestamp": "",
+            "platform": "test",
+            "channel": { "id": channel_id, "type": channel_type, "thread_id": thread_id },
+            "sender": { "id": sender_id, "name": "user", "display_name": "User", "is_bot": is_bot },
+            "content": { "type": "text", "text": "hello" },
+            "mentions": mentions,
+            "message_id": "msg1"
+        })).unwrap()
+    }
+
+    fn default_filter(allowed_channels: &HashSet<String>, allowed_users: &HashSet<String>, trusted_bot_ids: &HashSet<String>) -> EventFilterParams<'_> {
+        EventFilterParams {
+            allow_all_channels: true,
+            allowed_channels,
+            allow_all_users: true,
+            allowed_users,
+            allow_bot_messages: false,
+            trusted_bot_ids,
+            bot_username: None,
+        }
+    }
+
+    #[test]
+    fn bot_blocked_by_default() {
+        let ch = HashSet::new();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let filter = default_filter(&ch, &us, &tb);
+        let event = make_event(true, "bot1", "ch1", "dm", None, vec![]);
+        assert!(should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn trusted_bot_passes() {
+        let ch = HashSet::new();
+        let us = HashSet::new();
+        let tb: HashSet<String> = ["bot1".into()].into();
+        let filter = default_filter(&ch, &us, &tb);
+        let event = make_event(true, "bot1", "ch1", "dm", None, vec![]);
+        assert!(!should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn all_bots_allowed() {
+        let ch = HashSet::new();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.allow_bot_messages = true;
+        let event = make_event(true, "bot1", "ch1", "dm", None, vec![]);
+        assert!(!should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn channel_allowlist_blocks() {
+        let ch: HashSet<String> = ["allowed_ch".into()].into();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.allow_all_channels = false;
+        let event = make_event(false, "u1", "other_ch", "dm", None, vec![]);
+        assert!(should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn channel_allowlist_passes() {
+        let ch: HashSet<String> = ["ch1".into()].into();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.allow_all_channels = false;
+        let event = make_event(false, "u1", "ch1", "dm", None, vec![]);
+        assert!(!should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn user_allowlist_blocks() {
+        let ch = HashSet::new();
+        let us: HashSet<String> = ["allowed_user".into()].into();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.allow_all_users = false;
+        let event = make_event(false, "other_user", "ch1", "dm", None, vec![]);
+        assert!(should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn group_without_mention_skipped() {
+        let ch = HashSet::new();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.bot_username = Some("mybot");
+        let event = make_event(false, "u1", "ch1", "group", None, vec![]);
+        assert!(should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn group_with_mention_passes() {
+        let ch = HashSet::new();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.bot_username = Some("mybot");
+        let event = make_event(false, "u1", "ch1", "group", None, vec!["mybot"]);
+        assert!(!should_skip_event(&event, &filter));
+    }
+
+    #[test]
+    fn thread_in_group_bypasses_mention_gating() {
+        let ch = HashSet::new();
+        let us = HashSet::new();
+        let tb = HashSet::new();
+        let mut filter = default_filter(&ch, &us, &tb);
+        filter.bot_username = Some("mybot");
+        let event = make_event(false, "u1", "ch1", "group", Some("thread1"), vec![]);
+        assert!(!should_skip_event(&event, &filter));
+    }
+}
