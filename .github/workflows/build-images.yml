@@ -18,6 +18,10 @@ on:
         required: false
         type: string
 
+concurrency:
+  group: build-images-${{ github.event.inputs.tag || 'snapshot' }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -25,7 +29,7 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Job 1: Resolve matrix and tag
+  # Job 1: Resolve matrix and tag, validate inputs
   # ─────────────────────────────────────────────────────────────────────────────
   matrix:
     runs-on: ubuntu-latest
@@ -37,26 +41,55 @@ jobs:
         with:
           ref: ${{ inputs.branch }}
 
-      - name: Resolve matrix and tag
+      - name: Validate inputs and resolve matrix
         id: resolve
         run: |
+          set -euo pipefail
+
+          # Validate tag format (alphanumeric, dots, dashes only)
+          TAG_INPUT="${{ inputs.tag }}"
+          if [ -n "$TAG_INPUT" ]; then
+            if ! echo "$TAG_INPUT" | grep -qE '^[a-zA-Z0-9._-]+$'; then
+              echo "::error::Invalid tag format: $TAG_INPUT (allowed: alphanumeric, dots, dashes)"
+              exit 1
+            fi
+            # Disallow 'latest' as explicit tag input to prevent confusion
+            if [ "$TAG_INPUT" = "latest" ]; then
+              echo "::error::Cannot use 'latest' as tag input — latest is managed automatically for main branch builds"
+              exit 1
+            fi
+          fi
+
+          # Resolve variants
+          ALLOWED="kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore"
           if [ "${{ inputs.variants }}" = "all" ] || [ -z "${{ inputs.variants }}" ]; then
-            VARIANTS="${{ env.ALL_VARIANTS }}"
+            VARIANTS="$ALLOWED"
           else
             VARIANTS="${{ inputs.variants }}"
+            # Validate each variant against allowlist
+            for v in $(echo "$VARIANTS" | tr ',' ' '); do
+              v=$(echo "$v" | xargs)  # trim whitespace
+              if ! echo ",$ALLOWED," | grep -q ",$v,"; then
+                echo "::error::Unknown variant: $v (allowed: $ALLOWED)"
+                exit 1
+              fi
+            done
           fi
+
+          # Convert to JSON array
           JSON=$(echo "$VARIANTS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | jq -R . | jq -sc .)
           echo "variants=${JSON}" >> "$GITHUB_OUTPUT"
 
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          # Resolve tag
+          if [ -n "$TAG_INPUT" ]; then
+            echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
           else
             SHA=$(git rev-parse --short HEAD)
             echo "tag=snapshot-${SHA}" >> "$GITHUB_OUTPUT"
           fi
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Job 2: Build shared builder layer (once per arch)
+  # Job 2: Build shared builder and push to registry (once per arch)
   # ─────────────────────────────────────────────────────────────────────────────
   build-core:
     needs: matrix
@@ -83,23 +116,17 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build builder stage and export
+      - name: Build builder stage and push to registry
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.unified
           target: builder
           platforms: ${{ matrix.platform.os }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.runner }}
           cache-from: type=gha,scope=builder-${{ matrix.platform.os }}
           cache-to: type=gha,scope=builder-${{ matrix.platform.os }},mode=max
-          outputs: type=docker,dest=/tmp/builder.tar
-
-      - name: Upload builder image
-        uses: actions/upload-artifact@v4
-        with:
-          name: builder-${{ matrix.platform.runner }}
-          path: /tmp/builder.tar
-          retention-days: 1
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 3: Build each agent variant (thin layers, parallel)
@@ -130,15 +157,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download builder image
-        uses: actions/download-artifact@v4
-        with:
-          name: builder-${{ matrix.platform.runner }}
-          path: /tmp
-
-      - name: Load builder image
-        run: docker load -i /tmp/builder.tar
-
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -147,11 +165,10 @@ jobs:
           file: Dockerfile.unified
           target: ${{ matrix.variant }}
           platforms: ${{ matrix.platform.os }}
+          build-args: |
+            BUILDER_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.runner }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: |
-            type=gha,scope=builder-${{ matrix.platform.os }}
-            type=gha,scope=${{ matrix.variant }}-${{ matrix.platform.os }}
-          cache-to: type=gha,scope=${{ matrix.variant }}-${{ matrix.platform.os }},mode=max
+          cache-from: type=gha,scope=builder-${{ matrix.platform.os }}
 
       - name: Export digest
         run: |
@@ -186,6 +203,22 @@ jobs:
           pattern: digests-${{ matrix.variant }}-*
           merge-multiple: true
 
+      - name: Validate digest count
+        run: |
+          COUNT=$(ls -1 /tmp/digests/ | wc -l)
+          if [ "$COUNT" -ne 2 ]; then
+            echo "::error::Expected 2 digests (amd64 + arm64), got $COUNT"
+            exit 1
+          fi
+          # Validate digest format (64 hex chars)
+          for f in /tmp/digests/*; do
+            name=$(basename "$f")
+            if ! echo "$name" | grep -qE '^[a-f0-9]{64}$'; then
+              echo "::error::Invalid digest format: $name"
+              exit 1
+            fi
+          done
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v4
@@ -205,12 +238,17 @@ jobs:
             -t "${IMAGE}:${TAG}-${VARIANT}" \
             $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
 
-          # For kiro (default): also tag as <version> and latest
+          # For kiro (default): also tag as <version> and latest (only from main)
           if [ "${VARIANT}" = "kiro" ]; then
             docker buildx imagetools create \
               -t "${IMAGE}:${TAG}" \
-              -t "${IMAGE}:latest" \
               $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+
+            if [ "${{ inputs.branch }}" = "main" ]; then
+              docker buildx imagetools create \
+                -t "${IMAGE}:latest" \
+                $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+            fi
           fi
 
       - name: Summary
@@ -221,5 +259,7 @@ jobs:
           echo "### 📦 \`${IMAGE}:${TAG}-${VARIANT}\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "${VARIANT}" = "kiro" ]; then
             echo "### 📦 \`${IMAGE}:${TAG}\` (default)" >> "$GITHUB_STEP_SUMMARY"
-            echo "### 📦 \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+            if [ "${{ inputs.branch }}" = "main" ]; then
+              echo "### 📦 \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi

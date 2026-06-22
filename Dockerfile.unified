@@ -7,13 +7,12 @@
 # =============================================================================
 # Stage: builder — compile openab binary (unified mode)
 # =============================================================================
-FROM rust:1-bookworm AS builder
+ARG BUILDER_IMAGE=rust:1-bookworm
+FROM ${BUILDER_IMAGE} AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
 COPY crates/openab-gateway/Cargo.toml crates/openab-gateway/Cargo.toml
-COPY openab-agent/ openab-agent/
-COPY agy-acp/ agy-acp/
 RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
     && echo 'fn main() {}' > src/main.rs \
     && echo '' > crates/openab-core/src/lib.rs \
@@ -24,9 +23,11 @@ COPY crates/ crates/
 COPY src/ src/
 RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/lib.rs \
     && cargo build --release --features unified
-# Also build openab-agent (used by native variant)
+# Build openab-agent (used by native variant) — copied late to avoid cache busts
+COPY openab-agent/ openab-agent/
 RUN cd openab-agent && cargo build --release
-# Also build agy-acp adapter (used by antigravity variant)
+# Build agy-acp adapter (used by antigravity variant) — copied late to avoid cache busts
+COPY agy-acp/ agy-acp/
 RUN cd agy-acp && cargo build --release
 
 # =============================================================================
@@ -304,7 +305,7 @@ ENV HOME=/home/agent
 WORKDIR /home/agent
 COPY --from=builder --chown=agent:agent /build/target/release/openab /usr/local/bin/openab
 COPY --from=builder --chown=agent:agent /build/agy-acp/target/release/agy-acp /usr/local/bin/agy-acp
-RUN mkdir -p /home/agent/.gemini && chown -R agent:agent /home/agent
+RUN mkdir -p /home/agent/.agy && chown -R agent:agent /home/agent
 USER agent
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD pgrep -x openab || exit 1
