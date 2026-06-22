@@ -36,21 +36,24 @@ const EDIT_RESPONSE_PLATFORMS: &[&str] = &["feishu"];
 
 /// Whether `platform` acknowledges `edit_message` with a `GatewayResponse`.
 /// See `EDIT_RESPONSE_PLATFORMS`.
+fn platform_acks_writes(platform: &str) -> bool {
+    EDIT_RESPONSE_PLATFORMS.contains(&platform)
+}
 
 /// Shared filter parameters for gateway event gating.
 /// Used by both `run_gateway_adapter` (WebSocket) and `process_gateway_event` (unified).
-pub(crate) struct EventFilterParams<'a> {
-    pub allow_all_channels: bool,
-    pub allowed_channels: &'a HashSet<String>,
-    pub allow_all_users: bool,
-    pub allowed_users: &'a HashSet<String>,
-    pub allow_bot_messages: bool,
-    pub trusted_bot_ids: &'a HashSet<String>,
-    pub bot_username: Option<&'a str>,
+struct EventFilterParams<'a> {
+    allow_all_channels: bool,
+    allowed_channels: &'a HashSet<String>,
+    allow_all_users: bool,
+    allowed_users: &'a HashSet<String>,
+    allow_bot_messages: bool,
+    trusted_bot_ids: &'a HashSet<String>,
+    bot_username: Option<&'a str>,
 }
 
 /// Returns `true` if the event should be skipped (filtered out).
-pub(crate) fn should_skip_event(event: &GatewayEvent, filter: &EventFilterParams) -> bool {
+fn should_skip_event(event: &GatewayEvent, filter: &EventFilterParams) -> bool {
     // Bot filter
     if event.sender.is_bot && !filter.allow_bot_messages && !filter.trusted_bot_ids.contains(&event.sender.id) {
         return true;
@@ -76,10 +79,6 @@ pub(crate) fn should_skip_event(event: &GatewayEvent, filter: &EventFilterParams
         }
     }
     false
-}
-
-fn platform_acks_writes(platform: &str) -> bool {
-    EDIT_RESPONSE_PLATFORMS.contains(&platform)
 }
 
 // --- Gateway event/reply schemas (mirrors gateway service) ---
