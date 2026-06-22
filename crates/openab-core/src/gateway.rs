@@ -798,6 +798,17 @@ pub async fn run_gateway_adapter(
         let slash_ws_tx = ws_tx.clone(); // for fire-and-forget slash command responses
         let mut tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+        // Hoist filter params outside loop — all fields are loop-invariant
+        let filter = EventFilterParams {
+            allow_all_channels,
+            allowed_channels: &allowed_channels,
+            allow_all_users,
+            allowed_users: &allowed_users,
+            allow_bot_messages,
+            trusted_bot_ids: &trusted_bot_ids,
+            bot_username: bot_username.as_deref(),
+        };
+
         loop {
             tokio::select! {
                     msg = ws_rx.next() => {
@@ -817,16 +828,6 @@ pub async fn run_gateway_adapter(
 
                             match serde_json::from_str::<GatewayEvent>(text_str) {
                                 Ok(event) => {
-                                    // Shared filter logic
-                                    let filter = EventFilterParams {
-                                        allow_all_channels,
-                                        allowed_channels: &allowed_channels,
-                                        allow_all_users,
-                                        allowed_users: &allowed_users,
-                                        allow_bot_messages,
-                                        trusted_bot_ids: &trusted_bot_ids,
-                                        bot_username: bot_username.as_deref(),
-                                    };
                                     if should_skip_event(&event, &filter) {
                                         continue;
                                     }
