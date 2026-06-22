@@ -36,6 +36,48 @@ const EDIT_RESPONSE_PLATFORMS: &[&str] = &["feishu"];
 
 /// Whether `platform` acknowledges `edit_message` with a `GatewayResponse`.
 /// See `EDIT_RESPONSE_PLATFORMS`.
+
+/// Shared filter parameters for gateway event gating.
+/// Used by both `run_gateway_adapter` (WebSocket) and `process_gateway_event` (unified).
+pub(crate) struct EventFilterParams<'a> {
+    pub allow_all_channels: bool,
+    pub allowed_channels: &'a HashSet<String>,
+    pub allow_all_users: bool,
+    pub allowed_users: &'a HashSet<String>,
+    pub allow_bot_messages: bool,
+    pub trusted_bot_ids: &'a HashSet<String>,
+    pub bot_username: Option<&'a str>,
+}
+
+/// Returns `true` if the event should be skipped (filtered out).
+pub(crate) fn should_skip_event(event: &GatewayEvent, filter: &EventFilterParams) -> bool {
+    // Bot filter
+    if event.sender.is_bot && !filter.allow_bot_messages && !filter.trusted_bot_ids.contains(&event.sender.id) {
+        return true;
+    }
+    // Channel allowlist
+    if !filter.allow_all_channels && !filter.allowed_channels.contains(&event.channel.id) {
+        tracing::info!(channel = %event.channel.id, "gateway: channel not in allowed_channels, skipping");
+        return true;
+    }
+    // User allowlist
+    if !filter.allow_all_users && !filter.allowed_users.contains(&event.sender.id) {
+        tracing::info!(sender = %event.sender.id, "gateway: user not in allowed_users, skipping");
+        return true;
+    }
+    // @mention gating: in groups, only respond if bot is mentioned
+    let is_group = event.channel.channel_type == "group" || event.channel.channel_type == "supergroup";
+    let in_thread = event.channel.thread_id.is_some();
+    if is_group && !in_thread {
+        if let Some(bot_name) = filter.bot_username {
+            if !event.mentions.iter().any(|m| m == bot_name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn platform_acks_writes(platform: &str) -> bool {
     EDIT_RESPONSE_PLATFORMS.contains(&platform)
 }
@@ -772,39 +814,19 @@ pub async fn run_gateway_adapter(
 
                             match serde_json::from_str::<GatewayEvent>(text_str) {
                                 Ok(event) => {
-                                    // TODO: gateway adapters (feishu) do their own bot filtering
-                                    // via AllowBots + trusted_bot_ids, but Telegram does not.
-                                    // When Feishu lifts the bot-to-bot delivery restriction,
-                                    // this guard needs to become adapter-aware (e.g. a field on
-                                    // GatewayEvent indicating the adapter already filtered bots).
-                                    if event.sender.is_bot {
+                                    // Shared filter logic
+                                    let empty_set = HashSet::new();
+                                    let filter = EventFilterParams {
+                                        allow_all_channels,
+                                        allowed_channels: &allowed_channels,
+                                        allow_all_users,
+                                        allowed_users: &allowed_users,
+                                        allow_bot_messages: false,
+                                        trusted_bot_ids: &empty_set,
+                                        bot_username: bot_username.as_deref(),
+                                    };
+                                    if should_skip_event(&event, &filter) {
                                         continue;
-                                    }
-
-                                    // Channel allowlist gate
-                                    if !allow_all_channels && !allowed_channels.contains(&event.channel.id) {
-                                        info!(channel = %event.channel.id, "gateway: channel not in allowed_channels, skipping");
-                                        continue;
-                                    }
-
-                                    // User allowlist gate
-                                    if !allow_all_users && !allowed_users.contains(&event.sender.id) {
-                                        info!(sender = %event.sender.id, "gateway: user not in allowed_users, skipping");
-                                        continue;
-                                    }
-
-                                    // @mention gating: in groups, only respond if bot is mentioned
-                                    // DMs (private) and thread replies always pass through
-                                    let is_group = event.channel.channel_type == "group"
-                                        || event.channel.channel_type == "supergroup";
-                                    let in_thread = event.channel.thread_id.is_some();
-                                    if is_group && !in_thread {
-                                        if let Some(ref bot_name) = bot_username {
-                                            let mentioned = event.mentions.iter().any(|m| m == bot_name);
-                                            if !mentioned {
-                                                continue; // skip non-mentioned group messages
-                                            }
-                                        }
                                     }
 
                                     info!(
@@ -1122,34 +1144,18 @@ pub async fn process_gateway_event(
     let event: GatewayEvent = serde_json::from_str(event_json)
         .map_err(|e| anyhow::anyhow!("invalid gateway event JSON: {e}"))?;
 
-    // Bot filter
-    if event.sender.is_bot && !ctx.allow_bot_messages && !ctx.trusted_bot_ids.contains(&event.sender.id) {
+    // Shared filter logic
+    let filter = EventFilterParams {
+        allow_all_channels: ctx.allow_all_channels,
+        allowed_channels: &ctx.allowed_channels,
+        allow_all_users: ctx.allow_all_users,
+        allowed_users: &ctx.allowed_users,
+        allow_bot_messages: ctx.allow_bot_messages,
+        trusted_bot_ids: &ctx.trusted_bot_ids,
+        bot_username: ctx.bot_username.as_deref(),
+    };
+    if should_skip_event(&event, &filter) {
         return Ok(false);
-    }
-
-    // Channel allowlist gate
-    if !ctx.allow_all_channels && !ctx.allowed_channels.contains(&event.channel.id) {
-        tracing::info!(channel = %event.channel.id, "gateway: channel not in allowed_channels, skipping");
-        return Ok(false);
-    }
-
-    // User allowlist gate
-    if !ctx.allow_all_users && !ctx.allowed_users.contains(&event.sender.id) {
-        tracing::info!(sender = %event.sender.id, "gateway: user not in allowed_users, skipping");
-        return Ok(false);
-    }
-
-    // @mention gating: in groups, only respond if bot is mentioned
-    let is_group = event.channel.channel_type == "group"
-        || event.channel.channel_type == "supergroup";
-    let in_thread = event.channel.thread_id.is_some();
-    if is_group && !in_thread {
-        if let Some(ref bot_name) = ctx.bot_username {
-            let mentioned = event.mentions.iter().any(|m| m == bot_name);
-            if !mentioned {
-                return Ok(false);
-            }
-        }
     }
 
     tracing::info!(
