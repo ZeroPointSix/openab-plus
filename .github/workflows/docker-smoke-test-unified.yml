@@ -11,7 +11,26 @@ on:
       - 'agy-acp/**'
 
 jobs:
+  # Build the shared builder stage once, then test agent targets using cache
+  build-builder:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build builder stage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.unified
+          target: builder
+          load: true
+          tags: openab-builder:local
+          cache-to: type=gha,scope=unified-smoke-builder,mode=max
+
   smoke-test-unified:
+    needs: build-builder
     strategy:
       fail-fast: false
       matrix:
@@ -34,11 +53,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: Build unified target
-        run: docker build --target ${{ matrix.target.name }} -t openab-unified-${{ matrix.target.name }} -f Dockerfile.unified .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.unified
+          target: ${{ matrix.target.name }}
+          load: true
+          tags: openab-unified-${{ matrix.target.name }}:test
+          cache-from: type=gha,scope=unified-smoke-builder
 
       - name: Verify openab binary exists
-        run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }} openab
+        run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }}:test openab
 
       - name: Verify agent CLI exists
-        run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }} ${{ matrix.target.agent }}
+        run: docker run --rm --entrypoint which openab-unified-${{ matrix.target.name }}:test ${{ matrix.target.agent }}
