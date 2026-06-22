@@ -718,6 +718,8 @@ pub struct GatewayParams {
     pub allowed_channels: Vec<String>,
     pub allow_all_users: bool,
     pub allowed_users: Vec<String>,
+    pub allow_bot_messages: bool,
+    pub trusted_bot_ids: Vec<String>,
     pub streaming: bool,
     pub streaming_placeholder: bool,
     pub stt: crate::config::SttConfig,
@@ -738,6 +740,8 @@ pub async fn run_gateway_adapter(
     let allowed_channels: HashSet<String> = params.allowed_channels.into_iter().collect();
     let allow_all_users = params.allow_all_users;
     let allowed_users: HashSet<String> = params.allowed_users.into_iter().collect();
+    let allow_bot_messages = params.allow_bot_messages;
+    let trusted_bot_ids: HashSet<String> = params.trusted_bot_ids.into_iter().collect();
     let streaming = params.streaming;
     let streaming_placeholder = params.streaming_placeholder;
     let stt_config = params.stt;
@@ -814,14 +818,13 @@ pub async fn run_gateway_adapter(
                             match serde_json::from_str::<GatewayEvent>(text_str) {
                                 Ok(event) => {
                                     // Shared filter logic
-                                    let empty_set = HashSet::new();
                                     let filter = EventFilterParams {
                                         allow_all_channels,
                                         allowed_channels: &allowed_channels,
                                         allow_all_users,
                                         allowed_users: &allowed_users,
-                                        allow_bot_messages: false,
-                                        trusted_bot_ids: &empty_set,
+                                        allow_bot_messages,
+                                        trusted_bot_ids: &trusted_bot_ids,
                                         bot_username: bot_username.as_deref(),
                                     };
                                     if should_skip_event(&event, &filter) {
@@ -1036,7 +1039,9 @@ pub async fn run_gateway_adapter(
                                                 Ok(tc) => tc,
                                                 Err(e) => {
                                                     warn!("create_thread failed, using channel: {e}");
-                                                    let _ = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await;
+                                                    if let Err(e) = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await {
+                                                        warn!("fallback send_message failed: {e}");
+                                                    }
                                                     channel.clone()
                                                 }
                                             }
@@ -1326,7 +1331,9 @@ pub async fn process_gateway_event(
                 Ok(tc) => tc,
                 Err(e) => {
                     tracing::warn!("create_thread failed, using channel: {e}");
-                    let _ = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await;
+                    if let Err(e) = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await {
+                        tracing::warn!("fallback send_message failed: {e}");
+                    }
                     channel.clone()
                 }
             }

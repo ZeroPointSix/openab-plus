@@ -442,6 +442,8 @@ async fn main() -> anyhow::Result<()> {
                 &gw_cfg.allowed_users,
             ),
             allowed_users: gw_cfg.allowed_users,
+            allow_bot_messages: gw_cfg.allow_bot_messages,
+            trusted_bot_ids: gw_cfg.trusted_bot_ids,
             streaming: gw_cfg.streaming,
             streaming_placeholder: gw_cfg.streaming_placeholder,
             stt: cfg.stt.clone(),

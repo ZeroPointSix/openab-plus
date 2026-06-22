@@ -453,6 +453,12 @@ pub struct GatewayConfig {
     pub allowed_channels: Vec<String>,
     #[serde(default)]
     pub allowed_users: Vec<String>,
+    /// Allow messages from bots. Default: false.
+    #[serde(default)]
+    pub allow_bot_messages: bool,
+    /// Bot IDs that bypass the bot filter even when allow_bot_messages is false.
+    #[serde(default)]
+    pub trusted_bot_ids: Vec<String>,
     /// Enable streaming (typewriter) mode — requires gateway platform to support message editing.
     #[serde(default)]
     pub streaming: bool,
