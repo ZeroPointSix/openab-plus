@@ -1,0 +1,225 @@
+name: Build Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build (default: main)'
+        required: false
+        type: string
+        default: 'main'
+      variants:
+        description: 'Variants to build (comma-separated, or "all")'
+        required: false
+        type: string
+        default: 'all'
+      tag:
+        description: 'Image tag version prefix (default: snapshot-<short-sha>)'
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  ALL_VARIANTS: 'kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 1: Resolve matrix and tag
+  # ─────────────────────────────────────────────────────────────────────────────
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.resolve.outputs.variants }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Resolve matrix and tag
+        id: resolve
+        run: |
+          if [ "${{ inputs.variants }}" = "all" ] || [ -z "${{ inputs.variants }}" ]; then
+            VARIANTS="${{ env.ALL_VARIANTS }}"
+          else
+            VARIANTS="${{ inputs.variants }}"
+          fi
+          JSON=$(echo "$VARIANTS" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | jq -R . | jq -sc .)
+          echo "variants=${JSON}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            SHA=$(git rev-parse --short HEAD)
+            echo "tag=snapshot-${SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 2: Build shared builder layer (once per arch)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-core:
+    needs: matrix
+    strategy:
+      fail-fast: true
+      matrix:
+        platform:
+          - { os: linux/amd64, runner: ubuntu-latest }
+          - { os: linux/arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build builder stage and export
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.unified
+          target: builder
+          platforms: ${{ matrix.platform.os }}
+          cache-from: type=gha,scope=builder-${{ matrix.platform.os }}
+          cache-to: type=gha,scope=builder-${{ matrix.platform.os }},mode=max
+          outputs: type=docker,dest=/tmp/builder.tar
+
+      - name: Upload builder image
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-${{ matrix.platform.runner }}
+          path: /tmp/builder.tar
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 3: Build each agent variant (thin layers, parallel)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-agents:
+    needs: [matrix, build-core]
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.matrix.outputs.variants) }}
+        platform:
+          - { os: linux/amd64, runner: ubuntu-latest }
+          - { os: linux/arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.platform.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.branch }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download builder image
+        uses: actions/download-artifact@v4
+        with:
+          name: builder-${{ matrix.platform.runner }}
+          path: /tmp
+
+      - name: Load builder image
+        run: docker load -i /tmp/builder.tar
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.unified
+          target: ${{ matrix.variant }}
+          platforms: ${{ matrix.platform.os }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: |
+            type=gha,scope=builder-${{ matrix.platform.os }}
+            type=gha,scope=${{ matrix.variant }}-${{ matrix.platform.os }}
+          cache-to: type=gha,scope=${{ matrix.variant }}-${{ matrix.platform.os }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.platform.runner }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Job 4: Create multi-arch manifest for each variant
+  # ─────────────────────────────────────────────────────────────────────────────
+  merge-manifests:
+    needs: [matrix, build-agents]
+    strategy:
+      matrix:
+        variant: ${{ fromJson(needs.matrix.outputs.variants) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest list
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          TAG="${{ needs.matrix.outputs.tag }}"
+          VARIANT="${{ matrix.variant }}"
+
+          # Tag: <version>-<agent>
+          docker buildx imagetools create \
+            -t "${IMAGE}:${TAG}-${VARIANT}" \
+            $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+
+          # For kiro (default): also tag as <version> and latest
+          if [ "${VARIANT}" = "kiro" ]; then
+            docker buildx imagetools create \
+              -t "${IMAGE}:${TAG}" \
+              -t "${IMAGE}:latest" \
+              $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
+          fi
+
+      - name: Summary
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          TAG="${{ needs.matrix.outputs.tag }}"
+          VARIANT="${{ matrix.variant }}"
+          echo "### 📦 \`${IMAGE}:${TAG}-${VARIANT}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${VARIANT}" = "kiro" ]; then
+            echo "### 📦 \`${IMAGE}:${TAG}\` (default)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 📦 \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
