@@ -56,6 +56,7 @@ struct EventFilterParams<'a> {
 fn should_skip_event(event: &GatewayEvent, filter: &EventFilterParams) -> bool {
     // Bot filter
     if event.sender.is_bot && !filter.allow_bot_messages && !filter.trusted_bot_ids.contains(&event.sender.id) {
+        tracing::info!(sender = %event.sender.id, "gateway: bot not in trusted_bot_ids, skipping");
         return true;
     }
     // Channel allowlist
