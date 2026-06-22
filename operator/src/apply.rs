@@ -233,10 +233,8 @@ async fn apply_ecs(
     let task_role = format!("arn:aws:iam::{account_id}:role/oab-task-role");
 
     let iam = aws_sdk_iam::Client::new(config);
-    iam.get_role().role_name("oab-task-execution").send().await
-        .context("IAM role 'oab-task-execution' not found — run `oabctl bootstrap` first")?;
-    iam.get_role().role_name("oab-task-role").send().await
-        .context("IAM role 'oab-task-role' not found — run `oabctl bootstrap` first")?;
+    check_iam_role(&iam, "oab-task-execution").await?;
+    check_iam_role(&iam, "oab-task-role").await?;
 
     let task_def = ecs
         .register_task_definition()
@@ -336,4 +334,27 @@ async fn apply_ecs(
     }
 
     Ok(())
+}
+
+/// Check IAM role existence. If AccessDenied, warn and proceed (caller may only have iam:PassRole).
+/// Only fail hard on NoSuchEntity.
+async fn check_iam_role(iam: &aws_sdk_iam::Client, role_name: &str) -> Result<()> {
+    use aws_sdk_iam::error::ProvideErrorMetadata;
+    match iam.get_role().role_name(role_name).send().await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let code = e.as_service_error()
+                .and_then(|se| se.code())
+                .unwrap_or_default();
+            if code == "AccessDenied" || code == "AccessDeniedException" {
+                eprintln!("  ⚠ Cannot verify role '{}' (AccessDenied) — proceeding anyway", role_name);
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "IAM role '{}' not found — run `oabctl bootstrap` first ({})",
+                    role_name, code
+                ))
+            }
+        }
+    }
 }

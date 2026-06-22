@@ -68,6 +68,12 @@ enum Commands {
     Exec {
         /// Agent name
         agent: String,
+        /// ECS cluster name
+        #[arg(long, default_value = "oab")]
+        cluster: String,
+        /// Namespace (used in service name: oab-{namespace}-{agent})
+        #[arg(long, default_value = "prod")]
+        namespace: String,
         /// Command to run (default: /bin/sh). Use -- to separate args.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -78,6 +84,12 @@ enum Commands {
         src: String,
         /// Destination path (local or agent:/path)
         dst: String,
+        /// ECS cluster name
+        #[arg(long, default_value = "oab")]
+        cluster: String,
+        /// Namespace (used in service name: oab-{namespace}-{agent})
+        #[arg(long, default_value = "prod")]
+        namespace: String,
     },
     /// Sync directories between local machine and agent containers (via ecsctl)
     Sync {
@@ -85,6 +97,12 @@ enum Commands {
         src: String,
         /// Destination: agent:/path or local dir
         dst: String,
+        /// ECS cluster name
+        #[arg(long, default_value = "oab")]
+        cluster: String,
+        /// Namespace (used in service name: oab-{namespace}-{agent})
+        #[arg(long, default_value = "prod")]
+        namespace: String,
     },
     /// Bootstrap OAB infrastructure (cluster, IAM roles, S3, security group)
     Bootstrap {
@@ -130,8 +148,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Delete { resource, name, cluster, namespace } => {
             delete::run(&config, &resource, &name, &cluster, &namespace).await
         }
-        Commands::Exec { agent, command } => {
-            let resolved = resolve_agent(&config, &agent).await?;
+        Commands::Exec { agent, cluster, namespace, command } => {
+            let resolved = resolve_agent(&config, &agent, &cluster, &namespace).await?;
             let cmd = if command.is_empty() {
                 None
             } else {
@@ -142,17 +160,17 @@ async fn main() -> anyhow::Result<()> {
             };
             ecsctl::exec::run(&config, &resolved, cmd.as_deref()).await
         }
-        Commands::Cp { src, dst } => {
-            let src = ecsctl::alias::resolve_remote(&config, &src).await?;
-            let dst = ecsctl::alias::resolve_remote(&config, &dst).await?;
+        Commands::Cp { src, dst, cluster, namespace } => {
+            let src = resolve_remote_path(&config, &src, &cluster, &namespace).await?;
+            let dst = resolve_remote_path(&config, &dst, &cluster, &namespace).await?;
             eprintln!("⇄ Copying {} → {} ...", src, dst);
             ecsctl::cp::run(&config, &src, &dst, None, 60).await?;
             eprintln!("✓ Done");
             Ok(())
         }
-        Commands::Sync { src, dst } => {
-            let src = ecsctl::alias::resolve_remote(&config, &src).await?;
-            let dst = ecsctl::alias::resolve_remote(&config, &dst).await?;
+        Commands::Sync { src, dst, cluster, namespace } => {
+            let src = resolve_remote_path(&config, &src, &cluster, &namespace).await?;
+            let dst = resolve_remote_path(&config, &dst, &cluster, &namespace).await?;
             let src_remote = ecsctl::cp::is_remote(&src);
             let dst_remote = ecsctl::cp::is_remote(&dst);
             eprintln!("⇄ Syncing {} → {} ...", src, dst);
@@ -191,18 +209,18 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Resolve agent name to cluster/task_id/container for ECS Exec.
-/// Looks up service "oab-prod-<name>" in cluster "oab".
-async fn resolve_agent(config: &aws_config::SdkConfig, name: &str) -> anyhow::Result<String> {
+/// Looks up service "{cluster}-{namespace}-{name}" in the given cluster.
+async fn resolve_agent(config: &aws_config::SdkConfig, name: &str, cluster: &str, namespace: &str) -> anyhow::Result<String> {
     // If already in cluster/task/container format, pass through
     if name.contains('/') {
         return Ok(name.to_string());
     }
 
     let ecs = aws_sdk_ecs::Client::new(config);
-    let service_name = format!("oab-prod-{name}");
+    let service_name = format!("{cluster}-{namespace}-{name}");
 
     let tasks = ecs.list_tasks()
-        .cluster("oab")
+        .cluster(cluster)
         .service_name(&service_name)
         .desired_status(aws_sdk_ecs::types::DesiredStatus::Running)
         .send().await
@@ -212,5 +230,17 @@ async fn resolve_agent(config: &aws_config::SdkConfig, name: &str) -> anyhow::Re
         .context(format!("no running tasks for agent '{name}'"))?;
 
     let task_id = task_arn.rsplit('/').next().unwrap_or(task_arn);
-    Ok(format!("oab/{task_id}/openab"))
+    Ok(format!("{cluster}/{task_id}/openab"))
+}
+
+/// Resolve remote path "agent:/path" using dynamic ECS task lookup.
+/// Local paths are returned unchanged.
+async fn resolve_remote_path(config: &aws_config::SdkConfig, path: &str, cluster: &str, namespace: &str) -> anyhow::Result<String> {
+    if !path.contains(':') {
+        return Ok(path.to_string());
+    }
+    let (agent, remote_path) = path.split_once(':')
+        .context("invalid remote path format")?;
+    let resolved = resolve_agent(config, agent, cluster, namespace).await?;
+    Ok(format!("{resolved}:{remote_path}"))
 }
