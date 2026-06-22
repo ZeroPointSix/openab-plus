@@ -42,17 +42,19 @@ jobs:
 
       - name: Validate inputs and resolve matrix
         id: resolve
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+          VARIANTS_INPUT: ${{ inputs.variants }}
+          BRANCH_INPUT: ${{ inputs.branch }}
         run: |
           set -euo pipefail
 
           # Validate tag format (alphanumeric, dots, dashes only)
-          TAG_INPUT="${{ inputs.tag }}"
           if [ -n "$TAG_INPUT" ]; then
             if ! echo "$TAG_INPUT" | grep -qE '^[a-zA-Z0-9._-]+$'; then
               echo "::error::Invalid tag format: $TAG_INPUT (allowed: alphanumeric, dots, dashes)"
               exit 1
             fi
-            # Disallow 'latest' as explicit tag input to prevent confusion
             if [ "$TAG_INPUT" = "latest" ]; then
               echo "::error::Cannot use 'latest' as tag input — latest is managed automatically for main branch builds"
               exit 1
@@ -61,13 +63,12 @@ jobs:
 
           # Resolve variants
           ALLOWED="kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore"
-          if [ "${{ inputs.variants }}" = "all" ] || [ -z "${{ inputs.variants }}" ]; then
+          if [ "$VARIANTS_INPUT" = "all" ] || [ -z "$VARIANTS_INPUT" ]; then
             VARIANTS="$ALLOWED"
           else
-            VARIANTS="${{ inputs.variants }}"
-            # Validate each variant against allowlist
+            VARIANTS="$VARIANTS_INPUT"
             for v in $(echo "$VARIANTS" | tr ',' ' '); do
-              v=$(echo "$v" | xargs)  # trim whitespace
+              v=$(echo "$v" | xargs)
               if ! echo ",$ALLOWED," | grep -q ",$v,"; then
                 echo "::error::Unknown variant: $v (allowed: $ALLOWED)"
                 exit 1
@@ -96,8 +97,8 @@ jobs:
       fail-fast: true
       matrix:
         platform:
-          - { os: linux/amd64, runner: ubuntu-latest }
-          - { os: linux/arm64, runner: ubuntu-24.04-arm }
+          - { os: linux/amd64, runner: ubuntu-latest, arch: amd64 }
+          - { os: linux/arm64, runner: ubuntu-24.04-arm, arch: arm64 }
     runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
@@ -123,9 +124,9 @@ jobs:
           target: builder
           platforms: ${{ matrix.platform.os }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.runner }}
-          cache-from: type=gha,scope=builder-${{ matrix.platform.os }}
-          cache-to: type=gha,scope=builder-${{ matrix.platform.os }},mode=max
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.arch }}
+          cache-from: type=gha,scope=builder-${{ matrix.platform.arch }}
+          cache-to: type=gha,scope=builder-${{ matrix.platform.arch }},mode=max
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Job 3: Build each agent variant (thin layers, parallel)
@@ -137,8 +138,8 @@ jobs:
       matrix:
         variant: ${{ fromJson(needs.matrix.outputs.variants) }}
         platform:
-          - { os: linux/amd64, runner: ubuntu-latest }
-          - { os: linux/arm64, runner: ubuntu-24.04-arm }
+          - { os: linux/amd64, runner: ubuntu-latest, arch: amd64 }
+          - { os: linux/arm64, runner: ubuntu-24.04-arm, arch: arm64 }
     runs-on: ${{ matrix.platform.runner }}
     permissions:
       contents: read
@@ -165,9 +166,11 @@ jobs:
           target: ${{ matrix.variant }}
           platforms: ${{ matrix.platform.os }}
           build-args: |
-            BUILDER_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.runner }}
+            BUILDER_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.arch }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=builder-${{ matrix.platform.os }}
+          cache-from: |
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.matrix.outputs.tag }}-${{ matrix.platform.arch }}
+            type=gha,scope=builder-${{ matrix.platform.arch }}
 
       - name: Export digest
         run: |
@@ -178,7 +181,7 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.variant }}-${{ matrix.platform.runner }}
+          name: digests-${{ matrix.variant }}-${{ matrix.platform.arch }}
           path: /tmp/digests/*
           retention-days: 1
 
@@ -209,7 +212,6 @@ jobs:
             echo "::error::Expected 2 digests (amd64 + arm64), got $COUNT"
             exit 1
           fi
-          # Validate digest format (64 hex chars)
           for f in /tmp/digests/*; do
             name=$(basename "$f")
             if ! echo "$name" | grep -qE '^[a-f0-9]{64}$'; then
@@ -227,6 +229,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list
+        env:
+          BRANCH_INPUT: ${{ inputs.branch }}
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           TAG="${{ needs.matrix.outputs.tag }}"
@@ -243,7 +247,7 @@ jobs:
               -t "${IMAGE}:${TAG}" \
               $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
 
-            if [ "${{ inputs.branch }}" = "main" ]; then
+            if [ "$BRANCH_INPUT" = "main" ]; then
               docker buildx imagetools create \
                 -t "${IMAGE}:latest" \
                 $(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
@@ -251,6 +255,8 @@ jobs:
           fi
 
       - name: Summary
+        env:
+          BRANCH_INPUT: ${{ inputs.branch }}
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           TAG="${{ needs.matrix.outputs.tag }}"
@@ -258,7 +264,7 @@ jobs:
           echo "### 📦 \`${IMAGE}:${TAG}-${VARIANT}\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "${VARIANT}" = "kiro" ]; then
             echo "### 📦 \`${IMAGE}:${TAG}\` (default)" >> "$GITHUB_STEP_SUMMARY"
-            if [ "${{ inputs.branch }}" = "main" ]; then
+            if [ "$BRANCH_INPUT" = "main" ]; then
               echo "### 📦 \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
