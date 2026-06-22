@@ -519,7 +519,32 @@ async fn main() -> anyhow::Result<()> {
                 feishu: openab_gateway::adapters::feishu::FeishuConfig::from_env()
                     .map(openab_gateway::adapters::feishu::FeishuAdapter::new),
                 #[cfg(feature = "googlechat")]
-                google_chat: None, // TODO: wire up googlechat adapter config
+                google_chat: {
+                    if has_googlechat {
+                        let token_cache = std::env::var("GOOGLE_CHAT_SA_KEY_JSON")
+                            .ok()
+                            .or_else(|| {
+                                std::env::var("GOOGLE_CHAT_SA_KEY_FILE")
+                                    .ok()
+                                    .and_then(|path| std::fs::read_to_string(&path).ok())
+                            })
+                            .and_then(|json| {
+                                openab_gateway::adapters::googlechat::GoogleChatTokenCache::new(&json)
+                                    .map_err(|e| tracing::warn!("googlechat SA key error: {e}"))
+                                    .ok()
+                            });
+                        let access_token = std::env::var("GOOGLE_CHAT_ACCESS_TOKEN").ok();
+                        let jwt_verifier = std::env::var("GOOGLE_CHAT_AUDIENCE").ok().map(|aud| {
+                            info!("unified: googlechat JWT verification enabled (audience={aud})");
+                            openab_gateway::adapters::googlechat::GoogleChatJwtVerifier::new(aud)
+                        });
+                        Some(openab_gateway::adapters::googlechat::GoogleChatAdapter::new(
+                            token_cache, access_token, jwt_verifier,
+                        ))
+                    } else {
+                        None
+                    }
+                },
                 #[cfg(feature = "wecom")]
                 wecom: openab_gateway::adapters::wecom::WecomConfig::from_env()
                     .map(openab_gateway::adapters::wecom::WecomAdapter::new),
@@ -575,6 +600,14 @@ async fn main() -> anyhow::Result<()> {
                     .unwrap_or_else(|_| "/webhook/teams".into());
                 info!(path = %path, "unified: teams adapter enabled");
                 app = app.route(&path, axum::routing::post(openab_gateway::adapters::teams::webhook));
+            }
+
+            #[cfg(feature = "googlechat")]
+            if gw_state.google_chat.is_some() {
+                let path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
+                    .unwrap_or_else(|_| "/webhook/googlechat".into());
+                info!(path = %path, "unified: googlechat adapter enabled");
+                app = app.route(&path, axum::routing::post(openab_gateway::adapters::googlechat::webhook));
             }
 
             let app = app.with_state(gw_state.clone());
