@@ -1040,10 +1040,7 @@ pub async fn run_gateway_adapter(
                                             match adapter.create_thread(&channel, &trigger_msg, &title).await {
                                                 Ok(tc) => tc,
                                                 Err(e) => {
-                                                    warn!("create_thread failed, using channel: {e}");
-                                                    if let Err(e) = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await {
-                                                        warn!("fallback send_message failed: {e}");
-                                                    }
+                                                    warn!("create_thread failed, replying in channel: {e}");
                                                     channel.clone()
                                                 }
                                             }
@@ -1235,21 +1232,31 @@ pub async fn process_gateway_event(
 
         match att.attachment_type.as_str() {
             "image" => {
-                if let Ok(bytes) = bytes_result {
-                    use base64::Engine;
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    extra_blocks.push(ContentBlock::Image {
-                        media_type: att.mime_type.clone(),
-                        data: b64,
-                    });
+                match bytes_result {
+                    Ok(bytes) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                        extra_blocks.push(ContentBlock::Image {
+                            media_type: att.mime_type.clone(),
+                            data: b64,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(filename = %att.filename, error = %e, "gateway image read failed");
+                    }
                 }
             }
             "text_file" => {
-                if let Ok(bytes) = bytes_result {
-                    let text = String::from_utf8_lossy(&bytes);
-                    extra_blocks.push(ContentBlock::Text {
-                        text: format!("```{}\n{}\n```", att.filename, text),
-                    });
+                match bytes_result {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        extra_blocks.push(ContentBlock::Text {
+                            text: format!("```{}\n{}\n```", att.filename, text),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(filename = %att.filename, error = %e, "gateway text_file read failed");
+                    }
                 }
             }
             "audio" if ctx.stt_config.enabled => {
@@ -1332,10 +1339,7 @@ pub async fn process_gateway_event(
             match adapter.create_thread(&channel, &trigger_msg, &title).await {
                 Ok(tc) => tc,
                 Err(e) => {
-                    tracing::warn!("create_thread failed, using channel: {e}");
-                    if let Err(e) = adapter.send_message(&channel, "⚠️ Could not create a thread — replying here instead.").await {
-                        tracing::warn!("fallback send_message failed: {e}");
-                    }
+                    tracing::warn!("create_thread failed, replying in channel: {e}");
                     channel.clone()
                 }
             }

@@ -454,6 +454,10 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub allowed_users: Vec<String>,
     /// Allow messages from bots. Default: false.
+    /// NOTE: Intentionally `bool` (not `AllowBots` enum) — the gateway adapter
+    /// only needs on/off since @mention gating is handled separately by
+    /// `bot_username` + `should_skip_event`. Discord/Slack use `AllowBots` because
+    /// their adapters embed mention-mode logic internally.
     #[serde(default)]
     pub allow_bot_messages: bool,
     /// Bot IDs that bypass the bot filter even when allow_bot_messages is false.
