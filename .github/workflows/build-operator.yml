@@ -22,14 +22,22 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: build-operator-${{ github.ref_name }}
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  AGENTS: "kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore"
+  # All agent variants built from Dockerfile.unified targets.
+  # native-sandbox requires its target to be added to Dockerfile.unified (see #1175 follow-up).
+  AGENTS: "kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore,native-sandbox"
 
 jobs:
   resolve-tag:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
       chart_version: ${{ steps.resolve.outputs.chart_version }}
@@ -60,8 +68,9 @@ jobs:
             IS_PRERELEASE="false"
           fi
 
-          # Build agent matrix as JSON array
-          AGENTS_JSON=$(echo "${{ env.AGENTS }}" | tr ',' '\n' | jq -R . | jq -sc .)
+          # Build agent matrix as JSON array + validate against allowlist
+          ALLOWED="${{ env.AGENTS }}"
+          AGENTS_JSON=$(echo "$ALLOWED" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | jq -R . | jq -sc .)
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "chart_version=${CHART_VERSION}" >> "$GITHUB_OUTPUT"
@@ -101,8 +110,11 @@ jobs:
           file: Dockerfile.unified
           target: builder
           platforms: ${{ matrix.platform.os }}
-          push: ${{ inputs.dry_run != true }}
+          # Always push builder — it's an internal image needed by build-agents.
+          # dry_run only gates the final agent image push + manifest creation.
+          push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.resolve-tag.outputs.chart_version }}-${{ matrix.platform.arch }}
+          no-cache: ${{ inputs.no_cache == true }}
           cache-from: ${{ inputs.no_cache != true && format('type=gha,scope=unified-builder-{0}', matrix.platform.arch) || '' }}
           cache-to: ${{ inputs.no_cache != true && format('type=gha,scope=unified-builder-{0},mode=max', matrix.platform.arch) || '' }}
 
@@ -142,9 +154,12 @@ jobs:
           build-args: |
             BUILDER_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.resolve-tag.outputs.chart_version }}-${{ matrix.platform.arch }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ inputs.dry_run != true }}
+          no-cache: ${{ inputs.no_cache == true }}
           cache-from: |
             type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/builder:${{ needs.resolve-tag.outputs.chart_version }}-${{ matrix.platform.arch }}
             ${{ inputs.no_cache != true && format('type=gha,scope=unified-builder-{0}', matrix.platform.arch) || '' }}
+            ${{ inputs.no_cache != true && format('type=gha,scope=unified-agent-{0}-{1}', matrix.agent, matrix.platform.arch) || '' }}
+          cache-to: ${{ inputs.no_cache != true && format('type=gha,scope=unified-agent-{0}-{1},mode=max', matrix.agent, matrix.platform.arch) || '' }}
 
       - name: Export digest
         if: inputs.dry_run != true
@@ -179,13 +194,20 @@ jobs:
           pattern: digests-${{ matrix.agent }}-*
           merge-multiple: true
 
-      - name: Validate digest count
+      - name: Validate digests
         run: |
           COUNT=$(ls -1 /tmp/digests/ | wc -l)
           if [ "$COUNT" -ne 2 ]; then
             echo "::error::Expected 2 digests (amd64 + arm64), got $COUNT"
             exit 1
           fi
+          for f in /tmp/digests/*; do
+            name=$(basename "$f")
+            if ! echo "$name" | grep -qE '^[a-f0-9]{64}$'; then
+              echo "::error::Invalid digest format: $name"
+              exit 1
+            fi
+          done
 
       - uses: docker/setup-buildx-action@v3
 
@@ -200,22 +222,26 @@ jobs:
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           VERSION="${{ needs.resolve-tag.outputs.chart_version }}"
           AGENT="${{ matrix.agent }}"
+          SHA="${{ github.sha }}"
+          SHORT_SHA="${SHA:0:7}"
 
           DIGESTS=$(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
 
           if [ "${AGENT}" = "kiro" ]; then
-            # Default (kiro): openab:<version> and openab:beta
+            # Default (kiro): openab:<version>, openab:beta, openab:<sha>
             docker buildx imagetools create \
               -t "${IMAGE}:${VERSION}" \
               -t "${IMAGE}:${VERSION}-kiro" \
               -t "${IMAGE}:beta" \
               -t "${IMAGE}:beta-kiro" \
+              -t "${IMAGE}:${SHORT_SHA}" \
               ${DIGESTS}
           else
-            # Per-agent: openab:<version>-<agent> and openab:beta-<agent>
+            # Per-agent: openab:<version>-<agent>, openab:beta-<agent>
             docker buildx imagetools create \
               -t "${IMAGE}:${VERSION}-${AGENT}" \
               -t "${IMAGE}:beta-${AGENT}" \
+              -t "${IMAGE}:${SHORT_SHA}-${AGENT}" \
               ${DIGESTS}
           fi
 
