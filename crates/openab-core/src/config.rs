@@ -888,6 +888,25 @@ fn expand_env_vars(raw: &str) -> String {
     .into_owned()
 }
 
+/// Maximum accepted size for a remotely-fetched config document (URL or S3).
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+
+/// Finalize raw config bytes fetched from a remote source: enforce the size
+/// cap, validate UTF-8, and expand `${ENV}` references. Shared by the URL and
+/// S3 loaders so both behave identically (and so this logic is unit-testable
+/// offline, without a network or the AWS SDK).
+fn finalize_config_bytes(bytes: &[u8], source: &str) -> anyhow::Result<String> {
+    if bytes.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "config from {source} exceeds 1 MiB limit ({} bytes)",
+            bytes.len()
+        );
+    }
+    let raw = std::str::from_utf8(bytes)
+        .map_err(|e| anyhow::anyhow!("config from {source} is not valid UTF-8: {e}"))?;
+    Ok(expand_env_vars(raw))
+}
+
 /// Load raw config text from a file path (env vars expanded but secrets NOT resolved).
 pub fn load_config_raw(path: &Path) -> anyhow::Result<String> {
     let raw = std::fs::read_to_string(path)
@@ -913,16 +932,7 @@ pub async fn load_config_raw_from_url(url: &str) -> anyhow::Result<String> {
         .bytes()
         .await
         .map_err(|e| anyhow::anyhow!("failed to read response body from {url}: {e}"))?;
-    const MAX_CONFIG_BYTES: usize = 1024 * 1024;
-    if bytes.len() > MAX_CONFIG_BYTES {
-        anyhow::bail!(
-            "remote config from {url} exceeds 1 MiB limit ({} bytes)",
-            bytes.len()
-        );
-    }
-    let raw = String::from_utf8(bytes.to_vec())
-        .map_err(|e| anyhow::anyhow!("remote config from {url} is not valid UTF-8: {e}"))?;
-    Ok(expand_env_vars(&raw))
+    finalize_config_bytes(&bytes, url)
 }
 
 /// Parse an `s3://<bucket>/<key>` URI into its bucket and key components.
@@ -968,16 +978,7 @@ pub async fn load_config_raw_from_s3(uri: &str) -> anyhow::Result<String> {
         .await
         .map_err(|e| anyhow::anyhow!("failed to read S3 object body from {uri}: {e}"))?
         .into_bytes();
-    const MAX_CONFIG_BYTES: usize = 1024 * 1024;
-    if data.len() > MAX_CONFIG_BYTES {
-        anyhow::bail!(
-            "S3 config from {uri} exceeds 1 MiB limit ({} bytes)",
-            data.len()
-        );
-    }
-    let raw = String::from_utf8(data.to_vec())
-        .map_err(|e| anyhow::anyhow!("S3 config from {uri} is not valid UTF-8: {e}"))?;
-    Ok(expand_env_vars(&raw))
+    finalize_config_bytes(&data, uri)
 }
 
 /// Fallback when built without the `config-s3` feature: report a clear error
@@ -1211,6 +1212,35 @@ command = "echo"
         assert!(parse_s3_uri("s3://bucket/").is_err());
         // empty bucket
         assert!(parse_s3_uri("s3:///key").is_err());
+    }
+
+    #[test]
+    fn finalize_config_bytes_accepts_at_limit() {
+        let at_limit = vec![b'a'; MAX_CONFIG_BYTES];
+        assert!(finalize_config_bytes(&at_limit, "test").is_ok());
+    }
+
+    #[test]
+    fn finalize_config_bytes_rejects_oversize() {
+        let oversize = vec![b'a'; MAX_CONFIG_BYTES + 1];
+        let err = finalize_config_bytes(&oversize, "test").unwrap_err();
+        assert!(err.to_string().contains("exceeds 1 MiB limit"));
+    }
+
+    #[test]
+    fn finalize_config_bytes_rejects_invalid_utf8() {
+        // 0xFF is never valid in UTF-8
+        let bad = [0xff, 0xfe, 0xfd];
+        let err = finalize_config_bytes(&bad, "test").unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn finalize_config_bytes_expands_env() {
+        std::env::set_var("AB_FINALIZE_TEST", "world");
+        let out = finalize_config_bytes(b"hello=${AB_FINALIZE_TEST}", "test").unwrap();
+        assert_eq!(out, "hello=world");
+        std::env::remove_var("AB_FINALIZE_TEST");
     }
 
     #[test]

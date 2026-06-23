@@ -17,11 +17,52 @@ openab run -c https://example.com/config.toml
 
 # Remote URL via HTTP (warns — avoid in production; config contains secrets)
 openab run -c http://internal.example.com/config.toml
+
+# Amazon S3 (or S3-compatible) object
+openab run -c s3://my-bucket/path/to/config.toml
 ```
 
 Remote config is fetched via HTTP GET with a 10-second timeout and a 1 MiB response size limit. Environment variable expansion (`${VAR}`) works identically on both local and remote config content.
 
 > **Security best practice:** Never hardcode secrets in remote config files. Use environment variable references like `bot_token = "${DISCORD_BOT_TOKEN}"` and inject the actual values via local environment variables or Kubernetes Secrets. For centralized secret management with rotation and audit, use `[secrets.refs]` with AWS Secrets Manager or an exec provider — see [secrets-management.md](secrets-management.md). OpenAB expands `${VAR}` identically for both local and remote config.
+
+### `s3://` config source
+
+`openab run -c s3://<bucket>/<key>` fetches the config object directly from Amazon S3
+(requires a build with the `config-s3` feature, which is on by default). The same
+1 MiB size cap, UTF-8 validation, and `${VAR}` expansion apply as for HTTP(S) sources.
+
+**Credential & region resolution** uses the standard AWS provider chain — the same
+mechanism as `aws-sm://` secret references:
+
+- environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`),
+- shared config/credentials files (`~/.aws/...`),
+- container/instance roles: **IRSA / EKS Pod Identity** (Kubernetes) or the **ECS task role** / EC2 instance role.
+
+There is no `[s3]` config section for this: the credentials needed to *fetch* the
+config cannot live *inside* the config you are fetching. Configure the bootstrap S3
+access via the environment/role above.
+
+**Minimum IAM policy** — scope the role to only the config prefix, never `Resource: "*"`:
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["s3:GetObject"],
+  "Resource": "arn:aws:s3:::my-bucket/path/to/*"
+}
+```
+
+> **Secrets still never belong in the config object.** The `s3://` loader does not
+> resolve secrets — it only fetches text and expands `${VAR}`. Keep secrets out of the
+> S3 object and inject them via env vars / `[secrets.refs]` as above.
+
+> **S3-compatible stores (Cloudflare R2, MinIO):** R2 generally works by setting
+> `AWS_ENDPOINT_URL_S3` (plus R2 keys and `AWS_REGION=auto`). MinIO and some others
+> additionally require path-style addressing, which the standard AWS env vars do not
+> cover yet — explicit endpoint / path-style support is tracked as a follow-up. Only
+> point the endpoint at trusted hosts; a poisoned endpoint env var could redirect the
+> fetch to a malicious server.
 
 ---
 
