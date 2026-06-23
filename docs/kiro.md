@@ -53,6 +53,29 @@ env = { KIRO_API_KEY = "${secrets.kiro_api_key}" }
 
 That's it — you're all set. No OAuth login required.
 
+#### Architecture
+
+```mermaid
+sequenceDiagram
+    participant User as User (one-time setup)
+    participant Console as AWS Console
+    participant Kiro as kiro.dev
+    participant SM as AWS Secrets Manager
+    participant OAB as OpenAB
+    participant CLI as Kiro CLI
+
+    Note over User,SM: One-time setup
+    User->>Console: 1. Enable Kiro API Keys
+    User->>Kiro: 2. Generate API Key
+    User->>SM: 3. Store key in secret "kiro" (key: API_KEY)
+
+    Note over OAB,CLI: Runtime (automatic)
+    OAB->>SM: 4. Resolve aws-sm://kiro#API_KEY
+    SM-->>OAB: Return API key value
+    OAB->>CLI: 5. Inject as KIRO_API_KEY env var
+    CLI->>Kiro: 6. Authenticate with API key ✅
+```
+
 #### How It Works
 
 1. OpenAB starts and resolves `aws-sm://kiro#API_KEY` — fetches the `API_KEY` field from the AWS Secrets Manager secret named `kiro`.
