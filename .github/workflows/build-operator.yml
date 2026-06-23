@@ -30,8 +30,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   # All agent variants built from Dockerfile.unified targets.
-  # native-sandbox requires its target to be added to Dockerfile.unified (see #1175 follow-up).
-  AGENTS: "kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore,native-sandbox"
+  AGENTS: "kiro,claude,codex,copilot,cursor,gemini,grok,hermes,mimocode,opencode,antigravity,pi,native,agentcore"
 
 jobs:
   resolve-tag:
