@@ -18,10 +18,24 @@ helm install openab openab/openab \
   --set agents.claude.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.claude.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.claude.command=claude-agent-acp \
-  --set agents.claude.workingDir=/home/node
+  --set agents.claude.workingDir=/home/node \
+  --set agents.claude.image.tag=beta-claude
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
+
+### Image Tag
+
+Use `--set agents.claude.image.tag=<version>-claude` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-claude` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-claude` | Pinned to exact version |
+| `stable-claude` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-claude` agent suffix.
 
 ## Manual config.toml
 

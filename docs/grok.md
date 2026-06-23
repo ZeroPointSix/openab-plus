@@ -21,10 +21,24 @@ helm install openab openab/openab \
   --set agents.grok.command=grok \
   --set-string 'agents.grok.args[0]=agent' \
   --set-string 'agents.grok.args[1]=stdio' \
-  --set agents.grok.workingDir=/home/agent
+  --set agents.grok.workingDir=/home/agent \
+  --set agents.grok.image.tag=beta-grok
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
+
+### Image Tag
+
+Use `--set agents.grok.image.tag=<version>-grok` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-grok` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-grok` | Pinned to exact version |
+| `stable-grok` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-grok` agent suffix.
 
 ## Manual config.toml
 

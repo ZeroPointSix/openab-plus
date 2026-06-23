@@ -132,8 +132,22 @@ helm install openab-copilot openab/openab \
   --set 'agents.copilot.args={--acp,--stdio}' \
   --set agents.copilot.persistence.enabled=true \
   --set agents.copilot.workingDir=/home/node \
-  --set 'agents.copilot.env.COPILOT_GITHUB_TOKEN=github_pat_YOUR_TOKEN_HERE'  # optional, see Authentication
+  --set 'agents.copilot.env.COPILOT_GITHUB_TOKEN=github_pat_YOUR_TOKEN_HERE' \
+  --set agents.copilot.image.tag=beta-copilot
 ```
+
+### Image Tag
+
+Use `--set agents.copilot.image.tag=<version>-copilot` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-copilot` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-copilot` | Pinned to exact version |
+| `stable-copilot` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-copilot` agent suffix.
 
 ## Model Selection
 

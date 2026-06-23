@@ -21,10 +21,24 @@ helm install openab openab/openab \
   --set agents.hermes.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.hermes.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.hermes.command=hermes-acp \
-  --set agents.hermes.workingDir=/home/agent
+  --set agents.hermes.workingDir=/home/agent \
+  --set agents.hermes.image.tag=beta-hermes
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
+
+### Image Tag
+
+Use `--set agents.hermes.image.tag=<version>-hermes` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-hermes` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-hermes` | Pinned to exact version |
+| `stable-hermes` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-hermes` agent suffix.
 
 ## Manual config.toml
 

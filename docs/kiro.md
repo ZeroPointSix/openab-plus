@@ -18,8 +18,22 @@ helm repo update
 
 helm install openab openab/openab \
   --set agents.kiro.discord.botToken="$DISCORD_BOT_TOKEN" \
-  --set-string 'agents.kiro.discord.allowedChannels[0]=YOUR_CHANNEL_ID'
+  --set-string 'agents.kiro.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
+  --set agents.kiro.image.tag=beta-kiro
 ```
+
+### Image Tag
+
+Use `--set agents.kiro.image.tag=<version>-kiro` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-kiro` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-kiro` | Pinned to exact version |
+| `stable-kiro` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-kiro` agent suffix.
 
 ## Manual config.toml
 

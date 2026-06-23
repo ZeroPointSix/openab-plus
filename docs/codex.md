@@ -22,10 +22,24 @@ helm install openab openab/openab \
   --set agents.codex.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.codex.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.codex.command=codex-acp \
-  --set agents.codex.workingDir=/home/node
+  --set agents.codex.workingDir=/home/node \
+  --set agents.codex.image.tag=beta-codex
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
+
+### Image Tag
+
+Use `--set agents.codex.image.tag=<version>-codex` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-codex` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-codex` | Pinned to exact version |
+| `stable-codex` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-codex` agent suffix.
 
 ## Manual config.toml
 

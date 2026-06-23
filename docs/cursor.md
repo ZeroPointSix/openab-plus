@@ -66,8 +66,22 @@ helm install openab openab/openab \
   --set agents.cursor.command=cursor-agent \
   --set 'agents.cursor.args={acp}' \
   --set agents.cursor.persistence.enabled=true \
-  --set agents.cursor.workingDir=/home/agent
+  --set agents.cursor.workingDir=/home/agent \
+  --set agents.cursor.image.tag=beta-cursor
 ```
+
+### Image Tag
+
+Use `--set agents.cursor.image.tag=<version>-cursor` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-cursor` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-cursor` | Pinned to exact version |
+| `stable-cursor` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-cursor` agent suffix.
 
 ## Model Selection
 

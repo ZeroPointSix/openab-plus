@@ -41,10 +41,24 @@ helm install openab openab/openab \
   --set agents.opencode.discord.botToken="$DISCORD_BOT_TOKEN" \
   --set-string 'agents.opencode.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.opencode.workingDir=/home/node \
-  --set agents.opencode.pool.maxSessions=3
+  --set agents.opencode.pool.maxSessions=3 \
+  --set agents.opencode.image.tag=beta-opencode
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
+
+### Image Tag
+
+Use `--set agents.opencode.image.tag=<version>-opencode` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-opencode` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-opencode` | Pinned to exact version |
+| `stable-opencode` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-opencode` agent suffix.
 
 ## Manual config.toml
 

@@ -20,12 +20,26 @@ helm install openab openab/openab \
   --set-string 'agents.gemini.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.gemini.command=gemini \
   --set agents.gemini.args='{--acp}' \
-  --set agents.gemini.workingDir=/home/node
+  --set agents.gemini.workingDir=/home/node \
+  --set agents.gemini.image.tag=beta-gemini
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
 > 
 > (Optional) `agents.gemini.args='{--acp}'` could be modified as `{--model,gemini-3-pro-preview,--acp}` if specific model is required. Otherwise, the default value will be 'Auto (Gemini 3)'.
+
+### Image Tag
+
+Use `--set agents.gemini.image.tag=<version>-gemini` to pin the image version.
+The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+
+| Example | Description |
+|---------|-------------|
+| `beta-gemini` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2-gemini` | Pinned to exact version |
+| `stable-gemini` | Floating stable channel |
+
+> ⚠️ There is no `latest` tag — you must include the `-gemini` agent suffix.
 
 ## Manual config.toml
 
