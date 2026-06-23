@@ -990,6 +990,27 @@ pub async fn load_config_raw_from_s3(uri: &str) -> anyhow::Result<String> {
     )
 }
 
+/// Load raw config text from any supported source, dispatching on the scheme:
+/// a local file path, an `http(s)://` URL, or an `s3://<bucket>/<key>` URI.
+/// Env vars are expanded (`${VAR}`) but secrets are NOT resolved.
+///
+/// Centralizing scheme dispatch here keeps the binary entrypoint decoupled from
+/// the set of supported config sources.
+pub async fn load_config_raw_from_source(source: &str) -> anyhow::Result<String> {
+    if source.starts_with("https://") {
+        tracing::info!(url = %source, "fetching remote config");
+        load_config_raw_from_url(source).await
+    } else if source.starts_with("http://") {
+        tracing::warn!(url = %source, "fetching remote config over plaintext HTTP — use HTTPS in production");
+        load_config_raw_from_url(source).await
+    } else if source.starts_with("s3://") {
+        tracing::info!(uri = %source, "fetching config from S3");
+        load_config_raw_from_s3(source).await
+    } else {
+        load_config_raw(Path::new(source))
+    }
+}
+
 /// Parse config from already-expanded text.
 pub fn parse_config_str(expanded: &str, source: &str) -> anyhow::Result<Config> {
     parse_config_inner(expanded, source)

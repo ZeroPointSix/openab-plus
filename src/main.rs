@@ -176,18 +176,7 @@ async fn main() -> anyhow::Result<()> {
     let config_source = config_arg.unwrap_or_else(|| "config.toml".into());
 
     // First pass: load config (env vars expanded, secrets NOT resolved yet)
-    let raw_expanded = if config_source.starts_with("https://") {
-        info!(url = %config_source, "fetching remote config");
-        config::load_config_raw_from_url(&config_source).await?
-    } else if config_source.starts_with("http://") {
-        warn!(url = %config_source, "fetching remote config over plaintext HTTP — use HTTPS in production");
-        config::load_config_raw_from_url(&config_source).await?
-    } else if config_source.starts_with("s3://") {
-        info!(uri = %config_source, "fetching config from S3");
-        config::load_config_raw_from_s3(&config_source).await?
-    } else {
-        config::load_config_raw(&PathBuf::from(&config_source))?
-    };
+    let raw_expanded = config::load_config_raw_from_source(&config_source).await?;
 
     let mut cfg = config::parse_config_str(&raw_expanded, &config_source)?;
     info!(
