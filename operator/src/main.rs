@@ -217,7 +217,7 @@ async fn resolve_agent(config: &aws_config::SdkConfig, name: &str, cluster: &str
     }
 
     let ecs = aws_sdk_ecs::Client::new(config);
-    let service_name = format!("{cluster}-{namespace}-{name}");
+    let service_name = format!("oab-{namespace}-{name}");
 
     let tasks = ecs.list_tasks()
         .cluster(cluster)

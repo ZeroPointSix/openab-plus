@@ -124,6 +124,9 @@ async fn apply_ecs(
     };
 
     let service_name = m.ecs_service_name();
+    let cluster = crate::config::OabConfig::load()
+        .map(|c| c.defaults.cluster)
+        .unwrap_or_else(|_| "oab".to_string());
     let bucket = if let Some(b) = crate::config::OabConfig::load().ok().and_then(|c| c.bucket()) {
         b
     } else {
@@ -283,7 +286,7 @@ async fn apply_ecs(
     // Check if service exists
     let existing = ecs
         .describe_services()
-        .cluster("oab")
+        .cluster(&cluster)
         .services(&service_name)
         .send()
         .await;
@@ -296,7 +299,7 @@ async fn apply_ecs(
 
     if service_active {
         ecs.update_service()
-            .cluster("oab")
+            .cluster(&cluster)
             .service(&service_name)
             .task_definition(&task_def_arn)
             .network_configuration(network_config)
@@ -312,7 +315,7 @@ async fn apply_ecs(
             .build()?;
 
         ecs.create_service()
-            .cluster("oab")
+            .cluster(&cluster)
             .service_name(&service_name)
             .task_definition(&task_def_arn)
             .desired_count(1)
@@ -330,7 +333,7 @@ async fn apply_ecs(
 
     if wait {
         eprintln!("  ⏳ Waiting for {} to stabilize...", m.metadata.name);
-        ecsctl::apply::wait_for_stable(ecs, "oab", &service_name).await?;
+        ecsctl::apply::wait_for_stable(ecs, &cluster, &service_name).await?;
     }
 
     Ok(())
