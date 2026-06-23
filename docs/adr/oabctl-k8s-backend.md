@@ -1,4 +1,4 @@
-# ADR: oabctl Kubernetes Backend (one spec, two runtimes)
+# ADR: oabctl Kubernetes Backend (implement the stubbed `Runtime::Kubernetes`)
 
 - **Status:** Proposed
 - **Date:** 2026-06-23
@@ -7,393 +7,398 @@
 
 ---
 
+## 0. Correction note (v2, not v1)
+
+An earlier draft of this ADR was written against a **stale `feat/unified-binary-workspace`
+copy** of `operator/src/manifest.rs` (a flat `oab.dev/v1` spec with top-level
+`capacityProvider` / `networking`). **`main` has already moved past that.** This ADR has
+been corrected to the actual `main` schema:
+
+- `apiVersion: **oab.dev/v2**`
+- A `Runtime` **enum** — `Ecs(EcsRuntime)` | `Kubernetes(KubernetesRuntime)` —
+  serde-tagged by `type`, so the two runtimes are **mutually exclusive by construction**.
+- `KubernetesRuntime` **already exists** (`nodeSelector`, `serviceAccount`, `tolerations`).
+- `secrets` is already `HashMap<String,String>`; agent config is a **`configFrom`
+  reference** (e.g. `s3://…/config.toml`), not an inline typed struct.
+- `apply.rs:55-57` and `create.rs:56-57` already **stub** the K8s path with
+  `"Kubernetes runtime not yet implemented"`.
+
+**Consequence:** the schema refactor proposed by the old draft is **already done**.
+The real, narrow scope of this ADR is: **implement the stubbed `Runtime::Kubernetes`
+branch** (apply / create / delete / get) using `kube-rs`, and extend
+`KubernetesRuntime` with the few fields a Deployment needs.
+
+---
+
 ## 1. Context & Motivation
 
 OpenAB is deployed to Kubernetes today via **Helm charts** (`charts/openab` plus the
 `openab-line` / `openab-telegram` / `openab-feishu` sub-charts). Separately,
-[`oabctl`](../../operator) provisions agents on **Amazon ECS Fargate** using an
-`oab.dev/v1` `OABService` manifest and an S3-backed control plane.
+[`oabctl`](../../operator) provisions agents on **Amazon ECS Fargate** from an
+`oab.dev/v2` `OABService` manifest with an S3-backed control plane.
 
-We want a **single tool and a single spec** to deploy OpenAB to **both** ECS and
-Kubernetes, and ultimately for `oabctl` to **replace the Helm chart** as the
-recommended K8s deployment path.
-
-The [ECS Control Plane ADR](./ecs-control-plane.md) already anticipated this: §4
-("Multi-Runtime Support") defines a platform-agnostic core spec with optional
-`platform.ecs` / `platform.k8s` overlays, and lists a "K8s operator" as Phase 3.
-This ADR makes that concrete — it specifies **how** `oabctl` gains a Kubernetes
-backend using the same spec, and how it reaches feature parity with (and replaces)
-Helm.
+We want **one tool and one spec** to deploy to both runtimes, and for `oabctl` to
+eventually **replace the Helm chart** as the recommended K8s path. The good news
+(see §0): the schema already supports both runtimes — the K8s code path is just not
+implemented yet.
 
 ### Why replace Helm?
 
-Helm's value is not "edit one `values.yaml` and `helm install`" — that is just the
-UX surface. The real value is three layers underneath:
-
-1. **Templating with logic** — one small input expands into many K8s objects.
-2. **Release lifecycle** — `install` / `upgrade` / `rollback` / `uninstall` / `history`
-   over a named, versioned release.
-3. **Distribution & ecosystem** — versioned chart artifacts, ArgoCD/Flux, `helm diff`.
-
-`oabctl` can match all three, and improve on #1: Helm templating is stringly-typed Go
-templates, whereas `oabctl` renders from **typed Rust structs with real validation** —
-better error messages and schema enforcement. The cost is reproducing Helm's
-**rendering surface** (the long pole) and its **lifecycle verbs** (mostly already
-present, see §7).
+Helm's value is not "edit one `values.yaml` and `helm install`" — that is the UX
+surface. The real value is three layers underneath: (1) **templating with logic**,
+(2) **release lifecycle** (`install`/`upgrade`/`rollback`/`uninstall`/`history`),
+(3) **distribution & ecosystem** (versioned charts, ArgoCD/Flux, `helm diff`).
+`oabctl` can match all three and improve on (1): Helm templating is stringly-typed Go
+templates, whereas `oabctl` renders from **typed Rust structs with real validation**.
+The cost is reproducing Helm's **rendering surface** (the long pole) and its
+**lifecycle verbs**.
 
 ---
 
-## 2. Current State & The Core Blocker
+## 2. Current State (verified against `main`)
 
-| Piece | Status |
-|-------|--------|
-| Helm charts | Mature K8s path. ~22 KB `values.yaml`, 14 chart tests, gateway, PVC, ExternalSecrets, ServiceAccount, adapter sub-charts |
-| `oabctl` | ECS-only: `apply` / `get` / `delete` → S3 manifest store + ECS service reconcile |
-| `oab.dev/v1` schema | Platform overlays designed in ECS ADR §4 — **not yet implemented** in code |
-| K8s operator | Not started (ECS ADR Phase 3) |
+| Piece | Status on `main` |
+|-------|------------------|
+| Manifest schema | `oab.dev/v2`, `OABService` + `OABFleet`, `Runtime` enum `Ecs`/`Kubernetes` |
+| `KubernetesRuntime` | **Exists** (`nodeSelector`, `serviceAccount`, `tolerations`) — minimal |
+| `oabctl` ECS path | Implemented: `apply`/`get`/`delete`, S3 config sync, ECS task def + service |
+| `oabctl` K8s path | **Stubbed** — `apply.rs:55-57` / `create.rs:56-57` bail `"not yet implemented"` |
+| Config delivery | `spec.configFrom` (e.g. `s3://…/config.toml`); `apply` syncs local config → S3 |
+| Secrets | `spec.secrets: HashMap<String,String>` (name → `valueFrom` reference) |
+| Helm charts | Mature K8s path. Uses **native Secret + `secretEnv`/`existingSecret`** (no ExternalSecret template), ConfigMap excludes secret values via `inherit_env` + `secretKeyRef` |
+| K8s operator (CRD) | Not started (ECS ADR Phase 3) |
 
-**Blocker:** despite the ADR's intent, the spec in
-[`operator/src/manifest.rs`](../../operator/src/manifest.rs) is **ECS-coupled**:
-
-- `Spec` has ECS-isms as **required top-level** fields: `capacityProvider`, and
-  `networking.subnets` / `networking.securityGroups`.
-- `validate()` **hard-rejects** any manifest lacking subnets / security groups or a
-  valid Fargate capacity provider.
-
-So a K8s-only user is currently forced to supply meaningless ECS networking. Making
-the spec genuinely platform-agnostic is therefore **step one**.
+> Correction vs older drafts: Helm currently uses **native K8s Secrets**, *not*
+> ExternalSecrets. Any "Helm already uses ExternalSecrets" statement is wrong and must
+> not drive the K8s secret design.
 
 ---
 
 ## 3. Decision
 
-Add a Kubernetes backend to `oabctl` that consumes the **same `oab.dev/v1`
-`OABService` manifest** as ECS, selected at apply time. Approach:
+Implement `oabctl`'s **`Runtime::Kubernetes` backend** consuming the **same
+`oab.dev/v2` `OABService` manifest** as ECS, via **client-side render & apply**
+(`kube-rs` server-side apply), with **no in-cluster component** in the first
+milestone. An in-cluster CRD + operator remains a later, optional milestone
+(ECS ADR Phase 3).
 
-- **Client-side render & apply** (like Helm and `kubectl apply`) as the first
-  milestone — no in-cluster component required.
-- A typed, **platform-agnostic core spec** with `platform.ecs` / `platform.k8s`
-  overlays (ECS ADR §4), enforced by **target-aware validation**.
-- A **`Provisioner` trait** abstraction so ECS and K8s are interchangeable behind one
-  CLI, sharing manifest loading, validation, generation tracking, and
-  `config.toml` rendering.
-- An optional **in-cluster CRD + operator** as a later milestone for GitOps /
-  self-healing (ECS ADR Phase 3), reusing the same rendering layer.
+Two design choices, informed by review:
 
-We explicitly choose client-render-first over CRD-first because it is the honest 1:1
-Helm replacement, requires zero cluster install, reuses existing rendering code, and
-unblocks Helm deprecation fastest.
+- **Keep the `Runtime` enum** (do *not* flatten to `platform.ecs`/`platform.k8s`
+  struct overlays). The enum already enforces mutual exclusivity and lets `oabctl`
+  **infer the target from the manifest** — no `--target` flag needed, and the ECS
+  regression risk largely disappears.
+- **Keep `configFrom` and `secrets: HashMap`** as-is. Config stays a path reference
+  (clean boundary — `oabctl` never needs to compile the agent's config schema), and
+  the SSM-vs-SecretsManager source is **inferred from the ARN prefix**.
 
 ---
 
 ## 4. Architecture
 
 ```
-                  ┌──────────────────────────┐
-                  │   oab.dev/v1 OABService   │  one spec, platform-agnostic core
-                  │   + platform.{ecs,k8s}    │
-                  └─────────────┬─────────────┘
-                                │  load + validate(target) + render config.toml
-                                │  (shared layer)
+                  ┌───────────────────────────┐
+                  │  oab.dev/v2 OABService     │  one spec
+                  │  spec.runtime = Ecs | K8s  │  (enum → target inferred)
+                  └─────────────┬──────────────┘
+                                │ load + validate + resolve configFrom
                         ┌───────┴────────┐
-              --target ecs            --target k8s
+                Runtime::Ecs        Runtime::Kubernetes
                         ▼                ▼
               ┌──────────────┐   ┌──────────────────┐
-              │EcsProvisioner│   │  K8sProvisioner  │
-              │ (aws-sdk)    │   │  (kube-rs)       │
+              │ ECS path     │   │  K8s path (NEW)  │
+              │ (implemented)│   │  (kube-rs)       │
               └──────┬───────┘   └─────────┬────────┘
                      ▼                     ▼
-            S3 artifact + ECS      Deployment + ConfigMap +
-            TaskDef + Service      Secret/ExternalSecret +
-                                   PVC + ServiceAccount (+ Service/Ingress)
+        S3 config sync + ECS       Deployment + ConfigMap/initContainer +
+        TaskDef + Service          Secret/ExternalSecret + PVC + SA (+ Service)
 ```
 
 ### 4.1 Provisioner trait
 
+Today `apply.rs` calls the ECS SDK directly and matches on `spec.runtime`. Introduce a
+`Provisioner` trait so the two runtimes are interchangeable, sharing manifest
+loading, validation, and `configFrom` resolution.
+
 ```rust
 #[async_trait]
 trait Provisioner {
-    async fn apply(&self, m: &OABServiceManifest, generation: u64) -> Result<()>;
+    async fn apply(&self, m: &OABServiceManifest) -> Result<()>;   // generation handled internally
     async fn delete(&self, ns: &str, name: &str) -> Result<()>;
     async fn get(&self, ns: &str, name: Option<&str>) -> Result<Vec<Status>>;
+    // Grow deliberately as needs land (avoid a too-thin trait that breaks later):
+    async fn status(&self, ns: &str, name: &str) -> Result<Health>;
+    async fn logs(&self, ns: &str, name: &str, opts: LogOpts) -> Result<()>;
 }
-
-struct EcsProvisioner { ecs: aws_sdk_ecs::Client, s3: aws_sdk_s3::Client }
-struct K8sProvisioner { client: kube::Client }
 ```
 
-Shared, backend-independent layer: manifest parsing, `validate()`, generation
-bump, and `render_config_toml()`. This is what prevents the two backends from
-drifting (see Risk R1).
+> **Generation is backend-specific** (S3 manifest for ECS, Deployment annotation for
+> K8s). Each `Provisioner::apply` therefore **looks up and bumps generation
+> internally**, rather than receiving it from the shared layer.
+
+> **Shared-crate boundary:** keep the manifest types + renderers **inside the
+> `operator` crate** for now. Do **not** spin up a separate `openab-manifest` crate
+> unless the in-cluster controller (Phase K4) needs to compile independently — this
+> avoids dependency pollution into the core agent workspace.
 
 ---
 
-## 5. Schema Refactor (Step 1)
+## 5. `KubernetesRuntime` Extension
 
-Pull ECS-specifics out of the core `Spec` into `platform.ecs`; mirror with
-`platform.k8s`. Core stays cross-platform.
+`KubernetesRuntime` exists but is minimal. Extend it with the fields a Deployment +
+PVC + Secret actually need. Additive only — no change to ECS or to `Spec`.
 
 ```rust
-pub struct Spec {
-    // --- core (cross-platform) ---
-    pub cpu: i32,
-    pub memory: i32,
-    pub image: String,                      // was task_definition.image
-    #[serde(default)] pub replicas: u32,    // validated == 1
-    #[serde(default)] pub bootstrap_from: Option<String>,
-    pub config: AgentConfig,
-    #[serde(default)] pub secrets: Vec<SecretRef>,
-    // --- platform overlays (both optional) ---
-    #[serde(default)] pub platform: Platform,
-}
-
-#[derive(Default)]
-pub struct Platform {
-    #[serde(default)] pub ecs: Option<EcsPlatform>,
-    #[serde(default)] pub k8s: Option<K8sPlatform>,
-}
-
-pub struct EcsPlatform {
-    #[serde(default = "default_capacity_provider")] pub capacity_provider: String,
-    pub networking: Networking,             // subnets, securityGroups, assignPublicIp
-    #[serde(default)] pub execution_role: Option<String>,
-    #[serde(default)] pub task_role: Option<String>,
-}
-
-pub struct K8sPlatform {
+pub struct KubernetesRuntime {
+    // existing
+    #[serde(default)] pub node_selector: HashMap<String, String>,
     #[serde(default)] pub service_account: Option<String>,
+    #[serde(default)] pub tolerations: Vec<serde_yaml::Value>,
+    // additions
     #[serde(default)] pub storage_class: Option<String>,
-    #[serde(default)] pub node_selector: std::collections::HashMap<String, String>,
+    #[serde(default)] pub storage_size: Option<String>,        // PVC request, e.g. "1Gi"
     #[serde(default)] pub image_pull_secrets: Vec<String>,
     #[serde(default = "default_secret_backend")] pub secret_backend: String, // "external" | "native"
-    #[serde(default)] pub service: Option<ServiceSpec>,   // optional Service/Ingress
+    #[serde(default)] pub service: Option<ServiceSpec>,        // optional Service/Ingress
 }
 ```
 
-### Target-aware validation
+`replicas` is intentionally **not** exposed: OAB agents hold a single stateful gateway
+connection (Discord/Telegram/Slack websocket), so the Deployment generator
+**hardcodes `replicas: 1`**. (`Spec` has no `replicas` field today — keep it that way.)
 
-`validate()` takes the resolved target and enforces only that platform's invariants:
-
-- **ECS**: `platform.ecs.networking.subnets` and `securityGroups` non-empty;
-  `capacityProvider ∈ {FARGATE, FARGATE_SPOT}`.
-- **K8s**: `platform.k8s` keys are well-formed; `secretBackend ∈ {external, native}`.
-- **Core (both)**: `apiVersion == oab.dev/v1`, `kind == OABService`, `name` /
-  `namespace` present, `replicas == 1`.
-
-Each backend **strict-validates its own** `platform.*` key and **ignores** the other
-(ECS ADR §4 rules).
-
-### Backward compatibility
-
-Existing ECS manifests use top-level `capacityProvider` / `networking`. To avoid
-breaking them, the loader supports a one-release **migration shim**: if legacy
-top-level ECS fields are present and `platform.ecs` is absent, fold them into
-`platform.ecs` and emit a deprecation warning. Drop the shim in the next minor.
+`spec.resources` is `{ cpu: String, memory: String }`. ECS validates against the
+Fargate CPU table; **K8s maps them to `resources.requests/limits`** (`cpu: "512"` →
+`500m`, `memory: "1024"` → `1Gi`) and defers format validation to the K8s API.
 
 ---
 
-## 6. Kubernetes Backend (Step 3)
+## 6. Kubernetes Backend Implementation
 
 Add `kube` + `k8s-openapi` to [`operator/Cargo.toml`](../../operator/Cargo.toml).
-`K8sProvisioner::apply` builds typed objects from the **same** manifest and performs
-**server-side apply** (the K8s-native analogue of ECS register-task-def +
-update-service):
+Replace the `apply.rs:55-57` stub with a `K8sProvisioner` that builds typed objects
+and does **server-side apply**:
 
 ```rust
-let dep:  Deployment             = render_deployment(m);  // image, cpu/mem→resources, replicas, env, mounts
-let cm:   ConfigMap              = render_configmap(m);   // render_config_toml() → config.toml
-let pvc:  PersistentVolumeClaim  = render_pvc(m);         // storageClass from platform.k8s
-let sa:   ServiceAccount         = render_sa(m);          // IRSA / Pod Identity annotation if set
+let dep:  Deployment             = render_deployment(m);  // image, resources, replicas=1, env, mounts, nodeSelector, tolerations, SA
+let cfg /* ConfigMap | initContainer */ = render_config(m);  // see config delivery below
+let pvc:  PersistentVolumeClaim  = render_pvc(m);         // storageClass + storageSize
+let sa:   ServiceAccount         = render_sa(m);          // IRSA / Pod Identity annotation
 let sec /* Secret | ExternalSecret */ = render_secrets(m);
 
 let pp = PatchParams::apply("oabctl").force();
-for obj in [dep, cm, pvc, sa, sec] {
-    api.patch(&obj.name(), &pp, &Patch::Apply(&obj)).await?;
-}
+for obj in objects { api.patch(&obj.name(), &pp, &Patch::Apply(&obj)).await?; }
 ```
 
-All objects carry owner labels (`app.kubernetes.io/managed-by: oabctl`,
-`oab.dev/namespace`, `oab.dev/name`) so `get` / `delete` work via label selectors.
+### Config delivery
+
+`spec.configFrom` is already an S3 path. Two viable K8s mappings:
+
+1. **initContainer `s3 cp`** (mirrors ECS startup) → writes `config.toml` onto the PVC.
+   Requires the pod SA to have AWS read perms (IRSA / Pod Identity). Most consistent
+   with ECS.
+2. **ConfigMap** — `oabctl` fetches `configFrom`, then writes a ConfigMap mounted at
+   `/home/agent/config.toml`. No in-pod AWS creds needed for config.
+
+Recommend (1) for parity with ECS and to avoid `oabctl` reading config content; make
+it selectable later if needed. **Either way, `config.toml` must never contain secret
+values** (see §7).
 
 ### Translation table (core → backend)
 
-| Core spec | ECS backend | K8s backend |
-|-----------|-------------|-------------|
-| `cpu: 512` | TaskDef `cpu=512` | `resources.requests/limits.cpu: 500m` |
-| `memory: 1024` | TaskDef `memory=1024` | `resources.requests/limits.memory: 1Gi` |
-| `config` | render → S3 artifact + startup wrapper | render → **ConfigMap** mounted at `/home/agent/config.toml` |
-| `secrets[].source: ssm` | ECS native `secrets` field | **ExternalSecret** → K8s Secret (or native Secret) |
-| `secrets[].source: secretsmanager` | ECS native `secrets` field | ExternalSecret (ESO) / native Secret |
-| `bootstrapFrom` | startup wrapper `s3 cp` | **initContainer** `s3 cp` → PVC |
-| `replicas: 1` | `desiredCount=1` | `replicas: 1` |
-| `platform.ecs.*` | used | ignored |
-| `platform.k8s.*` | ignored | used |
-
-**Config delivery differs by design:** ECS has no ConfigMap equivalent, so it renders
-to an immutable S3 artifact and downloads at startup; K8s mounts a ConfigMap
-directly. Both use the **same** `render_config_toml()`. This asymmetry is expected.
-
-### Secret backend
-
-`platform.k8s.secretBackend` selects:
-
-- `external` (default) — emit an `ExternalSecret` (External Secrets Operator) that
-  syncs from SSM / Secrets Manager. Requires ESO installed in-cluster.
-- `native` — `oabctl` reads the source value and writes a K8s `Secret` directly
-  (requires `oabctl` to have AWS read perms; simpler clusters, no ESO dependency).
+| Core (`oab.dev/v2`) | ECS backend | K8s backend |
+|---------------------|-------------|-------------|
+| `resources.cpu: "512"` | TaskDef `cpu=512` (Fargate table) | `resources.requests/limits.cpu: 500m` |
+| `resources.memory: "1024"` | TaskDef `memory=1024` | `…memory: 1Gi` |
+| `configFrom: s3://…` | startup sync → `config.toml` | initContainer `s3 cp` (or ConfigMap) |
+| `secrets{name: valueFrom}` | ECS native `secrets` field | ExternalSecret (ESO) **or** native Secret |
+| `bootstrapFrom` | startup `s3 cp` | initContainer `s3 cp` → PVC |
+| `runtime: Ecs{…}` | used | n/a (enum) |
+| `runtime: Kubernetes{…}` | n/a (enum) | used |
 
 ---
 
-## 7. Lifecycle & Target Selection
+## 7. Secret Handling (security-critical)
 
-### CLI verbs map cleanly to Helm
+`spec.secrets` is `name → valueFrom` (an ARN/SSM path). Source is **inferred from the
+ARN prefix** (`arn:aws:ssm:…` vs `arn:aws:secretsmanager:…`). `KubernetesRuntime.secretBackend`
+selects how those references become pod env:
+
+- **`external` (default, recommended)** — emit an **`ExternalSecret`** (External
+  Secrets Operator) that syncs from SSM / Secrets Manager into a K8s Secret consumed
+  via `secretKeyRef`. `oabctl` never sees the secret value — preserves the ECS ADR
+  principle that the provisioner handles **references, not values**.
+- **`native`** — `oabctl` reads the value and writes a K8s `Secret` directly.
+  **Discouraged in production**: it turns `oabctl` into a plaintext secret relay,
+  binding AWS read creds to the operator's machine. If kept, gate it behind an
+  explicit opt-in flag and document the rotation/audit implications.
+
+### Hard requirements (from security review)
+
+1. **`config.toml` / ConfigMap must never carry secret values.** Match Helm's existing
+   protection: secrets reach the pod only via env `secretKeyRef`; the rendered config
+   references env, never literals. The renderer must **reject** a config that inlines a
+   secret key (parity with the chart's guard).
+2. **No `--set` on secret fields.** When `--set` lands, maintain a **denylist** for
+   secret-value paths, and store any companion/last-applied manifest **redacted** —
+   otherwise a plaintext secret could be persisted into an annotation/ConfigMap (etcd
+   readable).
+3. **K8s Secret Injection Contract** (parity with ECS ADR §6) — document: the pod SA's
+   IRSA/Pod-Identity role, the SSM/SM **resource ARN scoping** per agent, an ESO
+   `SecretStore`/`ClusterSecretStore` example, and an **apply-time preflight** that
+   verifies the ESO CRDs/operator exist (else `ExternalSecret` fails silently and the
+   pod starts without env).
+4. **`bootstrapFrom` + config initContainer need AWS creds** (IRSA/Pod Identity) — list
+   the IAM requirement explicitly.
+5. **Minimum `oabctl` kube RBAC** — server-side apply needs `patch`/`get` on
+   `deployments`, `configmaps`, `secrets`, `serviceaccounts`, `persistentvolumeclaims`
+   (+ `externalsecrets` when `external`). Document the Role.
+6. **Secret rotation** — define how rotation triggers a rollout: ESO `refreshInterval`
+   + a checksum annotation on the Deployment to force restart (parity with ECS ADR §6's
+   `autoRestart`/circuit-breaker).
+
+---
+
+## 8. Lifecycle, Target Selection, State
+
+### Verbs map to Helm
 
 | Helm | oabctl | Status |
 |------|--------|--------|
-| `helm install` | `oabctl apply -f` | exists (ECS); add K8s |
-| `helm upgrade` | `oabctl apply -f` (same command — declarative create-or-update) | exists (ECS); add K8s |
-| `helm uninstall` | `oabctl delete` | exists (ECS); add K8s |
-| `helm template` | `oabctl template -f` (render-only, no apply) | new — needed for GitOps/CI dry-run |
-| `helm rollback` | `oabctl rollback <name> --to-generation N` | new — generation data already recorded |
-| `helm history` | `oabctl history <name>` | new — list generations |
-| `helm ... --set k=v` | `oabctl apply --set k=v` (patch-then-reapply on the stored manifest) | new — see below |
+| `helm install` / `helm upgrade` | `oabctl apply -f` (declarative create-or-update) | ECS done; add K8s |
+| `helm uninstall` | `oabctl delete` | ECS done; add K8s |
+| `helm template` | `oabctl template` (render-only) | new — needed for GitOps/CI |
+| `helm rollback` | `oabctl rollback` | new |
+| `helm history` | `oabctl history` | new |
+| `helm … --set` | `oabctl apply --set` (patch-then-reapply; secret-field denylist) | new |
 
-`install` and `upgrade` are intentionally the **same** declarative command (like
-`kubectl apply`): create if absent, diff-and-roll if present.
+> Underspecified vs Helm and tracked as follow-ups: `--values` file merging,
+> sub-chart/`dependency` composition (line/telegram/feishu), and `helm test`. These are
+> real operational features and must be addressed in the parity phase, not hand-waved.
 
-`--set` is implemented as a **read-modify-write on the stored manifest** (pull
-canonical manifest → apply patch → bump generation → reconcile), so the source of
-truth stays declarative and `oabctl get -o yaml` always reflects reality. (Caveat:
-in future CRD mode, `--set` must patch the CR object, not an S3 manifest — define the
-semantics per backend before shipping.)
+### Target selection
 
-### Target selection (priority order)
+**Inferred from `spec.runtime`** — no `--target` flag. `Runtime::Ecs` → ECS path,
+`Runtime::Kubernetes` → K8s path. The enum guarantees exactly one.
 
-1. `--target ecs|k8s` flag (explicit, wins) — ship first.
-2. `~/.oabctl/config` default (`target = "k8s"`).
-3. Inference: `platform.k8s` present and no ECS/AWS context → K8s.
+### Generation / state
 
-### Generation / state per backend
-
-- **ECS**: generation in the S3 manifest (existing model).
-- **K8s**: generation + manifest hash in Deployment **annotations**
-  (`oab.dev/generation`, `oab.dev/manifest-hash`); optional companion ConfigMap holds
-  the last-applied manifest for `history` / `rollback`. **K8s mode needs no S3
-  control plane** — that is an ECS implementation detail.
+- **ECS:** generation in the S3 manifest (existing).
+- **K8s:** generation + manifest **hash** in Deployment **annotations**
+  (`oab.dev/generation`, `oab.dev/manifest-hash`); for `history`/`rollback` keep a
+  **redacted** last-applied manifest (never store secret values). K8s mode needs no S3
+  control plane.
 
 ---
 
-## 8. One Manifest, Two Targets (example)
+## 9. Example (same spec, runtime selects target)
 
 ```yaml
-apiVersion: oab.dev/v1
+apiVersion: oab.dev/v2
 kind: OABService
-metadata:
-  name: chaodu
-  namespace: prod
+metadata: { name: chaodu, namespace: prod }
 spec:
-  cpu: 512
-  memory: 1024
   image: ghcr.io/openabdev/openab:latest
-  replicas: 1
-  config:
-    backend: { type: kiro }
-    channels: [{ type: discord }]
+  resources: { cpu: "512", memory: "1024" }
+  configFrom: s3://oab-control-plane/config/prod/chaodu/config.toml
   secrets:
-    - name: KIRO_API_KEY
-      source: secretsmanager
-      arn: arn:aws:secretsmanager:us-east-1:123:secret:kiro
-  platform:
-    ecs:
-      capacityProvider: FARGATE_SPOT
-      networking: { subnets: [subnet-a], securityGroups: [sg-1] }
-    k8s:
-      serviceAccount: oab-agent
-      storageClass: gp3
-      secretBackend: external
+    KIRO_API_KEY: arn:aws:secretsmanager:us-east-1:123:secret:kiro
+  runtime:
+    type: kubernetes
+    serviceAccount: oab-agent
+    storageClass: gp3
+    storageSize: 1Gi
+    secretBackend: external
 ```
 
-```bash
-oabctl apply -f chaodu.yaml --target k8s    # → Deployment + ConfigMap + PVC + Secret
-oabctl apply -f chaodu.yaml --target ecs    # → S3 artifact + ECS service
-```
+Swap `runtime` to `type: ecs` with `networking`/`capacityProvider` to target ECS — same
+everything else.
 
 ---
 
-## 9. Phase Plan
+## 10. Phase Plan
 
-### Phase K0 — Foundation
-- Extract manifest types + `render_config_toml()` into a shared module/crate
-  (`openab-manifest`) used by both backends.
-- Refactor schema to `platform.{ecs,k8s}` + target-aware `validate()` + legacy shim.
-- **No behavior change for existing ECS users.**
-
-### Phase K1 — K8s render & apply (Helm replacement, core)
-- Add `kube` / `k8s-openapi`; implement `Provisioner` trait + `K8sProvisioner`.
-- Generate Deployment + ConfigMap + PVC + Secret/ExternalSecret + ServiceAccount.
-- `oabctl apply/get/delete --target k8s`; add `oabctl template`.
-- Validate against a real cluster with a single Kiro agent.
+### Phase K1 — Implement `Runtime::Kubernetes` (Helm replacement, core)
+- Add `kube`/`k8s-openapi`; introduce `Provisioner` trait; move ECS code behind
+  `EcsProvisioner`.
+- Extend `KubernetesRuntime` (§5). Replace the `apply.rs`/`create.rs` stubs.
+- Generate Deployment + (initContainer config) + PVC + Secret/ExternalSecret + SA.
+- `oabctl apply/get/delete` for K8s; add `oabctl template`. Validate on a real cluster
+  with one Kiro agent. Document the kube RBAC (§7.5) and Secret Injection Contract (§7.3).
 
 ### Phase K2 — Parity with the Helm chart
-- Golden-file tests: diff `oabctl template` vs `helm template` for representative
-  `values.yaml` cases (this is the gating quality bar).
+- **Gating quality bar:** golden-file tests diffing `oabctl template` vs
+  `helm template` for representative cases — including the secret-not-in-ConfigMap
+  guard (§7.1).
 - Cover gateway, adapter sub-charts (line/telegram/feishu), ingress/Service,
-  ExternalSecrets variants, imagePullSecrets, persistence, message-processing modes
-  — everything with a current chart test.
+  imagePullSecrets, persistence, message-processing modes, `--values` merging.
 
 ### Phase K3 — Migration & Helm deprecation
-- `oabctl migrate --from-helm <release>` → emit `oab.dev/v1` manifest from chart values.
-- Add `oabctl rollback` / `history`.
-- Run both in parallel one release; mark charts deprecated once parity tests are green.
+- `oabctl migrate --from-helm <release>` → emit `oab.dev/v2` manifest.
+- `oabctl rollback` / `history`. Run both in parallel one release; deprecate charts once
+  parity tests are green.
 
 ### Phase K4 — CRD + in-cluster operator (optional, ECS ADR Phase 3)
-- Ship `OABService` CRD + reconciler for GitOps / self-healing.
-- `oabctl apply` gains a CR-submit / `--server-side` mode. Reuses K0 rendering.
+- `OABService` CRD + reconciler for GitOps/self-healing; reuses K1 rendering.
 
 ---
 
-## 10. Risks
+## 11. CI (close the gate gap)
+
+The operator currently lacks automated K8s gating. Add from K1:
+
+- `operator/**` PRs → `cargo test` + `cargo clippy` + an `oabctl template` smoke test.
+- K2 → an `oabctl template` vs `helm template` **diff job** in CI (not local/manual).
+- Optional policy test: fail if any rendered `ConfigMap` `data` contains
+  `api_key`/`token`-like values (enforces §7.1).
+- Note: a **docs-only ADR PR does not trigger operator CI** — so kube-rs / SSA / RBAC
+  correctness is only exercised once K1 code lands. Plan the CI alongside K1, not after.
+
+---
+
+## 12. Risks
 
 | # | Risk | Mitigation |
 |---|------|------------|
-| R1 | ECS and K8s rendering drift apart | Shared `openab-manifest` crate (K0); both backends call the same `render_config_toml()` |
-| R2 | Helm feature parity is large (~22 KB values, 14 tests) | Golden-file `oabctl template` vs `helm template` diff tests are a **gating** criterion for K2 |
-| R3 | Secret model divergence (ECS native vs ESO) | `platform.k8s.secretBackend: external\|native`; document ESO prerequisite for `external` |
-| R4 | Losing Helm ecosystem (ArgoCD/Flux, `helm diff`, rollback) | `oabctl template` keeps GitOps tools working; add `rollback`/`history` (K3) |
-| R5 | Breaking existing ECS manifests during schema refactor | One-release legacy shim folding top-level ECS fields into `platform.ecs` + deprecation warning |
-| R6 | `--set` semantics differ between manifest-store and future CRD mode | Define per-backend semantics before shipping `--set` |
+| R1 | ECS/K8s render drift | Shared renderers in the `operator` crate; both paths call the same config resolution |
+| R2 | Helm feature-parity surface is large (~22 KB values, 14 tests) | Golden-file `oabctl template` vs `helm template` is a **gating** K2 criterion |
+| R3 | `native` secret backend = plaintext relay | Default `external`; gate `native` behind explicit opt-in; denylist `--set` on secret fields; redacted companion manifest |
+| R4 | ESO assumed but absent → silent failure | Apply-time **preflight** for ESO CRDs/operator; clear error |
+| R5 | Losing Helm ecosystem (rollback/history/`--values`/sub-charts/`helm test`) | `oabctl template` + `rollback`/`history`; track `--values`/sub-chart/`test` parity explicitly in K2 |
+| R6 | Too-thin `Provisioner` trait → later API breakage | Include `status`/`logs` from the start; grow deliberately |
 
 ---
 
-## 11. Alternatives Considered
+## 13. Alternatives Considered
 
-| Alternative | Why not chosen |
-|-------------|----------------|
-| Keep Helm for K8s, `oabctl` for ECS | Two tools, two specs, two mental models; the stated goal is one spec / one tool |
-| `oabctl` shells out to `helm`/`kubectl` | Reintroduces Go-template fragility and a Helm runtime dependency; loses typed validation |
-| CRD + operator first (skip client-render) | Much larger lift (CRD lifecycle, RBAC, controller HA, finalizers); blocks Helm deprecation; not needed for parity |
-| Generate static YAML for `kubectl apply` | No lifecycle (rollback/history/uninstall), no typed validation — a downgrade from Helm |
-
----
-
-## 12. Open Questions
-
-1. **ESO hard dependency?** Should `external` secret backend require ESO, or should
-   `oabctl` optionally write native Secrets when ESO is absent?
-2. **Gateway** — port the chart's gateway resources into `oabctl`, or keep gateway on
-   Helm until K2 completes?
-3. **Shared crate boundary** — does `openab-manifest` also absorb the main binary's
-   config types, or stay operator-local for now?
-4. **CRD timing** — do we ship K4 at all, or is client-render sufficient for the
-   foreseeable roadmap?
+| Alternative | Why not |
+|-------------|---------|
+| Flatten `runtime` enum → `platform.ecs`/`platform.k8s` overlays | The enum already gives mutual exclusivity + target inference; flattening adds risk for no gain |
+| Inline typed `AgentConfig` in the manifest | Couples `oabctl` to the agent config schema; `configFrom` reference is a cleaner boundary (already in `main`) |
+| `secrets: Vec<SecretRef>` with explicit `source` | `HashMap<name, valueFrom>` + ARN-prefix inference is simpler and already in `main` |
+| Keep Helm for K8s, `oabctl` for ECS | Two tools/specs; defeats the one-spec goal |
+| Shell out to `helm`/`kubectl` | Reintroduces Go-template fragility; loses typed validation |
+| CRD + operator first | Larger lift; not needed for parity; blocks Helm deprecation |
 
 ---
 
-## 13. Recommendation
+## 14. Open Questions
 
-Proceed with **Phase K0 + a K1 spike** as the first PR: extract the shared render
-layer, refactor the schema to `platform.{ecs,k8s}` with target-aware validation
-(no ECS behavior change), introduce the `Provisioner` trait, and prototype
-`oabctl apply --target k8s` deploying the minimal Deployment + ConfigMap + PVC +
-Secret for one Kiro agent against a real cluster. This proves "same spec → K8s"
-end-to-end before investing in the parity long tail.
+1. **ESO hard dependency?** Require ESO for `external`, or allow `oabctl` to write native
+   Secrets when ESO is absent (with the §7 safeguards)?
+2. **Config delivery** — initContainer `s3 cp` (ECS parity, needs pod AWS creds) vs
+   `oabctl`-fetched ConfigMap (no pod creds). Pick a default.
+3. **Gateway** — port the chart's gateway resources into `oabctl`, or keep gateway on
+   Helm until K2?
+4. **CRD timing** — ship K4 at all, or is client-render sufficient for the roadmap?
+
+---
+
+## 15. Recommendation
+
+Scope is now **narrow and concrete**: implement the already-stubbed
+`Runtime::Kubernetes` branch. First PR = **Phase K1 spike**: add `kube`/`k8s-openapi`,
+introduce the `Provisioner` trait, extend `KubernetesRuntime`, and replace the
+`apply.rs` stub to deploy the minimal Deployment + (config initContainer) + PVC +
+Secret for one Kiro agent against a real cluster — with the secret-injection contract
+(§7) and operator CI (§11) landed alongside the code, not deferred.
