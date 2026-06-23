@@ -925,6 +925,70 @@ pub async fn load_config_raw_from_url(url: &str) -> anyhow::Result<String> {
     Ok(expand_env_vars(&raw))
 }
 
+/// Parse an `s3://<bucket>/<key>` URI into its bucket and key components.
+///
+/// Kept un-gated (independent of the `config-s3` feature) so URI parsing can be
+/// unit-tested without pulling in the AWS SDK.
+pub fn parse_s3_uri(uri: &str) -> anyhow::Result<(String, String)> {
+    let rest = uri
+        .strip_prefix("s3://")
+        .ok_or_else(|| anyhow::anyhow!("invalid s3:// URI '{uri}' — must start with s3://"))?;
+    let (bucket, key) = rest
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid s3:// URI '{uri}' — expected s3://<bucket>/<key>"))?;
+    if bucket.is_empty() || key.is_empty() {
+        anyhow::bail!("invalid s3:// URI '{uri}' — bucket and key must both be non-empty");
+    }
+    Ok((bucket.to_string(), key.to_string()))
+}
+
+/// Load raw config text from an `s3://<bucket>/<key>` URI
+/// (env vars expanded but secrets NOT resolved).
+///
+/// Credentials/region are resolved via the standard AWS provider chain
+/// (env vars, shared config, IRSA / Pod Identity / instance role), mirroring
+/// how `aws-sm://` secret references are resolved.
+#[cfg(feature = "config-s3")]
+pub async fn load_config_raw_from_s3(uri: &str) -> anyhow::Result<String> {
+    let (bucket, key) = parse_s3_uri(uri)?;
+    let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let client = aws_sdk_s3::Client::new(&sdk_config);
+    let resp = client
+        .get_object()
+        .bucket(&bucket)
+        .key(&key)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to fetch S3 config from {uri}: {e}"))?;
+    let data = resp
+        .body
+        .collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read S3 object body from {uri}: {e}"))?
+        .into_bytes();
+    const MAX_CONFIG_BYTES: usize = 1024 * 1024;
+    if data.len() > MAX_CONFIG_BYTES {
+        anyhow::bail!(
+            "S3 config from {uri} exceeds 1 MiB limit ({} bytes)",
+            data.len()
+        );
+    }
+    let raw = String::from_utf8(data.to_vec())
+        .map_err(|e| anyhow::anyhow!("S3 config from {uri} is not valid UTF-8: {e}"))?;
+    Ok(expand_env_vars(&raw))
+}
+
+/// Fallback when built without the `config-s3` feature: report a clear error
+/// instead of failing to compile callers that dispatch on the `s3://` scheme.
+#[cfg(not(feature = "config-s3"))]
+pub async fn load_config_raw_from_s3(uri: &str) -> anyhow::Result<String> {
+    anyhow::bail!(
+        "config source '{uri}' uses the s3:// scheme, but openab was built without the 'config-s3' feature"
+    )
+}
+
 /// Parse config from already-expanded text.
 pub fn parse_config_str(expanded: &str, source: &str) -> anyhow::Result<Config> {
     parse_config_inner(expanded, source)
@@ -1117,6 +1181,36 @@ command = "echo"
         let result = expand_env_vars("token=${AB_TEST_VAR}");
         assert_eq!(result, "token=hello");
         std::env::remove_var("AB_TEST_VAR");
+    }
+
+    #[test]
+    fn parse_s3_uri_splits_bucket_and_key() {
+        let (bucket, key) = parse_s3_uri("s3://my-bucket/path/to/config.toml").unwrap();
+        assert_eq!(bucket, "my-bucket");
+        assert_eq!(key, "path/to/config.toml");
+    }
+
+    #[test]
+    fn parse_s3_uri_handles_single_segment_key() {
+        let (bucket, key) = parse_s3_uri("s3://bkt/config.toml").unwrap();
+        assert_eq!(bucket, "bkt");
+        assert_eq!(key, "config.toml");
+    }
+
+    #[test]
+    fn parse_s3_uri_rejects_wrong_scheme() {
+        assert!(parse_s3_uri("https://example.com/config.toml").is_err());
+        assert!(parse_s3_uri("config.toml").is_err());
+    }
+
+    #[test]
+    fn parse_s3_uri_rejects_missing_key() {
+        // no '/' after bucket
+        assert!(parse_s3_uri("s3://only-bucket").is_err());
+        // empty key
+        assert!(parse_s3_uri("s3://bucket/").is_err());
+        // empty bucket
+        assert!(parse_s3_uri("s3:///key").is_err());
     }
 
     #[test]

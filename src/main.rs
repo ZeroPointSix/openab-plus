@@ -72,7 +72,7 @@ struct Cli {
 enum Commands {
     /// Run the bot (default)
     Run {
-        /// Config file path or URL (default: config.toml)
+        /// Config file path or URL — local path, https://, http://, or s3://<bucket>/<key> (default: config.toml)
         #[arg(short = 'c', long = "config", value_name = "CONFIG")]
         config: Option<String>,
     },
@@ -182,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
     } else if config_source.starts_with("http://") {
         warn!(url = %config_source, "fetching remote config over plaintext HTTP — use HTTPS in production");
         config::load_config_raw_from_url(&config_source).await?
+    } else if config_source.starts_with("s3://") {
+        info!(uri = %config_source, "fetching config from S3");
+        config::load_config_raw_from_s3(&config_source).await?
     } else {
         config::load_config_raw(&PathBuf::from(&config_source))?
     };
