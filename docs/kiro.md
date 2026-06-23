@@ -79,7 +79,7 @@ That's it — you're all set. No OAuth login required.
 │  │                      │  aws-sm://kiro#API_KEY                │
 │  │  config.toml:        │                                       │
 │  │  env = { KIRO_API_KEY│                                       │
-│  │    = "${secrets...}" }│                                      │
+│  │    = "${secrets...}"}│                                       │
 │  └──────────┬───────────┘                                       │
 │             │ ⑤ inject env                                      │
 │             ▼                                                   │
