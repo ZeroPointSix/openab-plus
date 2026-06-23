@@ -226,33 +226,19 @@ jobs:
 
           DIGESTS=$(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
 
-          if [ "${AGENT}" = "kiro" ]; then
-            # Default (kiro): openab:<version>, openab:beta, openab:<sha>
-            docker buildx imagetools create \
-              -t "${IMAGE}:${VERSION}" \
-              -t "${IMAGE}:${VERSION}-kiro" \
-              -t "${IMAGE}:beta" \
-              -t "${IMAGE}:beta-kiro" \
-              -t "${IMAGE}:${SHORT_SHA}" \
-              ${DIGESTS}
-          else
-            # Per-agent: openab:<version>-<agent>, openab:beta-<agent>
-            docker buildx imagetools create \
-              -t "${IMAGE}:${VERSION}-${AGENT}" \
-              -t "${IMAGE}:beta-${AGENT}" \
-              -t "${IMAGE}:${SHORT_SHA}-${AGENT}" \
-              ${DIGESTS}
-          fi
+          # All agents use the same tag format: <version>-<agent>, beta-<agent>
+          # No bare tags, no "latest", no default agent.
+          docker buildx imagetools create \
+            -t "${IMAGE}:${VERSION}-${AGENT}" \
+            -t "${IMAGE}:beta-${AGENT}" \
+            -t "${IMAGE}:${SHORT_SHA}-${AGENT}" \
+            ${DIGESTS}
 
       - name: Summary
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           VERSION="${{ needs.resolve-tag.outputs.chart_version }}"
           AGENT="${{ matrix.agent }}"
-          if [ "${AGENT}" = "kiro" ]; then
-            echo "### 📦 \`${IMAGE}:${VERSION}\` (default)" >> "$GITHUB_STEP_SUMMARY"
-            echo "### 📦 \`${IMAGE}:beta\`" >> "$GITHUB_STEP_SUMMARY"
-          fi
           echo "### 📦 \`${IMAGE}:${VERSION}-${AGENT}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "### 📦 \`${IMAGE}:beta-${AGENT}\`" >> "$GITHUB_STEP_SUMMARY"
 
@@ -302,45 +288,25 @@ jobs:
           MAJOR_MINOR="${CHART_VERSION%.*}"
           AGENT="${{ matrix.agent }}"
 
-          if [ "${AGENT}" = "kiro" ]; then
-            # Verify the default tag exists
-            echo "Checking ${IMAGE}:${PRERELEASE_VERSION} ..."
-            docker buildx imagetools inspect "${IMAGE}:${PRERELEASE_VERSION}" || \
-              { echo "::error::Image ${IMAGE}:${PRERELEASE_VERSION} not found"; exit 1; }
+          # All agents use the same format — no default, no latest
+          echo "Checking ${IMAGE}:${PRERELEASE_VERSION}-${AGENT} ..."
+          docker buildx imagetools inspect "${IMAGE}:${PRERELEASE_VERSION}-${AGENT}" || \
+            { echo "::error::Image ${IMAGE}:${PRERELEASE_VERSION}-${AGENT} not found"; exit 1; }
 
-            # Promote default (kiro): openab:<stable>, openab:<major.minor>, openab:latest, openab:stable
-            docker buildx imagetools create \
-              -t "${IMAGE}:${CHART_VERSION}" \
-              -t "${IMAGE}:${MAJOR_MINOR}" \
-              -t "${IMAGE}:latest" \
-              -t "${IMAGE}:stable" \
-              -t "${IMAGE}:${CHART_VERSION}-kiro" \
-              -t "${IMAGE}:${MAJOR_MINOR}-kiro" \
-              -t "${IMAGE}:stable-kiro" \
-              "${IMAGE}:${PRERELEASE_VERSION}"
-          else
-            # Verify per-agent tag exists
-            echo "Checking ${IMAGE}:${PRERELEASE_VERSION}-${AGENT} ..."
-            docker buildx imagetools inspect "${IMAGE}:${PRERELEASE_VERSION}-${AGENT}" || \
-              { echo "::error::Image ${IMAGE}:${PRERELEASE_VERSION}-${AGENT} not found"; exit 1; }
-
-            # Promote per-agent: openab:<stable>-<agent>, openab:<major.minor>-<agent>, openab:stable-<agent>
-            docker buildx imagetools create \
-              -t "${IMAGE}:${CHART_VERSION}-${AGENT}" \
-              -t "${IMAGE}:${MAJOR_MINOR}-${AGENT}" \
-              -t "${IMAGE}:stable-${AGENT}" \
-              "${IMAGE}:${PRERELEASE_VERSION}-${AGENT}"
-          fi
+          # Promote: openab:<version>-<agent>, openab:<major.minor>-<agent>, openab:stable-<agent>
+          docker buildx imagetools create \
+            -t "${IMAGE}:${CHART_VERSION}-${AGENT}" \
+            -t "${IMAGE}:${MAJOR_MINOR}-${AGENT}" \
+            -t "${IMAGE}:stable-${AGENT}" \
+            "${IMAGE}:${PRERELEASE_VERSION}-${AGENT}"
 
       - name: Summary
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           CHART_VERSION="${{ needs.resolve-tag.outputs.chart_version }}"
           AGENT="${{ matrix.agent }}"
-          if [ "${AGENT}" = "kiro" ]; then
-            echo "### 📦 Promoted \`${IMAGE}:${CHART_VERSION}\` (stable)" >> "$GITHUB_STEP_SUMMARY"
-          fi
           echo "### 📦 Promoted \`${IMAGE}:${CHART_VERSION}-${AGENT}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 📦 Promoted \`${IMAGE}:stable-${AGENT}\`" >> "$GITHUB_STEP_SUMMARY"
 
   # ── Chart release (runs after either path) ───────────────────
 
