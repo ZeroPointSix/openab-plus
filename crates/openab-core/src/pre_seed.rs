@@ -112,6 +112,7 @@ async fn download_and_extract(
         .get_object()
         .bucket(&bucket)
         .key(&key)
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("S3 GetObject failed for {uri}: {e}"))?;
@@ -121,6 +122,9 @@ async fn download_and_extract(
             anyhow::bail!("hooks.pre_seed: {uri} too large ({len} bytes, max {max_bytes})");
         }
     }
+
+    // Capture S3-native SHA-256 checksum if present (set during upload with --checksum-algorithm SHA256)
+    let s3_checksum_sha256 = resp.checksum_sha256().map(|s| s.to_string());
 
     let body = resp
         .body
@@ -136,17 +140,30 @@ async fn download_and_extract(
         );
     }
 
-    // SHA-256 verification
-    if let Some(expected) = expected_sha {
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let actual = format!("{:x}", hasher.finalize());
-        if actual != expected.to_lowercase() {
+    // SHA-256 verification: check S3-native checksum and/or user-provided sha256s
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual_hex = format!("{:x}", hasher.finalize());
+
+    // 1. Verify against S3 object checksum (auto, if object was uploaded with checksum)
+    if let Some(ref s3_b64) = s3_checksum_sha256 {
+        let s3_hex = base64_sha256_to_hex(s3_b64)?;
+        if actual_hex != s3_hex {
             anyhow::bail!(
-                "hooks.pre_seed: SHA-256 mismatch for {uri}: expected {expected}, got {actual}"
+                "hooks.pre_seed: S3 checksum mismatch for {uri}: expected {s3_hex}, got {actual_hex}"
             );
         }
-        info!(uri, "hooks.pre_seed: SHA-256 verified");
+        info!(uri, "hooks.pre_seed: S3-native SHA-256 verified");
+    }
+
+    // 2. Verify against user-provided sha256s (if configured)
+    if let Some(expected) = expected_sha {
+        if actual_hex != expected.to_lowercase() {
+            anyhow::bail!(
+                "hooks.pre_seed: SHA-256 mismatch for {uri}: expected {expected}, got {actual_hex}"
+            );
+        }
+        info!(uri, "hooks.pre_seed: user SHA-256 verified");
     }
 
     if Instant::now() >= deadline {
@@ -284,6 +301,15 @@ fn move_recursive(src: &Path, dst: &Path, deadline: Instant) -> anyhow::Result<(
         }
     }
     Ok(())
+}
+
+/// Decode a base64-encoded SHA-256 (as returned by S3) to lowercase hex.
+fn base64_sha256_to_hex(b64: &str) -> anyhow::Result<String> {
+    use base64::Engine;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| anyhow::anyhow!("hooks.pre_seed: invalid base64 in S3 checksum: {e}"))?;
+    Ok(hex::encode(decoded))
 }
 
 fn dirs_home() -> std::path::PathBuf {

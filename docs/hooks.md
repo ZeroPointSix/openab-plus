@@ -69,7 +69,9 @@ Layer 1 (first)  ─── base layer
 
 ### Safety
 
-- **Integrity verification**: when `sha256s` is provided, each zip is verified before extraction (matching the security bar of `[hooks.pre_boot]` URL scripts)
+- **Integrity verification**: two layers of protection:
+  1. **S3-native checksum (automatic)**: if the object was uploaded with `--checksum-algorithm SHA256`, OpenAB automatically verifies it on download — no config needed
+  2. **User-provided `sha256s` (optional)**: explicit checksums in config for additional defense-in-depth
 - **Size cap**: downloads exceeding `max_bytes` are rejected before extraction
 - **Atomic extraction**: zips are first extracted to a temp directory, then moved into target — if extraction fails, target is not corrupted. Note: the move phase is per-file; if it fails mid-way with `on_failure = "warn"`, the target may be partially updated.
 - **Zip Slip prevention**: uses `enclosed_name()` to block path traversal attacks
@@ -95,6 +97,22 @@ Layer 1 (first)  ─── base layer
   ]
 }
 ```
+
+### Recommended: Enable S3 Checksums on Upload
+
+For automatic integrity verification without maintaining `sha256s` in config, upload zip archives with SHA-256 checksums enabled:
+
+```bash
+# Upload with SHA-256 checksum (recommended)
+aws s3 cp env.zip s3://my-bucket/env.zip --checksum-algorithm SHA256
+
+# Verify it was stored
+aws s3api head-object --bucket my-bucket --key env.zip --checksum-mode ENABLED
+```
+
+When objects have S3-native SHA-256 checksums, OpenAB verifies them automatically on download — no `sha256s` config needed. This is the simplest path to integrity verification.
+
+> **Note:** If `sha256s` is also provided in config, both checks run. The S3-native check uses the base64-encoded checksum from the `x-amz-checksum-sha256` response header. If neither is available, download proceeds without integrity verification (relies on IAM + bucket policy for trust).
 
 ---
 
