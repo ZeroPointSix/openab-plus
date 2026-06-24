@@ -188,13 +188,30 @@ fn extract_and_apply(data: &[u8], target: &Path, deadline: Instant) -> anyhow::R
 
 /// Extract a zip archive with cooperative deadline checks and extraction budget.
 fn extract_zip_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> anyhow::Result<()> {
+    extract_zip_budgeted(
+        data,
+        dest,
+        deadline,
+        DEFAULT_MAX_FILE_COUNT,
+        DEFAULT_MAX_EXTRACTED_BYTES,
+    )
+}
+
+/// Inner extraction with configurable limits (enables testing with small budgets).
+fn extract_zip_budgeted(
+    data: &[u8],
+    dest: &Path,
+    deadline: Instant,
+    max_file_count: usize,
+    max_extracted_bytes: u64,
+) -> anyhow::Result<()> {
     let cursor = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(cursor)?;
 
     let file_count = archive.len();
-    if file_count > DEFAULT_MAX_FILE_COUNT {
+    if file_count > max_file_count {
         anyhow::bail!(
-            "hooks.pre_seed: zip contains too many entries ({file_count}, max {DEFAULT_MAX_FILE_COUNT})"
+            "hooks.pre_seed: zip contains too many entries ({file_count}, max {max_file_count})"
         );
     }
 
@@ -222,9 +239,9 @@ fn extract_zip_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> anyho
             // Check extracted size budget before writing
             let uncompressed = file.size();
             total_extracted += uncompressed;
-            if total_extracted > DEFAULT_MAX_EXTRACTED_BYTES {
+            if total_extracted > max_extracted_bytes {
                 anyhow::bail!(
-                    "hooks.pre_seed: extracted size exceeds limit ({total_extracted} > {DEFAULT_MAX_EXTRACTED_BYTES})"
+                    "hooks.pre_seed: extracted size exceeds limit ({total_extracted} > {max_extracted_bytes})"
                 );
             }
 
@@ -431,31 +448,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
 
-        // Create a zip with content larger than DEFAULT_MAX_EXTRACTED_BYTES
-        // We'll use a file that claims a large uncompressed size by writing enough data
-        // Instead, test with a smaller limit by temporarily checking the logic:
-        // The limit is 500 MiB which is too large to test directly.
-        // We test the mechanism by creating a zip with known sizes and verifying
-        // the tracking works correctly in the success case (covered by other tests).
-        // For the failure case, we verify the error message format.
-
-        // Create a zip with 2 files, each 300 MiB uncompressed size declared
-        // This is impractical to actually write, so we test via the file count limit instead.
-        // See extract_rejects_exceeding_file_count below.
-        // This test verifies the cumulative tracking doesn't false-positive on normal zips.
+        // Create a zip with 3 files of 10 bytes each (30 bytes total extracted)
         let buf = Vec::new();
         let cursor = std::io::Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
         let options = zip::write::SimpleFileOptions::default();
-        for i in 0..100 {
+        for i in 0..3 {
             writer.start_file(format!("file_{i}.txt"), options).unwrap();
-            writer.write_all(b"small content").unwrap();
+            writer.write_all(&[b'x'; 10]).unwrap();
         }
         let cursor = writer.finish().unwrap();
 
-        // Should succeed — well within limits
-        let result = extract_zip_with_limits(cursor.get_ref(), dir.path(), deadline);
-        assert!(result.is_ok());
+        // Set max extracted bytes to 20 — fails on 3rd file (cumulative 30 > 20)
+        let result = extract_zip_budgeted(cursor.get_ref(), dir.path(), deadline, 10_000, 20);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("extracted size exceeds limit"),
+            "should fail on extracted bytes limit"
+        );
     }
 
     #[test]
@@ -464,18 +477,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
 
-        // Create a zip with more than DEFAULT_MAX_FILE_COUNT entries
+        // Create a zip with 5 files
         let buf = Vec::new();
         let cursor = std::io::Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
         let options = zip::write::SimpleFileOptions::default();
-        for i in 0..DEFAULT_MAX_FILE_COUNT + 1 {
+        for i in 0..5 {
             writer.start_file(format!("f_{i}.txt"), options).unwrap();
             writer.write_all(b"x").unwrap();
         }
         let cursor = writer.finish().unwrap();
 
-        let result = extract_zip_with_limits(cursor.get_ref(), dir.path(), deadline);
+        // Set max file count to 3 — should fail (5 > 3)
+        let result = extract_zip_budgeted(cursor.get_ref(), dir.path(), deadline, 3, u64::MAX);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("too many entries"),
