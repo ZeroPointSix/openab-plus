@@ -71,7 +71,7 @@ Layer 1 (first)  ─── base layer
 
 - **Integrity verification**: when `sha256s` is provided, each zip is verified before extraction (matching the security bar of `[hooks.pre_boot]` URL scripts)
 - **Size cap**: downloads exceeding `max_bytes` are rejected before extraction
-- **Atomic extraction**: zips are first extracted to a temp directory, then moved into target — partial failures don't corrupt the environment
+- **Atomic extraction**: zips are first extracted to a temp directory, then moved into target — if extraction fails, target is not corrupted. Note: the move phase is per-file; if it fails mid-way with `on_failure = "warn"`, the target may be partially updated.
 - **Zip Slip prevention**: uses `enclosed_name()` to block path traversal attacks
 
 ### Constraints
