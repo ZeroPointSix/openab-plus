@@ -21,7 +21,7 @@ helm install openab openab/openab \
   --set agents.gemini.command=gemini \
   --set agents.gemini.args='{--acp}' \
   --set agents.gemini.workingDir=/home/node \
-  --set agents.gemini.image.tag=beta-gemini
+  --set image.tag=beta
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
@@ -30,16 +30,22 @@ helm install openab openab/openab \
 
 ### Image Tag
 
-Use `--set agents.gemini.image.tag=<version>-gemini` to pin the image version.
-The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+Use `--set image.tag=<version>` to set the image version globally.
+The chart auto-appends `-<agent>` to produce the final tag (see [image-tags.md](image-tags.md) for full details).
 
-| Example | Description |
-|---------|-------------|
-| `beta-gemini` | Floating beta channel (latest pre-release) |
-| `0.9.0-beta.2-gemini` | Pinned to exact version |
-| `stable-gemini` | Floating stable channel |
+| Tag | Resolves to | Description |
+|-----|-------------|-------------|
+| `beta` | `beta-gemini` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2` | `0.9.0-beta.2-gemini` | Pinned to exact version |
+| `0.9` | `0.9-gemini` | Latest patch in minor (floating) |
+| `stable` | `stable-gemini` | Floating stable channel |
 
-> ⚠️ There is no `latest` tag — you must include the `-gemini` agent suffix.
+To override a single agent's image instead of the global tag:
+```bash
+--set agents.gemini.image=ghcr.io/openabdev/openab:beta-gemini
+```
+
+> ⚠️ There is no `latest` tag. Use `beta` or `stable`, or pin to an exact version.
 
 ## Manual config.toml
 

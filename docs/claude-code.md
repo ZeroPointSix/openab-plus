@@ -19,23 +19,29 @@ helm install openab openab/openab \
   --set-string 'agents.claude.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
   --set agents.claude.command=claude-agent-acp \
   --set agents.claude.workingDir=/home/node \
-  --set agents.claude.image.tag=beta-claude
+  --set image.tag=beta
 ```
 
 > Set `agents.kiro.enabled=false` to disable the default Kiro agent.
 
 ### Image Tag
 
-Use `--set agents.claude.image.tag=<version>-claude` to pin the image version.
-The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+Use `--set image.tag=<version>` to set the image version globally.
+The chart auto-appends `-<agent>` to produce the final tag (see [image-tags.md](image-tags.md) for full details).
 
-| Example | Description |
-|---------|-------------|
-| `beta-claude` | Floating beta channel (latest pre-release) |
-| `0.9.0-beta.2-claude` | Pinned to exact version |
-| `stable-claude` | Floating stable channel |
+| Tag | Resolves to | Description |
+|-----|-------------|-------------|
+| `beta` | `beta-claude` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2` | `0.9.0-beta.2-claude` | Pinned to exact version |
+| `0.9` | `0.9-claude` | Latest patch in minor (floating) |
+| `stable` | `stable-claude` | Floating stable channel |
 
-> ⚠️ There is no `latest` tag — you must include the `-claude` agent suffix.
+To override a single agent's image instead of the global tag:
+```bash
+--set agents.claude.image=ghcr.io/openabdev/openab:beta-claude
+```
+
+> ⚠️ There is no `latest` tag. Use `beta` or `stable`, or pin to an exact version.
 
 ## Manual config.toml
 

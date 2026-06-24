@@ -67,21 +67,27 @@ helm install openab openab/openab \
   --set 'agents.cursor.args={acp}' \
   --set agents.cursor.persistence.enabled=true \
   --set agents.cursor.workingDir=/home/agent \
-  --set agents.cursor.image.tag=beta-cursor
+  --set image.tag=beta
 ```
 
 ### Image Tag
 
-Use `--set agents.cursor.image.tag=<version>-cursor` to pin the image version.
-The tag format is `<version>-<agent>` (see [image-tags.md](image-tags.md) for full details).
+Use `--set image.tag=<version>` to set the image version globally.
+The chart auto-appends `-<agent>` to produce the final tag (see [image-tags.md](image-tags.md) for full details).
 
-| Example | Description |
-|---------|-------------|
-| `beta-cursor` | Floating beta channel (latest pre-release) |
-| `0.9.0-beta.2-cursor` | Pinned to exact version |
-| `stable-cursor` | Floating stable channel |
+| Tag | Resolves to | Description |
+|-----|-------------|-------------|
+| `beta` | `beta-cursor` | Floating beta channel (latest pre-release) |
+| `0.9.0-beta.2` | `0.9.0-beta.2-cursor` | Pinned to exact version |
+| `0.9` | `0.9-cursor` | Latest patch in minor (floating) |
+| `stable` | `stable-cursor` | Floating stable channel |
 
-> ⚠️ There is no `latest` tag — you must include the `-cursor` agent suffix.
+To override a single agent's image instead of the global tag:
+```bash
+--set agents.cursor.image=ghcr.io/openabdev/openab:beta-cursor
+```
+
+> ⚠️ There is no `latest` tag. Use `beta` or `stable`, or pin to an exact version.
 
 ## Model Selection
 
