@@ -50,7 +50,7 @@ http = { version = "1", optional = true }
 libc = "0.2"
 
 [features]
-default = ["discord", "slack", "secrets-aws", "agentcore", "config-s3", "pre-seed"]
+default = ["discord", "slack", "secrets-aws", "agentcore", "config-s3"]
 discord = ["dep:serenity"]
 slack = []
 secrets-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]

@@ -1,36 +1,59 @@
 # Lifecycle Hooks
 
-OpenAB supports lifecycle hooks that run custom scripts at specific points during the container lifecycle. Hooks are configured in `config.toml` under the `[hooks]` table.
+OpenAB supports lifecycle hooks that run at specific points during the container lifecycle. All lifecycle phases are configured in `config.toml` under the `[hooks]` table.
 
 ## Lifecycle Order
 
 ```
-pre_seed → pre_boot → (agent running) → pre_shutdown
+hooks.pre_seed → hooks.pre_boot → (agent running) → hooks.pre_shutdown
 ```
 
-| Phase | Purpose | Config |
-|-------|---------|--------|
-| `pre_seed` | Download & extract S3 zip archives to seed the environment | `[pre_seed]` |
-| `pre_boot` | Run custom setup scripts before agent pool creation | `[hooks.pre_boot]` |
-| `pre_shutdown` | Run custom cleanup scripts after pool shutdown | `[hooks.pre_shutdown]` |
+| Phase | Purpose | Config | Action Type |
+|-------|---------|--------|-------------|
+| `pre_seed` | Download & extract S3 zip archives to seed the environment | `[hooks.pre_seed]` | Built-in S3 download + unzip |
+| `pre_boot` | Run custom setup scripts before agent pool creation | `[hooks.pre_boot]` | User script |
+| `pre_shutdown` | Run custom cleanup scripts after pool shutdown | `[hooks.pre_shutdown]` | User script |
 
 ## Pre-Seed Phase
 
-The `pre_seed` phase runs **before** any hook. It downloads zip archives from S3 and extracts them into the agent's home directory (or a custom target). This eliminates the need for users to install AWS CLI and write download scripts in `pre_boot`.
+The `pre_seed` phase runs **before** `pre_boot`. It downloads zip archives from S3 and extracts them into the agent's home directory (or a custom target). This eliminates the need for users to install AWS CLI and write download scripts in `pre_boot`.
+
+> **Feature flag:** requires the `pre-seed` feature (opt-in, not in default).
 
 ### Configuration
 
 ```toml
-[pre_seed]
+[hooks.pre_seed]
 sources = [
   "s3://my-bucket/base-env.zip",
   "s3://my-bucket/shared-memory.zip",
   "s3://my-bucket/agent-overrides.zip",
 ]
-# target = "/home/agent"    # default: $HOME
-# timeout_seconds = 300     # per-source timeout (default: 300)
-# on_failure = "abort"      # "abort" or "warn" (default: "abort")
+sha256s = [
+  "a1b2c3d4e5f6...",
+  "789abcdef012...",
+  "345678901234...",
+]
+# target = "/home/agent"                  # default: $HOME
+# max_bytes = 104857600                   # max compressed size per zip (default: 100 MiB)
+# timeout_seconds = 300                   # per-source timeout (default: 300)
+# on_failure = "abort"                    # "abort" or "warn" (default: "abort")
+# region = "us-west-2"                    # optional: override AWS region
+# endpoint_url = "http://localhost:4566"  # optional: LocalStack / VPC endpoint
 ```
+
+### Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sources` | string[] | `[]` | S3 URIs of zip archives. Max 5. Extracted in order. |
+| `sha256s` | string[] | `[]` | SHA-256 checksums per source (same order). If provided, must match sources length. |
+| `target` | string | `$HOME` | Extraction target directory. |
+| `max_bytes` | u64 | `104857600` | Max compressed zip size in bytes (100 MiB). |
+| `timeout_seconds` | u64 | `300` | Per-source download+extract timeout. |
+| `on_failure` | string | `"abort"` | `"abort"` exits openab; `"warn"` logs and continues. |
+| `region` | string | — | Override AWS region. |
+| `endpoint_url` | string | — | Override S3 endpoint URL. |
 
 ### Layer Concept
 
@@ -44,12 +67,20 @@ Layer 1 (first)  ─── base layer
      $HOME
 ```
 
+### Safety
+
+- **Integrity verification**: when `sha256s` is provided, each zip is verified before extraction (matching the security bar of `[hooks.pre_boot]` URL scripts)
+- **Size cap**: downloads exceeding `max_bytes` are rejected before extraction
+- **Atomic extraction**: zips are first extracted to a temp directory, then moved into target — partial failures don't corrupt the environment
+- **Zip Slip prevention**: uses `enclosed_name()` to block path traversal attacks
+
 ### Constraints
 
 - Maximum **5** sources
 - Only `s3://` URIs supported
 - Only `.zip` format supported
 - Uses the standard AWS credential chain (IRSA, ECS task role, env vars)
+- Optional `region`/`endpoint_url` override for LocalStack or VPC endpoints
 
 ### IAM Policy
 
