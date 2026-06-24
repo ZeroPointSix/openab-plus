@@ -2,6 +2,7 @@ name: Docker Smoke Test (Unified)
 
 on:
   pull_request:
+    types: [opened, synchronize, ready_for_review]
     paths:
       - 'Dockerfile.unified'
       - 'src/**'
@@ -10,9 +11,14 @@ on:
       - 'openab-agent/**'
       - 'agy-acp/**'
 
+concurrency:
+  group: smoke-test-unified-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   # Build the shared builder stage once, then test agent targets using cache
   build-builder:
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
