@@ -254,11 +254,6 @@ error_hold_ms = 2500
 #   "s3://my-bucket/shared-memory.zip",       # Layer 2: shared team memory
 #   "s3://my-bucket/agent-specific.zip",      # Layer 3: agent-specific overrides
 # ]
-# sha256s = [                                 # optional: integrity verification per source
-#   "a1b2c3...",
-#   "d4e5f6...",
-#   "789abc...",
-# ]
 # target = "/home/agent"                      # extraction target (default: $HOME)
 # max_bytes = 104857600                       # max compressed zip size (default: 100 MiB)
 # timeout_seconds = 300                       # per-source timeout (default: 300)

@@ -250,7 +250,6 @@ Downloads and extracts zip archives from S3 before `pre_boot`. Seeds the agent e
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `sources` | string[] | `[]` | S3 URIs of zip archives (`s3://bucket/key.zip`). Max 5. Extracted in order; later layers overwrite earlier ones. |
-| `sha256s` | string[] | `[]` | SHA-256 checksums per source (same order). If provided, must match sources length. |
 | `target` | string | `$HOME` | Extraction target directory. |
 | `max_bytes` | u64 | `104857600` | Max compressed zip size in bytes (100 MiB). Rejects downloads exceeding this. |
 | `timeout_seconds` | u64 | `300` | Per-source download+extract timeout in seconds. |
@@ -261,17 +260,14 @@ Downloads and extracts zip archives from S3 before `pre_boot`. Seeds the agent e
 **Credential resolution** uses the standard AWS provider chain (same as `config-s3` and `secrets-aws`):
 environment variables, shared credentials, IRSA / EKS Pod Identity, ECS task role.
 
+**Integrity verification:** If S3 objects are uploaded with `--checksum-algorithm SHA256`, OpenAB automatically verifies the checksum on download. No config needed — see [hooks.md](hooks.md) for details.
+
 ```toml
 [hooks.pre_seed]
 sources = [
   "s3://my-bucket/base-env.zip",
   "s3://my-bucket/shared-memory.zip",
   "s3://my-bucket/agent-overrides.zip",
-]
-sha256s = [
-  "a1b2c3d4...",
-  "e5f67890...",
-  "abcdef12...",
 ]
 timeout_seconds = 300
 on_failure = "abort"

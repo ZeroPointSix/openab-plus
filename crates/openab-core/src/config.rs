@@ -211,10 +211,6 @@ pub struct PreSeedConfig {
     /// Extracted in order; later layers overwrite earlier ones.
     #[serde(default)]
     pub sources: Vec<String>,
-    /// Optional SHA-256 checksums for each source (same order as sources).
-    /// If provided, each zip is verified before extraction.
-    #[serde(default)]
-    pub sha256s: Vec<String>,
     /// Extraction target directory. Default: $HOME.
     pub target: Option<String>,
     /// Override AWS region for S3 access.
@@ -236,7 +232,6 @@ impl Default for PreSeedConfig {
     fn default() -> Self {
         Self {
             sources: Vec::new(),
-            sha256s: Vec::new(),
             target: None,
             region: None,
             endpoint_url: None,

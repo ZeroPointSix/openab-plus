@@ -25,13 +25,6 @@ pub async fn run(cfg: &PreSeedConfig) -> anyhow::Result<()> {
             MAX_SOURCES
         );
     }
-    if !cfg.sha256s.is_empty() && cfg.sha256s.len() != cfg.sources.len() {
-        anyhow::bail!(
-            "hooks.pre_seed: sha256s length ({}) must match sources length ({})",
-            cfg.sha256s.len(),
-            cfg.sources.len()
-        );
-    }
 
     let target = match &cfg.target {
         Some(t) => std::path::PathBuf::from(t),
@@ -56,7 +49,6 @@ pub async fn run(cfg: &PreSeedConfig) -> anyhow::Result<()> {
 
     for (i, source) in cfg.sources.iter().enumerate() {
         let layer = i + 1;
-        let expected_sha = cfg.sha256s.get(i).map(|s| s.as_str());
         info!(
             layer,
             source = source.as_str(),
@@ -65,8 +57,7 @@ pub async fn run(cfg: &PreSeedConfig) -> anyhow::Result<()> {
 
         let deadline = Instant::now() + std::time::Duration::from_secs(cfg.timeout_seconds);
 
-        let result =
-            download_and_extract(&s3, source, &target, expected_sha, cfg.max_bytes, deadline).await;
+        let result = download_and_extract(&s3, source, &target, cfg.max_bytes, deadline).await;
 
         let outcome = match result {
             Ok(()) => {
@@ -97,7 +88,6 @@ async fn download_and_extract(
     s3: &aws_sdk_s3::Client,
     uri: &str,
     target: &Path,
-    expected_sha: Option<&str>,
     max_bytes: u64,
     deadline: Instant,
 ) -> anyhow::Result<()> {
@@ -140,13 +130,11 @@ async fn download_and_extract(
         );
     }
 
-    // SHA-256 verification: check S3-native checksum and/or user-provided sha256s
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let actual_hex = format!("{:x}", hasher.finalize());
-
-    // 1. Verify against S3 object checksum (auto, if object was uploaded with checksum)
+    // SHA-256 verification: auto-verify S3-native checksum if present
     if let Some(ref s3_b64) = s3_checksum_sha256 {
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual_hex = format!("{:x}", hasher.finalize());
         let s3_hex = base64_sha256_to_hex(s3_b64)?;
         if actual_hex != s3_hex {
             anyhow::bail!(
@@ -154,16 +142,6 @@ async fn download_and_extract(
             );
         }
         info!(uri, "hooks.pre_seed: S3-native SHA-256 verified");
-    }
-
-    // 2. Verify against user-provided sha256s (if configured)
-    if let Some(expected) = expected_sha {
-        if actual_hex != expected.to_lowercase() {
-            anyhow::bail!(
-                "hooks.pre_seed: SHA-256 mismatch for {uri}: expected {expected}, got {actual_hex}"
-            );
-        }
-        info!(uri, "hooks.pre_seed: user SHA-256 verified");
     }
 
     if Instant::now() >= deadline {
@@ -432,16 +410,6 @@ mod tests {
     async fn run_too_many_sources() {
         let cfg = PreSeedConfig {
             sources: vec!["s3://b/k.zip".into(); 6],
-            ..Default::default()
-        };
-        assert!(run(&cfg).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn run_sha256s_length_mismatch() {
-        let cfg = PreSeedConfig {
-            sources: vec!["s3://b/k.zip".into()],
-            sha256s: vec!["abc".into(), "def".into()],
             ..Default::default()
         };
         assert!(run(&cfg).await.is_err());

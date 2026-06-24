@@ -29,11 +29,6 @@ sources = [
   "s3://my-bucket/shared-memory.zip",
   "s3://my-bucket/agent-overrides.zip",
 ]
-sha256s = [
-  "a1b2c3d4e5f6...",
-  "789abcdef012...",
-  "345678901234...",
-]
 # target = "/home/agent"                  # default: $HOME
 # max_bytes = 104857600                   # max compressed size per zip (default: 100 MiB)
 # timeout_seconds = 300                   # per-source timeout (default: 300)
@@ -47,7 +42,6 @@ sha256s = [
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `sources` | string[] | `[]` | S3 URIs of zip archives. Max 5. Extracted in order. |
-| `sha256s` | string[] | `[]` | SHA-256 checksums per source (same order). If provided, must match sources length. |
 | `target` | string | `$HOME` | Extraction target directory. |
 | `max_bytes` | u64 | `104857600` | Max compressed zip size in bytes (100 MiB). |
 | `timeout_seconds` | u64 | `300` | Per-source download+extract timeout. |
