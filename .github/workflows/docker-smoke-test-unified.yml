@@ -36,6 +36,7 @@ jobs:
           cache-to: type=gha,scope=unified-smoke-builder,mode=max
 
   smoke-test-unified:
+    if: github.event.pull_request.draft == false
     needs: build-builder
     strategy:
       fail-fast: false
