@@ -237,6 +237,35 @@ Session pool settings for managing concurrent agent sessions.
 
 ---
 
+## `[pre_seed]`
+
+Downloads and extracts zip archives from S3 before `pre_boot`. Seeds the agent environment with configs, tools, and shared memory without requiring AWS CLI in the image. See [hooks.md](hooks.md) for full lifecycle documentation.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `sources` | string[] | `[]` | S3 URIs of zip archives (`s3://bucket/key.zip`). Max 5. Extracted in order; later layers overwrite earlier ones. |
+| `target` | string | `$HOME` | Extraction target directory. |
+| `timeout_seconds` | u64 | `300` | Per-source download+extract timeout in seconds. |
+| `on_failure` | string | `"abort"` | `"abort"` exits openab; `"warn"` logs and continues. |
+
+**Credential resolution** uses the standard AWS provider chain (same as `config-s3` and `secrets-aws`):
+environment variables, shared credentials, IRSA / EKS Pod Identity, ECS task role.
+
+```toml
+[pre_seed]
+sources = [
+  "s3://my-bucket/base-env.zip",
+  "s3://my-bucket/shared-memory.zip",
+  "s3://my-bucket/agent-overrides.zip",
+]
+timeout_seconds = 300
+on_failure = "abort"
+```
+
+> **Feature flag:** requires the `pre-seed` feature (enabled by default).
+
+---
+
 ## `[hooks]`
 
 Lifecycle hooks that run custom scripts at specific points during the container lifecycle. See [hooks.md](hooks.md) for full documentation and examples.

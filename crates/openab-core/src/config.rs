@@ -145,6 +145,8 @@ pub struct Config {
     #[serde(default)]
     pub hooks: HooksConfig,
     #[serde(default)]
+    pub pre_seed: PreSeedConfig,
+    #[serde(default)]
     pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub secrets: SecretsConfig,
@@ -200,6 +202,28 @@ fn default_exec_timeout() -> u64 {
 pub struct HooksConfig {
     pub pre_boot: Option<HookConfig>,
     pub pre_shutdown: Option<HookConfig>,
+}
+
+/// Configuration for the pre_seed phase.
+/// Downloads and extracts zip archives from S3 before pre_boot.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PreSeedConfig {
+    /// S3 URIs of zip archives to download and extract (max 5).
+    /// Extracted in order; later layers overwrite earlier ones.
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Extraction target directory. Default: $HOME.
+    pub target: Option<String>,
+    /// Timeout in seconds for each download+extract operation. Default: 300.
+    #[serde(default = "default_pre_seed_timeout")]
+    pub timeout_seconds: u64,
+    /// Failure policy. Default: abort.
+    #[serde(default)]
+    pub on_failure: OnFailure,
+}
+
+fn default_pre_seed_timeout() -> u64 {
+    300
 }
 
 /// Failure policy for a hook.

@@ -2,6 +2,71 @@
 
 OpenAB supports lifecycle hooks that run custom scripts at specific points during the container lifecycle. Hooks are configured in `config.toml` under the `[hooks]` table.
 
+## Lifecycle Order
+
+```
+pre_seed → pre_boot → (agent running) → pre_shutdown
+```
+
+| Phase | Purpose | Config |
+|-------|---------|--------|
+| `pre_seed` | Download & extract S3 zip archives to seed the environment | `[pre_seed]` |
+| `pre_boot` | Run custom setup scripts before agent pool creation | `[hooks.pre_boot]` |
+| `pre_shutdown` | Run custom cleanup scripts after pool shutdown | `[hooks.pre_shutdown]` |
+
+## Pre-Seed Phase
+
+The `pre_seed` phase runs **before** any hook. It downloads zip archives from S3 and extracts them into the agent's home directory (or a custom target). This eliminates the need for users to install AWS CLI and write download scripts in `pre_boot`.
+
+### Configuration
+
+```toml
+[pre_seed]
+sources = [
+  "s3://my-bucket/base-env.zip",
+  "s3://my-bucket/shared-memory.zip",
+  "s3://my-bucket/agent-overrides.zip",
+]
+# target = "/home/agent"    # default: $HOME
+# timeout_seconds = 300     # per-source timeout (default: 300)
+# on_failure = "abort"      # "abort" or "warn" (default: "abort")
+```
+
+### Layer Concept
+
+Sources are extracted sequentially (first → last). Files from later archives overwrite earlier ones — like layers in a container image:
+
+```
+Layer 3 (last)   ─── highest priority, overwrites all below
+Layer 2          ─── overwrites layer 1
+Layer 1 (first)  ─── base layer
+─────────────────
+     $HOME
+```
+
+### Constraints
+
+- Maximum **5** sources
+- Only `s3://` URIs supported
+- Only `.zip` format supported
+- Uses the standard AWS credential chain (IRSA, ECS task role, env vars)
+
+### IAM Policy
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["s3:GetObject"],
+  "Resource": [
+    "arn:aws:s3:::my-bucket/base-env.zip",
+    "arn:aws:s3:::my-bucket/shared-memory.zip",
+    "arn:aws:s3:::my-bucket/agent-overrides.zip"
+  ]
+}
+```
+
+---
+
 ## Available Hooks
 
 | Hook | Timing | Use Case |

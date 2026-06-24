@@ -194,6 +194,12 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // --- pre_seed: download & extract S3 zips before pre_boot ---
+    #[cfg(feature = "pre-seed")]
+    if !cfg.pre_seed.sources.is_empty() {
+        openab_core::pre_seed::run(&cfg.pre_seed).await?;
+    }
+
     // Validate and run pre_boot hook (before agent pool creation)
     if let Some(ref hook) = cfg.hooks.pre_boot {
         hooks::validate_hook("pre_boot", hook)?;
