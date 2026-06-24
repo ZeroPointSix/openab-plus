@@ -161,8 +161,8 @@ async fn download_and_extract(
 
     // Extract and move in a blocking task with cooperative deadline checking.
     let target = target.to_path_buf();
-    let data = bytes.to_vec(); // need owned data for 'static Send
-    tokio::task::spawn_blocking(move || extract_and_apply(&data, &target, deadline))
+    // Bytes is Arc-backed, Clone is zero-copy (ref-count bump only)
+    tokio::task::spawn_blocking(move || extract_and_apply(&bytes, &target, deadline))
         .await
         .map_err(|e| anyhow::anyhow!("hooks.pre_seed: extract task panicked: {e}"))??;
 
