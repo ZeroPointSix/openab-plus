@@ -254,6 +254,149 @@ if [ -f "$HOME/.kiro/auth.json" ]; then
 fi
 ```
 
+## Real-World Example: S3 restore + backup round-trip
+
+A common pattern: bots run on stateless compute (ECS Fargate Spot, Kubernetes with `emptyDir`) where the home directory is wiped on every restart. To survive restarts, each bot:
+
+1. **Restores** its home directory from S3 on boot via `pre_seed`
+2. **Backs up** its home directory to S3 on shutdown via `pre_shutdown`
+
+The backup key written on shutdown is exactly the key restored on the next boot — a closed loop that gives persistent state without a PVC.
+
+```
+                     pre_seed (boot)
+   ┌──────────────────────────────────────────────┐
+   │   s3://$STATE_BUCKET/$OPENAB_AGENT_NAME-home.tar.gz
+   ▼                                                │
+ $HOME  ◄── extract ◄── download                    │  upload ──► tar $HOME
+   │                                                ▲
+   └──────────────────────────────────────────────┘
+                  pre_shutdown (shutdown)
+```
+
+### 1. Restore on boot (`pre_seed`)
+
+```toml
+[hooks.pre_seed]
+sources = [
+  "s3://${STATE_BUCKET}/${OPENAB_AGENT_NAME}-home.tar.gz",   # layer 1: this agent's saved home
+  "s3://${STATE_BUCKET}/shared/default.tar.gz",              # layer 2: shared defaults / steering
+]
+timeout_seconds = 120
+on_failure = "abort"
+max_bytes = 629145600   # 600 MiB per archive
+```
+
+> **Syntax matters.** In `pre_seed.sources`, use **`${VAR}`** (with braces). OpenAB expands these from its **own process environment at config-load time** — they are *not* shell variables and are *not* expanded at download time. Sources are extracted first → last, so `shared/default.tar.gz` (layer 2) overwrites any same-path files from layer 1. Order them so the layer you want to win comes last.
+
+`${STATE_BUCKET}` and `${OPENAB_AGENT_NAME}` must be present in the OpenAB container's environment — you supply them at deployment time (see step 3).
+
+### 2. Backup on shutdown (`pre_shutdown`)
+
+This inlines a [reference `pre-shutdown.sh`](https://gist.github.com/chaodu-agent/ffc614ce670e79761c6c3c98d5472737) — it tars `$HOME` (skipping caches and toolchains that bloat the archive) and uploads it to the exact key `pre_seed` restores from:
+
+```toml
+[hooks.pre_shutdown]
+timeout_seconds = 120
+on_failure = "warn"
+inline = '''
+#!/bin/sh
+# Tar up $HOME and sync to S3 (preserves permissions, symlinks)
+# Env vars: OPENAB_AGENT_NAME, STATE_BUCKET
+export PATH="$HOME/bin:$PATH"
+
+tar czf /tmp/home.tar.gz -C "$HOME" \
+  --exclude="./.cache" \
+  --exclude="./.npm" \
+  --exclude="./node_modules" \
+  --exclude="./.rustup" \
+  --exclude="./.cargo" \
+  --exclude="./.local/share/uv" \
+  --exclude="./aws-cli" \
+  --exclude="./.local/aws-cli" \
+  . 2>/dev/null
+
+aws s3 cp /tmp/home.tar.gz "s3://$STATE_BUCKET/$OPENAB_AGENT_NAME-home.tar.gz" --quiet || true
+rm -f /tmp/home.tar.gz
+'''
+```
+
+> **Syntax matters (the other way).** Inside `inline` scripts use **`$VAR`** (no braces). The shell resolves them at runtime when the script runs. If you wrote `${VAR}` here, OpenAB's config loader would expand it at load time instead of leaving it for the shell. The exclude list keeps the archive small enough to stay under `max_bytes`.
+
+> `on_failure = "warn"` is deliberate: a failed backup should log and let the container exit cleanly rather than block shutdown. The matching `pre_seed` uses `"abort"` so a missing/corrupt restore fails loudly at boot.
+
+### 3. Supply `STATE_BUCKET` and `OPENAB_AGENT_NAME` at deployment
+
+These are plain environment variables — pass them however your platform injects env.
+
+**Helm (`--set`):**
+
+```bash
+helm install openab openab/openab \
+  --set agents.kiro.discord.botToken="$DISCORD_BOT_TOKEN" \
+  --set-string 'agents.kiro.discord.allowedChannels[0]=YOUR_CHANNEL_ID' \
+  --set agents.kiro.env.STATE_BUCKET="my-openab-state" \
+  --set agents.kiro.env.OPENAB_AGENT_NAME="bot1"
+```
+
+**Helm (`values.yaml`):**
+
+```yaml
+agents:
+  kiro:
+    env:
+      STATE_BUCKET: my-openab-state
+      OPENAB_AGENT_NAME: bot1
+```
+
+**ECS task definition (`environment`):**
+
+```json
+{
+  "containerDefinitions": [
+    {
+      "name": "openab",
+      "image": "ghcr.io/openabdev/openab:latest",
+      "environment": [
+        { "name": "STATE_BUCKET", "value": "my-openab-state" },
+        { "name": "OPENAB_AGENT_NAME", "value": "bot1" }
+      ]
+    }
+  ]
+}
+```
+
+Run a second bot by deploying another release/task with a different `OPENAB_AGENT_NAME` (e.g. `bot2`, `bot3`) — each gets its own `<name>-home.tar.gz` key while sharing the same `shared/default.tar.gz` base layer and `STATE_BUCKET`.
+
+### 4. IAM policy
+
+The container's role (IRSA on EKS, task role on ECS) needs read for restore and write for backup:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PreSeedRestore",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": [
+        "arn:aws:s3:::my-openab-state/bot1-home.tar.gz",
+        "arn:aws:s3:::my-openab-state/shared/default.tar.gz"
+      ]
+    },
+    {
+      "Sid": "PreShutdownBackup",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": "arn:aws:s3:::my-openab-state/bot1-home.tar.gz"
+    }
+  ]
+}
+```
+
+---
+
 ## Platform Comparison
 
 | Option | Best for | Requires redeploy? | Network at boot? |
