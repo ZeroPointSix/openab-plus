@@ -366,6 +366,33 @@ agents:
 }
 ```
 
+**[ecsctl](https://github.com/oablab/ecsctl) manifest** (`ecsctl export <service>` renders the live service as YAML):
+
+```yaml
+apiVersion: ecsctl/v1
+kind: Service
+metadata:
+  name: openab-bot1
+  cluster: openab
+spec:
+  image: ghcr.io/openabdev/openab:beta-kiro
+  cpu: '2048'
+  memory: '4096'
+  arch: X86_64
+  capacity: FARGATE_SPOT
+  desiredCount: 1
+  execEnabled: true
+  env:
+    GHPOOL_URL: http://ghpool.openab.local:8080
+    OPENAB_BACKEND_AGENT: openab-kiro
+    RUST_LOG: openab=debug,openab_core=debug
+    OPENAB_AGENT_NAME: bot1
+    GITHUB_API_URL: http://ghpool.openab.local:8080
+    STATE_BUCKET: my-openab-state
+```
+
+The `spec.env` map carries `OPENAB_AGENT_NAME` and `STATE_BUCKET` into the container — `pre_seed` and `pre_shutdown` pick them up automatically. Apply with `ecsctl apply -f service.yaml`.
+
 Run a second bot by deploying another release/task with a different `OPENAB_AGENT_NAME` (e.g. `bot2`, `bot3`) — each gets its own `<name>-home.tar.gz` key while sharing the same `shared/default.tar.gz` base layer and `STATE_BUCKET`.
 
 ### 4. IAM policy
