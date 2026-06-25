@@ -226,6 +226,8 @@ fi
 '''
 ```
 
+> **Auth ordering:** cloning a **private** repo needs credentials. Because `pre_seed` runs *before* `pre_boot`, seed the GitHub auth there — include `~/.config/gh/` (the `gh` CLI OAuth token) or `~/.git-credentials` in one of your `pre_seed` archives. By the time this `pre_boot` script runs, `git`/`gh` is already authenticated and the clone succeeds. (Alternatively, inject a token via `[agent].env` and embed it in the clone URL — but seeding via `pre_seed` keeps the token out of config.)
+
 ### Backup state on shutdown (ECS Fargate)
 
 ```toml
