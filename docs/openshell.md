@@ -81,6 +81,8 @@ filesystem_policy:
     - /bin
     - /sbin
     - /etc
+    - /app
+    - /var/log
     - /proc
     - /dev/urandom
   read_write:
@@ -138,6 +140,8 @@ network_policies:
       - { host: telemetry.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
       - { host: telemetry.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
       - { host: cognito-identity.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: oidc.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: client-telemetry.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
     binaries:
       - { path: /usr/local/bin/kiro-cli* }
 EOF
