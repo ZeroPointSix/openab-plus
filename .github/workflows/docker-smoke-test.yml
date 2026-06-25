@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'Dockerfile*'
+      - 'openshell/Dockerfile*'
       - 'src/**'
       - 'Cargo.*'
 
@@ -25,6 +26,7 @@ jobs:
           - { dockerfile: Dockerfile.antigravity, suffix: "-antigravity", agent: "agy-acp", agent_args: "" }
           - { dockerfile: Dockerfile.pi, suffix: "-pi", agent: "pi-acp", agent_args: "" }
           - { dockerfile: openshell/Dockerfile, suffix: "-native-sandbox", agent: "openab-agent", agent_args: "" }
+          - { dockerfile: openshell/Dockerfile.kiro, suffix: "-kiro-sandbox", agent: "kiro-cli", agent_args: "acp --trust-all-tools" }
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

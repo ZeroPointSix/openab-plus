@@ -83,6 +83,7 @@ jobs:
           - { suffix: "-pi", dockerfile: "Dockerfile.pi", artifact: "pi" }
           - { suffix: "-native", dockerfile: "Dockerfile.native", artifact: "native" }
           - { suffix: "-native-sandbox", dockerfile: "openshell/Dockerfile", artifact: "nativesandbox" }
+          - { suffix: "-kiro-sandbox", dockerfile: "openshell/Dockerfile.kiro", artifact: "kirosandbox" }
         platform:
           - { os: linux/amd64, runner: ubuntu-latest }
           - { os: linux/arm64, runner: ubuntu-24.04-arm }
@@ -152,6 +153,7 @@ jobs:
           - { suffix: "-pi", artifact: "pi" }
           - { suffix: "-native", artifact: "native" }
           - { suffix: "-native-sandbox", artifact: "nativesandbox" }
+          - { suffix: "-kiro-sandbox", artifact: "kirosandbox" }
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -209,6 +211,7 @@ jobs:
           - { suffix: "-pi" }
           - { suffix: "-native" }
           - { suffix: "-native-sandbox" }
+          - { suffix: "-kiro-sandbox" }
     runs-on: ubuntu-latest
     permissions:
       contents: read
