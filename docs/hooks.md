@@ -206,7 +206,9 @@ Scripts run with a sanitized environment:
 
 ## Examples
 
-### Sync config from S3 on startup
+### Clone a config/steering repo on startup
+
+`pre_boot` is for **running logic** at boot — cloning a repo, installing a tool, rendering config from env. For pulling plain S3 archives into `$HOME`, prefer [`pre_seed`](#pre-seed-phase) (path-traversal protection, size caps, and checksums built in — no script needed).
 
 ```toml
 [hooks.pre_boot]
@@ -215,8 +217,11 @@ on_failure = "abort"
 inline = '''
 #!/bin/sh
 set -e
-if [ ! -f "$HOME/AGENTS.md" ]; then
-  aws s3 sync "$BOOTSTRAP_BASE_URI" "$HOME/"
+# Pull steering/config from a private git repo (something pre_seed can't do)
+if [ ! -d "$HOME/.config/steering/.git" ]; then
+  git clone --depth 1 "$STEERING_REPO_URL" "$HOME/.config/steering"
+else
+  git -C "$HOME/.config/steering" pull --ff-only
 fi
 '''
 ```
