@@ -156,24 +156,34 @@ async fn download_and_extract(
 
     // Extract and move in a blocking task with cooperative deadline checking.
     let target = target.to_path_buf();
+    let uri_owned = uri.to_string();
     // Bytes is Arc-backed, Clone is zero-copy (ref-count bump only)
-    tokio::task::spawn_blocking(move || extract_and_apply(&bytes, &target, deadline))
+    tokio::task::spawn_blocking(move || extract_and_apply(&bytes, &target, deadline, &uri_owned))
         .await
         .map_err(|e| anyhow::anyhow!("hooks.pre_seed: extract task panicked: {e}"))??;
 
     Ok(())
 }
 
-/// Extract zip to a temp directory with budget enforcement, then move into target.
+/// Extract archive to a temp directory with budget enforcement, then move into target.
+/// Supports .zip and .tar.gz/.tgz formats (detected from URI).
 /// Checks deadline cooperatively before each file operation.
-fn extract_and_apply(data: &[u8], target: &Path, deadline: Instant) -> anyhow::Result<()> {
+fn extract_and_apply(
+    data: &[u8],
+    target: &Path,
+    deadline: Instant,
+    uri: &str,
+) -> anyhow::Result<()> {
     let temp_dir = tempfile::tempdir_in(target.parent().unwrap_or(target))?;
 
-    extract_zip_with_limits(data, temp_dir.path(), deadline)?;
+    if uri.ends_with(".tar.gz") || uri.ends_with(".tgz") {
+        extract_tarball_with_limits(data, temp_dir.path(), deadline)?;
+    } else {
+        extract_zip_with_limits(data, temp_dir.path(), deadline)?;
+    }
 
     // Check deadline before applying to target
     if Instant::now() >= deadline {
-        // temp_dir drops and cleans up automatically
         anyhow::bail!("hooks.pre_seed: timed out before applying to target");
     }
 
@@ -251,6 +261,47 @@ fn extract_zip_budgeted(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Extract a .tar.gz/.tgz archive with cooperative deadline checks and size budget.
+fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> anyhow::Result<()> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let decoder = GzDecoder::new(data);
+    let mut archive = tar::Archive::new(decoder);
+    archive.set_preserve_permissions(true);
+
+    let mut file_count: usize = 0;
+    let mut total_extracted: u64 = 0;
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+
+        file_count += 1;
+        if file_count > DEFAULT_MAX_FILE_COUNT {
+            anyhow::bail!(
+                "hooks.pre_seed: tarball contains too many entries ({file_count}, max {DEFAULT_MAX_FILE_COUNT})"
+            );
+        }
+
+        // Cooperative deadline check every 100 files
+        if file_count % 100 == 0 && Instant::now() >= deadline {
+            anyhow::bail!("hooks.pre_seed: timed out during tarball extraction at entry {file_count}");
+        }
+
+        // Size budget
+        total_extracted += entry.size();
+        if total_extracted > DEFAULT_MAX_EXTRACTED_BYTES {
+            anyhow::bail!(
+                "hooks.pre_seed: extracted size exceeds limit ({total_extracted} > {DEFAULT_MAX_EXTRACTED_BYTES})"
+            );
+        }
+
+        entry.unpack_in(dest)?;
     }
 
     Ok(())
@@ -344,7 +395,7 @@ mod tests {
         writer.write_all(b"added").unwrap();
         let cursor = writer.finish().unwrap();
 
-        extract_and_apply(cursor.get_ref(), target.path(), deadline).unwrap();
+        extract_and_apply(cursor.get_ref(), target.path(), deadline, "s3://b/test.zip").unwrap();
 
         assert_eq!(
             std::fs::read_to_string(target.path().join("existing.txt")).unwrap(),
@@ -372,7 +423,7 @@ mod tests {
         let cursor = writer.finish().unwrap();
 
         // extract_and_apply should fail due to expired deadline
-        let result = extract_and_apply(cursor.get_ref(), dir.path(), deadline);
+        let result = extract_and_apply(cursor.get_ref(), dir.path(), deadline, "s3://b/test.zip");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
     }
@@ -392,7 +443,7 @@ mod tests {
         writer.write_all(b"overwritten").unwrap();
         let cursor = writer.finish().unwrap();
 
-        extract_and_apply(cursor.get_ref(), target.path(), deadline).unwrap();
+        extract_and_apply(cursor.get_ref(), target.path(), deadline, "s3://b/test.zip").unwrap();
 
         assert_eq!(
             std::fs::read_to_string(target.path().join("hello.txt")).unwrap(),
