@@ -253,14 +253,6 @@ fn extract_zip_budgeted(
             std::io::copy(&mut file, &mut out)?;
 
             #[cfg(unix)]
-            #[cfg(not(unix))]
-            {
-                // Fallback: copy the link target file content
-                if link_target.is_absolute() || src_path.parent().map(|p| p.join(&link_target)).filter(|p| p.exists()).is_some() {
-                    let resolved = src_path.parent().unwrap_or(Path::new(".")).join(&link_target);
-                    let _ = std::fs::copy(&resolved, &dst_path);
-                }
-            }
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = file.unix_mode() {
@@ -311,14 +303,6 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
 
         // Manually set permissions (strip suid/sgid/sticky, like zip path)
         #[cfg(unix)]
-            #[cfg(not(unix))]
-            {
-                // Fallback: copy the link target file content
-                if link_target.is_absolute() || src_path.parent().map(|p| p.join(&link_target)).filter(|p| p.exists()).is_some() {
-                    let resolved = src_path.parent().unwrap_or(Path::new(".")).join(&link_target);
-                    let _ = std::fs::copy(&resolved, &dst_path);
-                }
-            }
         {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(path) = entry.path() {
