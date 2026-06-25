@@ -8,11 +8,11 @@ OpenAB supports lifecycle hooks that run at specific points during the container
 hooks.pre_seed → hooks.pre_boot → (agent running) → hooks.pre_shutdown
 ```
 
-| Phase | Purpose | Config | Action Type |
-|-------|---------|--------|-------------|
-| `pre_seed` | Download & extract S3 archives to seed the environment | `[hooks.pre_seed]` | Built-in S3 download + extract |
-| `pre_boot` | Run custom setup scripts before agent pool creation | `[hooks.pre_boot]` | User script |
-| `pre_shutdown` | Run custom cleanup scripts after pool shutdown | `[hooks.pre_shutdown]` | User script |
+| Phase | When | Purpose | Config | Action Type |
+|-------|------|---------|--------|-------------|
+| `pre_seed` | First — before `pre_boot` | Download & extract S3 archives to seed the environment | `[hooks.pre_seed]` | Built-in S3 download + extract |
+| `pre_boot` | After seed, before agent pool starts | Run custom setup scripts before agent pool creation | `[hooks.pre_boot]` | User script |
+| `pre_shutdown` | After pool stops, before exit | Run custom cleanup scripts after pool shutdown | `[hooks.pre_shutdown]` | User script |
 
 ## Pre-Seed Phase
 
@@ -112,6 +112,8 @@ When objects have S3-native SHA-256 checksums, OpenAB verifies them automaticall
 ---
 
 ## Available Hooks
+
+The hooks below are **script-based** (`pre_boot`, `pre_shutdown`) and share the `script` / `inline` / `url` configuration described in this section. `pre_seed` is configured separately — see [Pre-Seed Phase](#pre-seed-phase) above.
 
 | Hook | Timing | Use Case |
 |------|--------|----------|
