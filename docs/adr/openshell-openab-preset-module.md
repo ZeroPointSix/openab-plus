@@ -72,6 +72,8 @@ existing OpenAB/Kiro image
 
 This keeps the default Kiro image behavior intact while adapting it to OpenShell's runtime expectations. It also avoids repeating this work across `Dockerfile.codex`, `Dockerfile.claude`, `Dockerfile.gemini`, and other agent-specific images.
 
+For this Day 1 preset, the wrapper is `openshell/Dockerfile.kiro`. It should not require changes to the existing default Kiro image or the existing native sandbox image.
+
 ## Credential Route
 
 The quick start should not ask users to paste raw long-lived tokens into `config.toml`. The preferred route is:
@@ -98,6 +100,7 @@ A passing E2E run must prove the real OpenShell path:
 - Stop for human input when Kiro device-flow login requires browser approval.
 - Success requires a Discord bot connection and a human mention/reply test in Discord.
 - On macOS with Docker Desktop, a successful run must prove that Discord Gateway WebSocket works through the OpenShell-managed route. A Linux-only pass does not prove the macOS path.
+- A negative web-access check should ask the agent for a live external fact, such as current weather. The Day 1 preset should not add arbitrary weather/search/browser/package endpoints to make that pass. If the agent can answer only through already-allowed Kiro service traffic, record that separately; it does not prove broad sandbox web access.
 
 ## Known Day 2 Boundary
 
