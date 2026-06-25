@@ -256,6 +256,7 @@ fn extract_zip_budgeted(
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = file.unix_mode() {
+                    let mode = mode & 0o0777; // strip suid/sgid/sticky
                     std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode))?;
                 }
             }
@@ -301,6 +302,27 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
 
         entry.unpack_in(dest)?;
 
+        // Skip symlinks with escaping targets created by unpack_in
+        #[cfg(unix)]
+        if let Ok(path) = entry.path() {
+            let out_path = dest.join(&*path);
+            if out_path.symlink_metadata().map(|m| m.is_symlink()).unwrap_or(false) {
+                if let Ok(target) = std::fs::read_link(&out_path) {
+                    if target.is_absolute()
+                        || target
+                            .components()
+                            .any(|c| c == std::path::Component::ParentDir)
+                    {
+                        let _ = std::fs::remove_file(&out_path);
+                        warn!(
+                            "hooks.pre_seed: removed symlink with escaping target: {}",
+                            target.display()
+                        );
+                    }
+                }
+            }
+        }
+
         // Manually set permissions (strip suid/sgid/sticky, like zip path)
         #[cfg(unix)]
         {
@@ -322,8 +344,20 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
 }
 
 /// Create a symlink on Unix, or copy the resolved target on other platforms.
+/// Rejects symlink targets that escape via absolute path or `..` components.
 #[allow(unused_variables)]
 fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow::Result<()> {
+    // Reject symlinks that could escape the target directory
+    if link_target.is_absolute()
+        || link_target
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        anyhow::bail!(
+            "hooks.pre_seed: rejecting symlink with escaping target: {}",
+            link_target.display()
+        );
+    }
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(link_target, dst)?;
