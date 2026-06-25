@@ -172,7 +172,8 @@ fn extract_and_apply(
     target: &Path,
     deadline: Instant,
 ) -> anyhow::Result<()> {
-    let temp_dir = tempfile::tempdir_in(target.parent().unwrap_or(target))?;
+    std::fs::create_dir_all(target)?;
+    let temp_dir = tempfile::tempdir_in(target)?;
 
     if data.starts_with(&[0x1f, 0x8b]) {
         extract_tarball_with_limits(data, temp_dir.path(), deadline)?;
@@ -222,7 +223,7 @@ fn extract_zip_budgeted(
 
     for i in 0..file_count {
         // Cooperative deadline check per file
-        if i % 100 == 0 && Instant::now() >= deadline {
+        if i.is_multiple_of(100) && Instant::now() >= deadline {
             anyhow::bail!("hooks.pre_seed: timed out during extraction at entry {i}");
         }
 
@@ -252,6 +253,14 @@ fn extract_zip_budgeted(
             std::io::copy(&mut file, &mut out)?;
 
             #[cfg(unix)]
+            #[cfg(not(unix))]
+            {
+                // Fallback: copy the link target file content
+                if link_target.is_absolute() || src_path.parent().map(|p| p.join(&link_target)).filter(|p| p.exists()).is_some() {
+                    let resolved = src_path.parent().unwrap_or(Path::new(".")).join(&link_target);
+                    let _ = std::fs::copy(&resolved, &dst_path);
+                }
+            }
             {
                 use std::os::unix::fs::PermissionsExt;
                 if let Some(mode) = file.unix_mode() {
@@ -286,7 +295,7 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
         }
 
         // Cooperative deadline check every 10 files
-        if file_count % 10 == 0 && Instant::now() >= deadline {
+        if file_count.is_multiple_of(10) && Instant::now() >= deadline {
             anyhow::bail!("hooks.pre_seed: timed out during tarball extraction at entry {file_count}");
         }
 
@@ -302,11 +311,19 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
 
         // Manually set permissions (strip suid/sgid/sticky, like zip path)
         #[cfg(unix)]
+            #[cfg(not(unix))]
+            {
+                // Fallback: copy the link target file content
+                if link_target.is_absolute() || src_path.parent().map(|p| p.join(&link_target)).filter(|p| p.exists()).is_some() {
+                    let resolved = src_path.parent().unwrap_or(Path::new(".")).join(&link_target);
+                    let _ = std::fs::copy(&resolved, &dst_path);
+                }
+            }
         {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(path) = entry.path() {
                 let out_path = dest.join(path);
-                if out_path.is_file() {
+                if out_path.symlink_metadata().map(|m| m.file_type().is_file()).unwrap_or(false) {
                     let mode = entry.header().mode().unwrap_or(0o644) & 0o0777;
                     let _ = std::fs::set_permissions(
                         &out_path,
@@ -317,6 +334,23 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
         }
     }
 
+    Ok(())
+}
+
+/// Create a symlink on Unix, or copy the resolved target on other platforms.
+#[allow(unused_variables)]
+fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(link_target, dst)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let resolved = src.parent().unwrap_or(Path::new(".")).join(link_target);
+        if resolved.exists() {
+            std::fs::copy(&resolved, dst)?;
+        }
+    }
     Ok(())
 }
 
@@ -332,7 +366,13 @@ fn move_recursive(src: &Path, dst: &Path, deadline: Instant) -> anyhow::Result<(
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
-        if src_path.is_dir() {
+        let meta = src_path.symlink_metadata()?;
+        if meta.is_symlink() {
+            // Preserve symlinks as-is without following
+            let link_target = std::fs::read_link(&src_path)?;
+            let _ = std::fs::remove_file(&dst_path);
+            create_symlink_or_copy(&link_target, &dst_path, &src_path)?;
+        } else if meta.is_dir() {
             std::fs::create_dir_all(&dst_path)?;
             move_recursive(&src_path, &dst_path, deadline)?;
         } else {
