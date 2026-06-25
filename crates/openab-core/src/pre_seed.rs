@@ -765,21 +765,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn extract_and_apply_works_when_parent_not_writable() {
+    fn extract_and_apply_succeeds_with_non_writable_parent() {
         use std::os::unix::fs::PermissionsExt;
         use std::io::Write;
 
+        // Regression test: target is writable but target.parent() is read-only.
+        // Old code used tempdir_in(target.parent()) which would fail here.
+        // New code uses tempdir_in(target) which succeeds.
         let base = tempfile::tempdir().unwrap();
         let restricted = base.path().join("restricted");
         std::fs::create_dir(&restricted).unwrap();
 
+        // Create target directory (writable)
         let target = restricted.join("target");
-        // Don't create target — extract_and_apply should create it
+        std::fs::create_dir(&target).unwrap();
 
-        // Make parent read-only (target doesn't exist yet, but parent is not writable)
+        // Lock down parent so tempdir_in(parent) would fail
         std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-        // This should fail because parent is not writable and target doesn't exist
         let buf = Vec::new();
         let cursor = std::io::Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
@@ -791,11 +794,12 @@ mod tests {
         let deadline = Instant::now() + std::time::Duration::from_secs(60);
         let result = extract_and_apply(cursor.get_ref(), &target, deadline);
 
-        // Should fail because we can't create_dir_all in a read-only parent
-        assert!(result.is_err());
-
-        // Restore permissions for cleanup
+        // Restore permissions before asserting (for cleanup)
         std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Should succeed because tempdir_in(target) works even with read-only parent
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(target.join("test.txt")).unwrap(), "data");
     }
 
     #[cfg(unix)]
