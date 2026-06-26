@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-06-26
-- **Author:** Pahud Hsieh
+- **Author:** chaodu-agent
 
 ## Context
 
