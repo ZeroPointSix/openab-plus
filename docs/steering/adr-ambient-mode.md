@@ -295,13 +295,86 @@ The sentinel is `[NO_REPLY]` (case-insensitive, trimmed). Chosen because:
 
 ## Implementation Notes
 
-- **Buffer concurrency:** use `tokio::sync::Mutex<Vec<BufferedMessage>>` with
-  swap-and-drain on flush. Lock is held only for the swap (O(1)), never during
-  LLM processing.
-- **Flush timer:** per-channel `tokio::spawn` with `sleep(interval ± jitter)`.
-  Timer resets when buffer transitions from empty to non-empty.
-- **`[NO_REPLY]` check:** applied in the response router (`src/adapter.rs`)
-  after `stream_prompt` completes, before calling `send_message`. If the
+### Reuse of Existing `Dispatcher` Infrastructure
+
+OpenAB already has a **turn-boundary batching** system (PR #686,
+`message_processing_mode` config) with `Dispatcher`, per-thread `mpsc::channel`,
+and `consumer_loop`. Ambient Mode should extend this infrastructure rather than
+building a parallel buffer system.
+
+**What we reuse:**
+- `Dispatcher::submit()` — message ingestion into bounded mpsc channel
+- `BufferedMessage` struct — carries prompt, sender_context, attachments
+- `consumer_loop` — long-lived task that drains and dispatches
+- `dispatch_batch` → `pack_arrival_event` — packing N messages into
+  `Vec<ContentBlock>` with repeated `<sender_context>` delimiters
+- `ThreadHandle` lifecycle — idle eviction, SendError retry
+
+**What differs for ambient mode:**
+
+| Aspect | Turn-boundary (existing) | Ambient consumer |
+|--------|-------------------------|-----------------|
+| Drain trigger | Turn completion (greedy drain when agent finishes) | Timer (`flush_interval ± jitter`) OR count (`flush_max_messages`) |
+| Key | `(platform, thread_id)` | `ambient:(platform, channel_id)` |
+| Prerequisite | Message already passed mention/involved gate | Message has NO mention (new gate path) |
+| Response handling | Normal post | `[NO_REPLY]` check before posting |
+| Reactions | Full (👀🤔🔥🆗) | Suppressed |
+| Session pool | Main pool | Ambient pool (separate `max_sessions`) |
+
+**New `message_processing_mode` value:** extend the enum to include `"ambient"`:
+
+```toml
+# Existing modes (unchanged):
+message_processing_mode = "per-message"   # 1 msg → 1 turn
+message_processing_mode = "per-thread"    # batch at turn boundary
+message_processing_mode = "per-lane"      # batch at turn boundary, per-sender
+
+# New mode (this ADR):
+# Configured separately in [discord.ambient] — not via message_processing_mode.
+# Ambient is a parallel dispatch path, not a replacement for the primary mode.
+```
+
+Ambient mode runs as a **separate Dispatcher instance** alongside the primary
+one. The primary Dispatcher handles mention-triggered messages (using whatever
+`message_processing_mode` is configured). The ambient Dispatcher handles
+non-mentioned messages in ambient-enabled channels with a timer-based consumer.
+
+### Ambient Consumer Loop
+
+```rust
+// Pseudocode — ambient consumer differs from turn-boundary consumer:
+async fn ambient_consumer_loop(rx, config) {
+    loop {
+        let first = rx.recv().await;           // park until first msg
+        let deadline = Instant::now() + config.flush_interval_jittered();
+        let mut batch = vec![first];
+
+        loop {
+            let remaining = deadline - Instant::now();
+            match timeout(remaining, rx.recv()).await {
+                Ok(Some(msg)) => {
+                    batch.push(msg);
+                    if batch.len() >= config.flush_max_messages { break; }
+                    if batch.len() >= config.flush_hard_cap { break; }
+                }
+                Ok(None) => break,             // channel closed
+                Err(_) => break,               // timer expired
+            }
+        }
+
+        // Flush: dispatch batch with [NO_REPLY] system prompt
+        let response = dispatch_ambient_batch(batch).await;
+        if response.trim().eq_ignore_ascii_case("[NO_REPLY]") {
+            continue; // discard silently
+        }
+        post_response(response).await;
+    }
+}
+```
+
+### Other Implementation Details
+
+- **`[NO_REPLY]` check:** applied after `stream_prompt` completes. If the
   trimmed final content equals `[NO_REPLY]` (case-insensitive), delete the
   thinking message and return early.
 - **Mention detection reuse:** the existing `is_mentioned` logic in
