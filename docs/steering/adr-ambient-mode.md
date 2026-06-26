@@ -20,7 +20,9 @@ explicit `@mention` every time.
 
 ### OpenClaw — `/activation always`
 
-OpenClaw supports an `always` activation mode for group chats:
+OpenClaw supports an `always` activation mode as a cross-platform group chat
+feature (WhatsApp, Telegram, Discord, Slack, iMessage — configured via
+`agents.list[].groupChat.mentionPatterns` and `channels.*.groups`):
 - Every message is dispatched to the agent (no mention required).
 - Agent returns the sentinel token `NO_REPLY` when it has nothing to add;
   the gateway discards silently.
@@ -35,17 +37,22 @@ OpenClaw supports an `always` activation mode for group chats:
 Hermes provides `DISCORD_FREE_RESPONSE_CHANNELS` and
 `DISCORD_REQUIRE_MENTION=false`:
 - The bot responds to **every** message in designated channels without mention.
-- History backfill (`DISCORD_HISTORY_BACKFILL`) recovers missed context when
-  the bot is later @mentioned.
+- Free-response channels skip auto-threading (replies inline) and isolate
+  sessions per user (`group_sessions_per_user: true` by default).
+- History backfill (`DISCORD_HISTORY_BACKFILL`) recovers missed channel context
+  on `@mention` — only triggered when `require_mention: true` and skipped in
+  free-response channels and DMs where the transcript is already complete.
+  Scans up to 50 messages backwards, stopping at the bot's own last message.
 - **Limitation:** no autonomous decision-making — the bot always replies. There
   is no `NO_REPLY` equivalent; it's either "respond to everything" or
   "respond only on mention."
 
 ### Research — "Controlling AI Agent Participation in Group Conversations"
 
-(arXiv 2501.17258) — studies user preferences for AI agent behavior in group
-settings. Key finding: users disliked agents that dominated the conversation
-and preferred controls over when/how the agent participates.
+(arXiv 2501.17258, Jan 2025) — studies user preferences for AI agent behavior
+in group settings. Key finding: users benefited from having the AI in the group,
+but disliked when the agent dominated the conversation and desired controls
+over its interactive behaviors.
 
 ### Gap Our Design Fills
 
@@ -81,7 +88,9 @@ Discord Channel
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │ Ambient Dispatch (batch)                                   │  │
 │  │                                                            │  │
-│  │ • Collect buffered messages as conversation context        │  │
+│  │ • Lock buffer → drain all messages → unlock immediately    │  │
+│  │   (new messages enter a fresh buffer cycle)                │  │
+│  │ • Prepend: channel history (context_window via API)        │  │
 │  │ • Prepend system instruction:                              │  │
 │  │   "You are in ambient mode. Below is a batch of recent     │  │
 │  │    messages. If you have nothing valuable to add, reply    │  │
@@ -99,54 +108,134 @@ Discord Channel
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### Buffer Lifecycle
+
+The `AmbientBuffer` operates as a **swap-and-drain** model:
+
+1. Messages arrive → pushed into the active buffer (under a short lock).
+2. Flush triggers → lock the buffer, **swap** it with a fresh empty buffer,
+   unlock immediately. The drained batch is processed asynchronously.
+3. New messages arriving during flush processing enter the fresh buffer and
+   will be part of the **next** flush cycle.
+
+This eliminates race conditions: the lock is held only for the swap operation
+(microseconds), and flush processing is fully decoupled from ingestion.
+
 ### Flush Triggers
 
-Messages are accumulated in a per-channel buffer and flushed when **either**
+Messages are accumulated in a per-channel buffer and flushed when **any**
 condition is met (whichever comes first):
 
 | Trigger | Default | Description |
 |---------|---------|-------------|
 | Time | `flush_interval_seconds = 60` | Seconds since first buffered message |
 | Count | `flush_max_messages = 10` | Max messages to accumulate before flush |
+| Hard cap | `flush_hard_cap = 50` | Safety cap — force flush regardless of timer state |
+| Mention | immediate | Any message that @mentions the bot triggers instant flush |
 
-**Immediate flush override:** if any message in the buffer explicitly
-`@mentions` the bot, the buffer is flushed immediately (no waiting) — users
-should not have to wait 60 seconds when they directly address the agent.
+**Flush interval jitter:** to prevent thundering herd when many channels flush
+simultaneously, the actual interval is `flush_interval_seconds ± 20%` (random
+per-channel, recomputed each cycle).
+
+**Immediate flush on @mention:** when a message that `@mentions` the bot enters
+the buffer, the buffer flushes immediately. However, the @mention message is
+**removed from the batch** and dispatched separately via the normal
+mention-triggered path (with full reactions, threading, etc.). The remaining
+buffered messages are flushed as a normal ambient batch. This preserves clean
+semantics: mention = normal dispatch, ambient = batch dispatch.
+
+### Message Filtering for Buffer
+
+Not all messages enter the ambient buffer:
+
+- ✅ **User messages** in ambient-enabled channels (without @mention) → buffer
+- ✅ **Bot messages from other bots** (if `allow_bot_messages` permits) → buffer
+- ❌ **Own bot messages** → never buffered (prevents echo loops)
+- ❌ **Messages that @mention the bot** → bypass buffer, trigger immediate
+  flush of existing buffer + normal mention dispatch
+- ❌ **Messages in threads created by the bot** → handled by existing
+  thread-based session logic, not ambient
 
 ### Batch Payload
 
 The flushed batch is formatted as a conversation block:
 
 ```
-[Ambient batch — 4 messages, channel: #general]
+[Ambient context — recent channel history]
+[12:00:01] UserC: I pushed the helm fix yesterday
+[12:00:02] UserB: cool
 
-[12:00:01] UserA: Anyone know how to fix the helm release?
-[12:00:04] UserB: Which chart version?
-[12:00:11] UserA: 0.8.5
-[12:00:15] UserC: Try rolling back first
+[Ambient batch — 4 new messages since last flush]
+[12:03:01] UserA: Anyone know how to fix the helm release?
+[12:03:04] UserB: Which chart version?
+[12:03:11] UserA: 0.8.5
+[12:03:15] UserC: Try rolling back first
 
-[End of batch — reply only if you can add value. Otherwise reply exactly: [NO_REPLY]]
+[End of batch — reply only if you can add meaningful value.
+ Otherwise reply exactly: [NO_REPLY]]
 ```
+
+### Session Strategy
+
+Ambient dispatches use a **dedicated session pool**, separate from the main
+mention-triggered pool:
+
+| Aspect | Mention dispatch | Ambient dispatch |
+|--------|-----------------|-----------------|
+| Session key | `discord:<thread_id>` | `ambient:discord:<channel_id>` |
+| Pool | Main pool (`[pool]`) | Ambient pool (`[pool.ambient]`) |
+| Lifetime | Long-lived (session_ttl_hours) | Short-lived (ambient_session_ttl_minutes) |
+| Cross-flush memory | Full transcript | Rolling window (last N flushes) |
+| Reactions | ✅ Full (👀🤔🔥🆗) | ❌ Suppressed |
+
+**Why separate pools:** prevents ambient traffic from exhausting the main pool
+and blocking normal @mention responses. The ambient pool has its own
+`max_sessions` cap.
+
+**Cross-flush context:** the ambient session retains a rolling window of the
+last `ambient_context_flushes` (default: 3) flush interactions, so the agent
+has memory of what it said/declined recently. Sessions expire after
+`ambient_session_ttl_minutes` (default: 60) of inactivity.
 
 ### Configuration
 
 ```toml
 [discord.ambient]
-enabled = true
-channels = ["1490282656913559673"]   # channels where ambient mode is active
-flush_interval_seconds = 60           # time-based flush trigger
+enabled = false                       # master switch
+channels = ["1490282656913559673"]    # required — explicit allowlist, empty = disabled
+flush_interval_seconds = 60           # time-based flush trigger (±20% jitter applied)
 flush_max_messages = 10               # count-based flush trigger
-context_window = 20                   # additional history before the batch
+flush_hard_cap = 50                   # safety cap — force flush at this count
+context_window = 20                   # historical messages fetched via Discord API before batch
+
+[pool.ambient]
+max_sessions = 5                      # separate pool for ambient dispatches
+ambient_session_ttl_minutes = 60      # ambient session inactivity timeout
+ambient_context_flushes = 3           # rolling window of retained flush history
+
+[ambient.limits]
+max_concurrent_flushes = 3            # max simultaneous LLM calls across all ambient channels
 ```
 
-- `enabled` — master switch (default: `false`).
-- `channels` — allowlist of channel IDs. Empty = all allowed channels.
-- `flush_interval_seconds` — max time to hold messages before flushing
-  (timer starts when the first message enters an empty buffer).
-- `flush_max_messages` — max messages to buffer before flushing regardless
-  of time elapsed.
-- `context_window` — number of historical messages (before the batch) to
-  include for additional context.
+**`channels` semantics:** an explicit allowlist is **required**. If `channels`
+is empty or omitted while `enabled = true`, ambient mode is **not activated**
+for any channel (fail-safe). This prevents accidental global ambient activation.
+
+**`context_window`:** fetches the N most recent messages from the Discord
+channel history API (before the batch window) to provide additional context.
+This is a Discord API call with standard rate limiting. If fewer than N messages
+exist, all available messages are included. These messages are **not** counted
+toward `flush_max_messages`.
+
+### Error Handling
+
+| Scenario | Behavior |
+|----------|----------|
+| LLM timeout / network error | Batch is **discarded** (not retried). Next flush cycle starts fresh. Logged as warning. |
+| Agent returns tool calls | Treated as normal response — if final output is not `[NO_REPLY]`, post it. Tool calls execute normally within the ambient session. |
+| Agent returns empty response | Treated as `[NO_REPLY]` (discard silently). |
+| Buffer grows beyond `flush_hard_cap` | Force flush immediately, regardless of timer state. |
+| Discord API rate limit on `context_window` fetch | Skip context window, flush batch without historical context. Log warning. |
 
 ### Sentinel Value
 
@@ -165,23 +254,27 @@ The sentinel is `[NO_REPLY]` (case-insensitive, trimmed). Chosen because:
 - **Better judgment** — agent sees a complete conversational thread, making
   it far more likely to know when a question was already answered (→ NO_REPLY)
   vs. when it should contribute.
-- **Natural rate limiting** — the flush interval acts as an inherent cooldown.
-  No separate cooldown mechanism needed.
+- **Natural rate limiting** — the flush interval + jitter acts as inherent
+  rate-limiting. Combined with `max_concurrent_flushes`, prevents cost spikes.
 - **Agents behave like real team members** — aware of context, able to
   contribute organically.
 - **User-configurable** — operators decide the cost/intelligence trade-off.
+- **Fail-safe defaults** — disabled by default, requires explicit channel list,
+  separate session pool prevents impact on normal operations.
 
 ### Trade-offs
 
 - **Latency** — ambient replies are delayed by up to `flush_interval_seconds`.
   Acceptable because ambient replies are unsolicited; explicitly mentioned
-  messages bypass the buffer and get immediate dispatch via the normal path.
+  messages bypass the buffer entirely via the normal dispatch path.
 - **Token cost still increases** — even with batching, each flush is an LLM
-  call. Mitigations: per-channel opt-in, tunable flush interval/count.
+  call. Mitigations: per-channel opt-in, tunable flush interval/count,
+  `max_concurrent_flushes` cap.
 - **Potential for noise** — a poorly-tuned prompt or model may reply too
   eagerly. The batch format and explicit instructions mitigate this.
-- **Session management** — ambient dispatches should use short-lived or
-  stateless sessions so the pool isn't exhausted.
+- **No retry on failure** — ambient batches are fire-and-forget. If a flush
+  fails, those messages are lost context. Acceptable because ambient is
+  best-effort by nature.
 
 ## Alternatives Considered
 
@@ -202,16 +295,25 @@ The sentinel is `[NO_REPLY]` (case-insensitive, trimmed). Chosen because:
 
 ## Implementation Notes
 
-- A new `AmbientBuffer` struct per channel holds pending messages and a
-  flush timer. On flush, it formats the batch and sends to the agent via
-  the existing ACP dispatch path.
-- The `[NO_REPLY]` check should be applied in the response router
-  (`src/adapter.rs`) before calling `send_message`.
-- Reactions (👀, 🤔, etc.) should be suppressed for ambient dispatches to
-  avoid spamming the channel with status indicators.
-- When a message in the buffer contains an explicit `@mention` of the bot,
-  the buffer should flush immediately and the dispatch should be marked as
-  "mention-triggered" (not ambient) so normal reply behavior applies.
-- The `allow_bot_messages` and `allow_user_messages` config options already
-  provide dispatch filtering logic in `src/discord.rs`. Ambient mode adds a
-  new dispatch path that coexists with the existing mention-based path.
+- **Buffer concurrency:** use `tokio::sync::Mutex<Vec<BufferedMessage>>` with
+  swap-and-drain on flush. Lock is held only for the swap (O(1)), never during
+  LLM processing.
+- **Flush timer:** per-channel `tokio::spawn` with `sleep(interval ± jitter)`.
+  Timer resets when buffer transitions from empty to non-empty.
+- **`[NO_REPLY]` check:** applied in the response router (`src/adapter.rs`)
+  after `stream_prompt` completes, before calling `send_message`. If the
+  trimmed final content equals `[NO_REPLY]` (case-insensitive), delete the
+  thinking message and return early.
+- **Mention detection reuse:** the existing `is_mentioned` logic in
+  `Handler::message()` (src/discord.rs) fires **before** the buffer push.
+  If mentioned, the message takes the normal dispatch path; remaining buffer
+  is flushed as ambient.
+- **Bot echo prevention:** `msg.author.id == bot_id` check (already exists in
+  Handler::message) ensures bot's own messages never enter the buffer.
+- **Reactions suppressed:** ambient dispatches skip `StatusReactionController`
+  entirely — no 👀🤔🔥 on every channel message.
+- **Serialization with normal dispatch:** the ambient session key
+  (`ambient:discord:<channel_id>`) is different from mention session keys
+  (`discord:<thread_id>`), so they never contend on the same session lock.
+  If a normal @mention arrives while an ambient flush is in-flight, both
+  proceed independently (different sessions, different pools).
