@@ -11,7 +11,9 @@ use openab_core::adapter::{ChannelRef, ChatAdapter};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
@@ -68,6 +70,7 @@ pub fn spawn_server(
 }
 
 /// Start the control socket server at a specific path.
+#[cfg(unix)]
 pub fn spawn_server_at(
     path: PathBuf,
     handler: std::sync::Arc<dyn CtlHandler>,
@@ -108,6 +111,20 @@ pub fn spawn_server_at(
     })
 }
 
+/// Control socket IPC is Unix-only. On other platforms (e.g. Windows) the
+/// `openab set`/`get` commands and the in-process control server are not
+/// available; this returns a no-op task so the run path compiles unchanged.
+#[cfg(not(unix))]
+pub fn spawn_server_at(
+    path: PathBuf,
+    handler: std::sync::Arc<dyn CtlHandler>,
+) -> tokio::task::JoinHandle<()> {
+    let _ = (path, handler);
+    warn!("control socket (openab set/get) is only supported on Unix; skipping");
+    tokio::spawn(async {})
+}
+
+#[cfg(unix)]
 async fn handle_conn(
     stream: UnixStream,
     handler: &dyn CtlHandler,
@@ -312,6 +329,7 @@ pub async fn send_request(req: &Request) -> anyhow::Result<Response> {
 }
 
 /// Send a request to a specific socket path.
+#[cfg(unix)]
 pub async fn send_request_to(path: &PathBuf, req: &Request) -> anyhow::Result<Response> {
     let stream = UnixStream::connect(&path).await.map_err(|e| {
         anyhow::anyhow!(
@@ -335,6 +353,12 @@ pub async fn send_request_to(path: &PathBuf, req: &Request) -> anyhow::Result<Re
     Ok(resp)
 }
 
+/// Non-Unix platforms have no control socket; `openab set`/`get` are unavailable.
+#[cfg(not(unix))]
+pub async fn send_request_to(_path: &PathBuf, _req: &Request) -> anyhow::Result<Response> {
+    anyhow::bail!("`openab set`/`get` IPC is only supported on Unix platforms")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +379,7 @@ mod tests {
         assert_eq!(parsed.thread_id.as_deref(), Some("123"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn server_client_roundtrip() {
         struct MockHandler;
