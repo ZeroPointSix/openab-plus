@@ -138,22 +138,21 @@ simultaneously, the actual interval is `flush_interval_seconds ± 20%` (random
 per-channel, recomputed each cycle).
 
 **Immediate flush on @mention:** when a message that `@mentions` the bot enters
-the buffer, the buffer flushes immediately. However, the @mention message is
-**removed from the batch** and dispatched separately via the normal
-mention-triggered path (with full reactions, threading, etc.). The remaining
-buffered messages are flushed as a normal ambient batch. This preserves clean
-semantics: mention = normal dispatch, ambient = batch dispatch.
+the buffer, the ambient buffer for that channel is **discarded** (not flushed).
+The @mention message is dispatched via the normal mention-triggered path (with
+full reactions, threading, etc.). Rationale: the bot is about to reply directly
+via mention — flushing the ambient buffer simultaneously would produce a
+redundant double-reply.
 
-**Concurrent reply prevention:** to prevent double-replying to the same channel
-when a @mention arrives during ambient processing:
+**Concurrent reply prevention:** to prevent double-replying to the same channel:
 - The ambient consumer holds a per-channel `AtomicBool` lock (`flushing`).
-- Normal mention dispatch checks this flag: if the ambient consumer is
-  mid-flush, the mention dispatch waits for the ambient flush to complete
-  (or cancel) before proceeding.
-- Conversely, if a mention dispatch is already in-flight on the same channel
-  (tracked via the primary Dispatcher), the ambient consumer skips posting
-  its response even if it's not `[NO_REPLY]` — the user already got a direct
-  reply.
+- When a @mention arrives on an ambient channel, the system:
+  1. If ambient consumer is idle (not flushing): discard buffer, dispatch
+     mention normally.
+  2. If ambient consumer is mid-flush: cancel/ignore the ambient response
+     (set a `cancelled` flag checked before posting), then dispatch mention.
+- Conversely, if a mention dispatch is already in-flight, the ambient consumer
+  skips posting its response — the user already got a direct reply.
 - This ensures at most one bot response is posted to a channel at any given
   moment from the ambient + mention paths combined.
 
@@ -412,12 +411,13 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore, channel_flushing) {
   trimmed final content equals `[NO_REPLY]` (case-insensitive), no message is
   posted.
 - **Bot-to-bot loop prevention:** the bot's own messages never enter the buffer
-  (existing `bot_id` check). Additionally, messages from other bots are gated
-  by `allow_bot_messages` config. Even if another bot's reply enters the buffer,
-  the existing `MAX_CONSECUTIVE_BOT_TURNS` hard cap (applied at ingest, before
-  `submit`) prevents infinite loops. The ambient system prompt also explicitly
-  instructs: "Do not reply to other bot messages unless directly relevant to a
-  human's question."
+  (existing `bot_id` check). **For ambient channels, `allow_bot_messages`
+  defaults to `"off"`** regardless of the global setting — other bots' messages
+  are excluded from the ambient buffer unless the operator explicitly opts in.
+  Even if opted in, the existing `MAX_CONSECUTIVE_BOT_TURNS` hard cap (applied
+  at ingest, before `submit`) prevents infinite loops. The ambient system prompt
+  also explicitly instructs: "Do not reply to other bot messages unless directly
+  relevant to a human's question."
 - **Mention detection reuse:** the existing `is_mentioned` logic in
   `Handler::message()` (src/discord.rs) fires **before** the buffer push.
   If mentioned, the message takes the normal dispatch path; remaining buffer
