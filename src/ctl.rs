@@ -201,7 +201,9 @@ fn resolve_platform(
     platforms: &[String],
 ) -> Option<String> {
     if let Some(platform) = registry.get(thread_id) {
-        return Some(platform.clone());
+        if platforms.contains(platform) {
+            return Some(platform.clone());
+        }
     }
     if platforms.len() == 1 {
         return Some(platforms[0].clone());
@@ -412,12 +414,23 @@ mod tests {
 
     #[test]
     fn resolve_platform_registry_hit_wins_over_fallback() {
-        // Registry takes precedence even when a single-adapter fallback exists.
+        // Registry takes precedence when the platform is still configured.
+        let r = reg(&[("123", "slack")]);
+        let platforms = vec!["discord".to_string(), "slack".to_string()];
+        assert_eq!(
+            resolve_platform("123", &r, &platforms).as_deref(),
+            Some("slack")
+        );
+    }
+
+    #[test]
+    fn resolve_platform_stale_registry_entry_falls_through() {
+        // Stale registry entry pointing to unconfigured platform falls through to fallback.
         let r = reg(&[("123", "slack")]);
         let platforms = vec!["discord".to_string()];
         assert_eq!(
             resolve_platform("123", &r, &platforms).as_deref(),
-            Some("slack")
+            Some("discord")
         );
     }
 
