@@ -66,6 +66,119 @@ message. Our design accumulates messages and flushes them as a batch, which:
 
 Introduce an **Ambient Mode** using a **batch flush** strategy.
 
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Discord Gateway (events)                            │
+└───────────────────────────────────┬─────────────────────────────────────────┘
+                                    │ MESSAGE_CREATE
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Handler::message()                                                         │
+│                                                                             │
+│  ┌─────────────┐    YES    ┌──────────────────────────────────────────┐     │
+│  │ Own bot msg?├──────────►│ DROP (echo prevention)                   │     │
+│  └──────┬──────┘           └──────────────────────────────────────────┘     │
+│         │ NO                                                                │
+│         ▼                                                                   │
+│  ┌─────────────┐    YES    ┌──────────────────────────────────────────┐     │
+│  │ @mention?   ├──────────►│ Normal Mention Dispatch Path             │     │
+│  │             │           │ • Discard ambient buffer for this channel│     │
+│  └──────┬──────┘           │ • Cancel in-flight ambient flush         │     │
+│         │ NO               │ • Thread + reactions + full session       │     │
+│         ▼                  └──────────────────────────────────────────┘     │
+│  ┌──────────────────┐ NO   ┌──────────────────────────────────────────┐    │
+│  │ Ambient channel?  ├────►│ IGNORE (not ambient-enabled)             │    │
+│  └──────┬────────────┘     └──────────────────────────────────────────┘    │
+│         │ YES                                                               │
+│         ▼                                                                   │
+│  ┌──────────────────────────────────────────────────────────────────┐      │
+│  │              Ambient Dispatcher::submit(msg)                      │      │
+│  └──────────────────────────────┬───────────────────────────────────┘      │
+└─────────────────────────────────┼───────────────────────────────────────────┘
+                                  │ mpsc::channel (bounded)
+                                  ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Ambient Consumer Loop (per-channel)                                        │
+│                                                                             │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ Buffer Phase                                                          │  │
+│  │                                                                       │  │
+│  │   msg ──► [  buffer  ] ◄── accumulate until trigger                   │  │
+│  │                                                                       │  │
+│  │   Flush triggers (whichever first):                                   │  │
+│  │     • Timer expired (flush_interval ± 20% jitter)                     │  │
+│  │     • Count reached (flush_max_messages = 10)                         │  │
+│  │     • Hard cap hit  (flush_hard_cap = 50)                             │  │
+│  └───────────────────────────────┬───────────────────────────────────────┘  │
+│                                  │ swap-and-drain                            │
+│                                  ▼                                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │ Flush Phase                                                           │  │
+│  │                                                                       │  │
+│  │   1. Acquire global semaphore (max_concurrent_flushes = 3)            │  │
+│  │   2. Set channel_flushing = true                                      │  │
+│  │   3. Fetch context_window (20 msgs) from Discord API                  │  │
+│  │   4. Build payload:                                                   │  │
+│  │      ┌──────────────────────────────────────────────────────┐         │  │
+│  │      │ System: "You are in ambient mode..."                 │         │  │
+│  │      │ [Ambient context — channel history]                  │         │  │
+│  │      │ [Ambient batch — N new messages]                     │         │  │
+│  │      │ [End of batch — reply [NO_REPLY] if nothing to add]  │         │  │
+│  │      └──────────────────────────────────────────────────────┘         │  │
+│  │   5. Send to LLM (ambient session pool)                               │  │
+│  │   6. Set channel_flushing = false                                     │  │
+│  │   7. Release semaphore                                                │  │
+│  └───────────────────────────────┬───────────────────────────────────────┘  │
+└──────────────────────────────────┼──────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Response Router                                                            │
+│                                                                             │
+│   LLM Response ──► trim + lowercase                                         │
+│                        │                                                    │
+│              ┌─────────┴─────────┐                                          │
+│              ▼                   ▼                                           │
+│   "[no_reply]"              Actual content                                  │
+│        │                         │                                          │
+│        ▼                         ▼                                          │
+│   🗑️ Discard silently      📤 Post to channel                              │
+│   (no reactions,           (no 👀🤔🔥 reactions,                            │
+│    no threading)            direct message post)                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Dual-Path Concurrency (Mention vs Ambient)
+
+```
+Channel #general (ambient-enabled)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Timeline:
+  t=0s   UserA: "how do I deploy?"        ──► ambient buffer
+  t=3s   UserB: "check the wiki"          ──► ambient buffer
+  t=8s   UserA: "wiki is outdated"        ──► ambient buffer
+  t=15s  UserC: "@bot help me deploy"     ──► MENTION PATH
+                                               │
+         ┌─────────────────────────────────────┘
+         ▼
+  ┌────────────────────────────────┐    ┌────────────────────────────┐
+  │ Mention Dispatch               │    │ Ambient Buffer             │
+  │                                │    │                            │
+  │ Session: discord:<thread_id>   │    │ [msg1, msg2, msg3]         │
+  │ Pool: Main                     │    │         │                  │
+  │ Reactions: 👀🤔🔥🆗            │    │         ▼                  │
+  │ Response: in new thread        │    │   DISCARDED (not flushed)  │
+  └────────────────────────────────┘    └────────────────────────────┘
+
+  t=16s  (new buffer cycle starts fresh)
+  t=20s  UserD: "anyone tried helm 3.15?"  ──► new ambient buffer
+  ...
+  t=76s  flush_interval elapsed            ──► flush new buffer
+```
+
 ### Mechanism
 
 ```
