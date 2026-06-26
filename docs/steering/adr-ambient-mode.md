@@ -144,6 +144,19 @@ mention-triggered path (with full reactions, threading, etc.). The remaining
 buffered messages are flushed as a normal ambient batch. This preserves clean
 semantics: mention = normal dispatch, ambient = batch dispatch.
 
+**Concurrent reply prevention:** to prevent double-replying to the same channel
+when a @mention arrives during ambient processing:
+- The ambient consumer holds a per-channel `AtomicBool` lock (`flushing`).
+- Normal mention dispatch checks this flag: if the ambient consumer is
+  mid-flush, the mention dispatch waits for the ambient flush to complete
+  (or cancel) before proceeding.
+- Conversely, if a mention dispatch is already in-flight on the same channel
+  (tracked via the primary Dispatcher), the ambient consumer skips posting
+  its response even if it's not `[NO_REPLY]` — the user already got a direct
+  reply.
+- This ensures at most one bot response is posted to a channel at any given
+  moment from the ambient + mention paths combined.
+
 ### Message Filtering for Buffer
 
 Not all messages enter the ambient buffer:
@@ -343,9 +356,12 @@ non-mentioned messages in ambient-enabled channels with a timer-based consumer.
 
 ```rust
 // Pseudocode — ambient consumer differs from turn-boundary consumer:
-async fn ambient_consumer_loop(rx, config, flush_semaphore) {
+async fn ambient_consumer_loop(rx, config, flush_semaphore, channel_flushing) {
     loop {
-        let first = rx.recv().await;           // park until first msg
+        let first = match rx.recv().await {
+            Some(msg) => msg,
+            None => return,                    // channel closed, exit consumer
+        };
         let deadline = Instant::now() + config.flush_interval_jittered();
         let mut batch = vec![first];
 
@@ -365,18 +381,22 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore) {
         // Acquire global concurrency permit (blocks if max_concurrent_flushes reached)
         let _permit = flush_semaphore.acquire().await;
 
+        // Mark channel as flushing (prevents concurrent mention reply)
+        channel_flushing.store(true, Ordering::Release);
+
         // Flush: dispatch batch with [NO_REPLY] system prompt
         match dispatch_ambient_batch(batch).await {
             Ok(response) => {
                 if !response.trim().eq_ignore_ascii_case("[NO_REPLY]") {
-                    post_response(response).await;
+                    post_response(response).await;  // no "thinking" msg — post directly
                 }
             }
             Err(e) => {
                 warn!("ambient flush failed, discarding batch: {e}");
-                // Batch is discarded — next cycle starts fresh (fire-and-forget)
             }
         }
+
+        channel_flushing.store(false, Ordering::Release);
         // _permit dropped here — releases semaphore slot
     }
 }
@@ -384,9 +404,20 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore) {
 
 ### Other Implementation Details
 
+- **No thinking message:** ambient dispatches do NOT send a "..." placeholder
+  message. Unlike normal mention dispatch, ambient responses are posted directly
+  as a single message (or discarded). This eliminates visual flickering in
+  the channel.
 - **`[NO_REPLY]` check:** applied after `stream_prompt` completes. If the
-  trimmed final content equals `[NO_REPLY]` (case-insensitive), delete the
-  thinking message and return early.
+  trimmed final content equals `[NO_REPLY]` (case-insensitive), no message is
+  posted.
+- **Bot-to-bot loop prevention:** the bot's own messages never enter the buffer
+  (existing `bot_id` check). Additionally, messages from other bots are gated
+  by `allow_bot_messages` config. Even if another bot's reply enters the buffer,
+  the existing `MAX_CONSECUTIVE_BOT_TURNS` hard cap (applied at ingest, before
+  `submit`) prevents infinite loops. The ambient system prompt also explicitly
+  instructs: "Do not reply to other bot messages unless directly relevant to a
+  human's question."
 - **Mention detection reuse:** the existing `is_mentioned` logic in
   `Handler::message()` (src/discord.rs) fires **before** the buffer push.
   If mentioned, the message takes the normal dispatch path; remaining buffer
