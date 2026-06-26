@@ -3,6 +3,7 @@ use crate::acp::ContentBlock;
 use crate::adapter::{AdapterRouter, ChannelRef, ChatAdapter, MessageRef, SenderContext};
 use crate::bot_turns::{BotTurnTracker, TurnAction, TurnSeverity, BOT_TURN_LIMIT_WARNING_PREFIX};
 use crate::config::{AllowBots, AllowUsers, SttConfig};
+use crate::dispatch::DispatchTarget;
 use crate::format;
 use crate::media;
 use crate::remind::{self, ReminderStore};
@@ -234,6 +235,8 @@ pub struct Handler {
     pub allow_dm: bool,
     /// Per-thread dispatcher (Message mode uses cap=1 for FIFO; Thread/Lane use configured cap).
     pub dispatcher: Arc<crate::dispatch::Dispatcher>,
+    /// Ambient mode dispatcher for passive channel listening.
+    pub ambient: Option<Arc<crate::ambient::AmbientDispatcher>>,
     /// Reminder store for /remind slash command.
     pub reminder_store: ReminderStore,
     /// Track scheduled reminder IDs to prevent duplicate scheduling on reconnect.
@@ -602,6 +605,64 @@ impl EventHandler for Handler {
 
         if !is_dm && !in_allowed_channel && !in_thread {
             return;
+        }
+
+        // --- Ambient Mode routing ---
+        // If the message is in an ambient-enabled channel, NOT a @mention,
+        // NOT in a thread, and NOT a DM → route to ambient dispatcher.
+        // @mention in an ambient channel → discard buffer + normal dispatch.
+        if let Some(ref ambient) = self.ambient {
+            if ambient.is_ambient_channel(channel_id) && !in_thread && !is_dm {
+                if is_mentioned {
+                    // Discard ambient buffer — mention takes priority.
+                    ambient.discard_buffer(&channel_id.to_string()).await;
+                    // Fall through to normal dispatch below.
+                } else {
+                    // Route to ambient buffer (not normal dispatch).
+                    // Bot messages only if allow_bot_messages is true for ambient.
+                    if msg.author.bot && !ambient.allow_bot_messages() {
+                        return;
+                    }
+
+                    let prompt = resolve_mentions(&msg.content, bot_id, &self.allowed_role_ids);
+                    if prompt.is_empty() && msg.attachments.is_empty() {
+                        return;
+                    }
+
+                    let display_name = msg
+                        .member
+                        .as_ref()
+                        .and_then(|m| m.nick.as_ref())
+                        .or(msg.author.global_name.as_ref())
+                        .unwrap_or(&msg.author.name);
+
+                    let channel_ref = ChannelRef {
+                        platform: "discord".into(),
+                        channel_id: channel_id.to_string(),
+                        thread_id: None,
+                        parent_id: None,
+                        origin_event_id: None,
+                    };
+
+                    let ambient_msg = crate::ambient::AmbientMessage {
+                        sender_json: String::new(), // Not needed for ambient
+                        sender_name: display_name.clone(),
+                        prompt,
+                        extra_blocks: Vec::new(), // Skip attachments for ambient v1
+                        arrived_at: std::time::Instant::now(),
+                    };
+
+                    let target = Arc::clone(&self.router) as Arc<dyn DispatchTarget>;
+                    ambient.submit(
+                        &channel_id.to_string(),
+                        channel_ref,
+                        adapter.clone(),
+                        target,
+                        ambient_msg,
+                    ).await;
+                    return;
+                }
+            }
         }
 
         // User message gating (mirrors Slack's AllowUsers logic).
