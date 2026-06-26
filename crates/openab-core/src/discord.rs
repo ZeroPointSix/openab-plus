@@ -1846,10 +1846,12 @@ impl Handler {
             // Handle an early exit (the command terminated during the URL window).
             if let Some(res) = early_exit {
                 let _ = tokio::join!(stdout_task, stderr_task);
-                let collected = lines
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .join("\n");
+                let collected = strip_ansi_codes(
+                    &lines
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .join("\n"),
+                );
                 let detail = if collected.trim().is_empty() {
                     String::new()
                 } else {
@@ -1896,7 +1898,7 @@ impl Handler {
             }
 
             // Send the captured output (truncated to Discord's 2000-char limit).
-            let output = collected_lines.join("\n");
+            let output = strip_ansi_codes(&collected_lines.join("\n"));
             let prefix = "🔐 **Agent Authentication**\n```\n";
             let suffix = "\n```\nFollow the instructions above. Waiting for authorization...";
             // Discord enforces the 2000-char limit in UTF-16 code units; budget and
@@ -2848,6 +2850,15 @@ fn turn_limit_warning_present(messages: &[(bool, &str)]) -> bool {
         .any(|(is_bot, content)| *is_bot && content.contains(BOT_TURN_LIMIT_WARNING_PREFIX))
 }
 
+/// Strip ANSI escape sequences (color codes, cursor movement, etc.) from text.
+/// Auth CLIs like `codex` emit these for terminal styling, but they render as
+/// garbage in Discord messages.
+fn strip_ansi_codes(s: &str) -> String {
+    static ANSI_RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
+    ANSI_RE.replace_all(s, "").into_owned()
+}
+
 /// Truncate `body` so that, prefixed by `prefix` and suffixed by `suffix`, the
 /// whole message fits within `limit` measured in **UTF-16 code units** — which
 /// is how Discord enforces its 2000-character message cap. Truncation only ever
@@ -2933,6 +2944,19 @@ mod tests {
             + out.encode_utf16().count()
             + suffix.encode_utf16().count();
         assert!(total <= 2000, "assembled total {total} exceeds 2000");
+    }
+
+    // --- strip_ansi_codes tests ---
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        let input = "\x1b[90mOpenAI\x1b[0m \x1b[94mhttps://auth.openai.com\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "OpenAI https://auth.openai.com");
+    }
+
+    #[test]
+    fn strip_ansi_passthrough_clean_text() {
+        assert_eq!(strip_ansi_codes("no codes here"), "no codes here");
     }
 
     // --- resolve_mentions tests ---
