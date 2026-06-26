@@ -38,6 +38,14 @@ The quick start should prove only that:
 
 All other agent backends and broad web/tool access remain Day 2 work.
 
+The default Day 1 policy should live as a checked-in sample artifact, not as a long inline YAML block in the first-page guide. The quick start applies:
+
+```text
+openshell/samples/kiro-discord-day1-policy.yaml
+```
+
+Agent/platform combinations should grow under `openshell/samples/` after they have a real E2E pass. For example, Kiro-specific combinations belong in `openshell/samples/kiro.md`; Codex, Claude, Copilot, Gemini, and other coding CLIs should get their own files when maintainers or users contribute tested policies.
+
 ## Why The Quick Start Needs Policy
 
 OpenShell is default-deny for outbound traffic. A working OpenAB policy must define:
@@ -115,6 +123,22 @@ The following are intentionally out of scope for the first-page quick start:
 
 Those use cases can be added later as explicit profiles or policy artifacts after they are tested.
 
+The documented Day 2 workflow is log-driven:
+
+1. Watch `openshell logs oab --tail`.
+2. Trigger the blocked workflow.
+3. Extract the denied host, port, protocol shape, and binary path.
+4. Add the narrowest policy entry with `openshell policy update`.
+5. Repeat until the relevant denials stop.
+
+This keeps the sandbox boundary useful while still giving users a clear way to expand egress for their own workflow.
+
+## Host Support Boundary
+
+The OpenAB quick start should point users to the OpenShell support matrix before they start. Day 1 should use host/runtime combinations listed by OpenShell, currently Linux Debian/Ubuntu on `amd64` or `arm64`, or macOS Apple Silicon with Docker Desktop. Other combinations are not first-run targets for this guide.
+
+OpenAB can add notes for combinations we have tested and rejected, but those notes should not turn the Day 1 guide into a platform-debugging document.
+
 ## Future Direction
 
 OpenAB may eventually need a small OpenShell preset vocabulary:
@@ -131,6 +155,7 @@ The immediate PR should not solve all three. It should make Day 1 simple, honest
 
 - [OpenShell policy schema](https://docs.nvidia.com/openshell/reference/policy-schema)
 - [OpenShell first network policy tutorial](https://docs.nvidia.com/openshell/get-started/tutorials/first-network-policy)
+- [OpenShell support matrix](https://docs.nvidia.com/openshell/reference/support-matrix)
 - [OpenShell providers](https://docs.nvidia.com/openshell/sandboxes/manage-providers)
 - [Kiro firewall and proxy documentation](https://kiro.dev/docs/cli/privacy-and-security/firewalls/)
 - [Kiro remote authentication](https://kiro.dev/docs/cli/authentication/)

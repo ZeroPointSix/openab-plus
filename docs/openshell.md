@@ -60,6 +60,9 @@ echo
 test -n "$DISCORD_BOT_TOKEN" || { echo "DISCORD_BOT_TOKEN is required"; exit 1; }
 export DISCORD_BOT_TOKEN
 
+openshell sandbox delete oab >/dev/null 2>&1 || true
+openshell provider delete openab-discord >/dev/null 2>&1 || true
+
 openshell provider create --name openab-discord --type generic --credential DISCORD_BOT_TOKEN
 
 # Until ghcr.io/openabdev/openab-kiro-sandbox is published, build the wrapper locally.
@@ -70,83 +73,7 @@ openshell sandbox create --name oab \
   --from openab-kiro-sandbox:latest \
   -- bash
 
-cat > openab-kiro-day1-policy.yaml <<'EOF'
-version: 1
-filesystem_policy:
-  include_workdir: true
-  read_only:
-    - /usr
-    - /lib
-    - /lib64
-    - /bin
-    - /sbin
-    - /etc
-    - /app
-    - /var/log
-    - /proc
-    - /dev/urandom
-  read_write:
-    - /sandbox
-    - /tmp
-    - /dev/null
-landlock:
-  compatibility: best_effort
-process:
-  run_as_user: sandbox
-  run_as_group: sandbox
-network_policies:
-  discord:
-    name: openab-discord
-    endpoints:
-      - host: discord.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: full
-      - host: gateway.discord.gg
-        port: 443
-        protocol: websocket
-        enforcement: enforce
-        access: full
-      - host: cdn.discordapp.com
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: read-only
-      - host: media.discordapp.net
-        port: 443
-        protocol: rest
-        enforcement: enforce
-        access: read-only
-    binaries:
-      - { path: /usr/local/bin/openab }
-  kiro:
-    name: kiro-cli
-    endpoints:
-      - { host: app.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: assets.app.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: read-only }
-      - { host: cli.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: prod.us-east-1.auth.desktop.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: prod.us-east-1.telemetry.desktop.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: prod.download.desktop.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: read-only }
-      - { host: prod.download.cli.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: read-only }
-      - { host: desktop-release.q.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: read-only }
-      - { host: q.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: q.eu-central-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: runtime.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: runtime.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: management.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: management.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: telemetry.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: telemetry.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: cognito-identity.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: oidc.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
-      - { host: client-telemetry.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
-    binaries:
-      - { path: /usr/local/bin/kiro-cli* }
-EOF
-
-openshell policy set oab --policy openab-kiro-day1-policy.yaml --wait
+openshell policy set oab --policy openshell/samples/kiro-discord-day1-policy.yaml --wait
 openshell sandbox connect oab
 ```
 
@@ -189,6 +116,17 @@ openab run -c /sandbox/config.toml
 ```
 
 Mention the bot in Discord. The Day 1 test passes only when the bot replies while `openab run` is running inside the OpenShell sandbox.
+
+## Supported Day 1 Environments
+
+Use one of these host paths for this guide:
+
+| Host path | Day 1 status | Notes |
+| --- | --- | --- |
+| Linux Debian/Ubuntu `amd64` or `arm64` + Docker Engine | Recommended Day 1 path | Best first path for a remote VM, Zeabur, EC2, home server, or Raspberry Pi. |
+| macOS Apple Silicon + Docker Desktop | OpenShell-supported, OpenAB E2E-gated | Docker Desktop provides the Linux runtime substrate. Treat this as valid for OpenAB only after a real Discord reply from inside the OpenShell sandbox. |
+
+OpenShell's current [support matrix](https://docs.nvidia.com/openshell/reference/support-matrix) lists these supported host platforms and Docker Desktop or Docker Engine as the Docker-backed gateway prerequisite. If a host/runtime combination is not listed there, do not use it as your first Day 1 path.
 
 ## Choose Your Host Path
 
@@ -252,7 +190,41 @@ OpenShell sandboxes are default-deny for outbound network traffic. A working pol
 
 For OpenAB Day 1, this means `openab` needs Discord REST and Discord Gateway WebSocket access, while `kiro-cli` needs the Kiro service endpoints listed by Kiro's firewall documentation.
 
-The policy above uses `enforcement: enforce`. Do not use `enforcement: audit` as a shortcut for this quick start: audit is useful for investigation, but it is not a replacement for a known-good Day 1 allowlist.
+The sample policy uses `enforcement: enforce`. Do not use `enforcement: audit` as a shortcut for this quick start: audit is useful for investigation, but it is not a replacement for a known-good Day 1 allowlist.
+
+## Day 2: Add Egress Deliberately
+
+After the bot can reply in Discord, keep OpenShell policy narrow and add only the egress your workflow actually needs.
+
+Watch the OpenShell logs in another terminal:
+
+```bash
+openshell logs oab --tail
+```
+
+Or inspect the last few minutes after a failed request:
+
+```bash
+openshell logs oab --since 5m
+```
+
+When an outbound request is blocked, identify three fields from the log:
+
+- blocked host and port
+- binary path
+- protocol shape, such as REST or WebSocket
+
+Then add the minimum endpoint for that binary:
+
+```bash
+openshell policy update oab \
+  --add-endpoint api.example.com:443:read-only:rest:enforce \
+  --binary /usr/local/bin/kiro-cli
+```
+
+Repeat until the logs stop showing relevant denials for the workflow you are testing. Do not add broad package registries, cloud APIs, search APIs, or arbitrary web access to the Day 1 policy unless that access is part of a tested sample.
+
+For Kiro with other chat platforms, start with [OpenShell Kiro samples](../openshell/samples/kiro.md). Missing combinations are expected to be contributed after a real E2E pass.
 
 ## E2E Rules
 
@@ -265,6 +237,13 @@ For a test run to count:
 - On macOS with Docker Desktop, the proof is the actual Discord bot connection and reply. If the Discord WebSocket cannot connect through the OpenShell-managed route, the guide is not yet valid for that host path.
 
 For deeper policy, access, usability, and E2E notes, read [ADR: OpenShell OpenAB Preset Module](adr/openshell-openab-preset-module.md).
+
+## OpenShell Or Kubernetes?
+
+| Choose | When |
+| --- | --- |
+| OpenShell | You want a single-machine sandbox that can get the default OpenAB + Discord + Kiro path running quickly, with explicit egress policy. |
+| Kubernetes | You already operate Kubernetes, need mature production rollout controls, or expect many agents, services, secrets, and network policies. |
 
 ## Troubleshooting
 
@@ -282,7 +261,6 @@ For deeper policy, access, usability, and E2E notes, read [ADR: OpenShell OpenAB
 ```bash
 openshell sandbox delete oab
 openshell provider delete openab-discord
-rm -f openab-kiro-day1-policy.yaml
 ```
 
 ## Related Docs
@@ -290,7 +268,9 @@ rm -f openab-kiro-day1-policy.yaml
 - [Discord setup](discord.md)
 - [Kiro CLI](kiro.md)
 - [Agent-installable tools](agent-installable-tools.md)
+- [OpenShell Kiro samples](../openshell/samples/kiro.md)
 - [OpenShell policy ADR](adr/openshell-openab-preset-module.md)
+- [OpenShell support matrix](https://docs.nvidia.com/openshell/reference/support-matrix)
 - [OpenShell policy schema](https://docs.nvidia.com/openshell/reference/policy-schema)
 - [OpenShell first network policy tutorial](https://docs.nvidia.com/openshell/get-started/tutorials/first-network-policy)
 - [Kiro firewall documentation](https://kiro.dev/docs/cli/privacy-and-security/firewalls/)

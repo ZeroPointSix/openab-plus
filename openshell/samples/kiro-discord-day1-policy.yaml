@@ -1,0 +1,73 @@
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /lib64
+    - /bin
+    - /sbin
+    - /etc
+    - /app
+    - /var/log
+    - /proc
+    - /dev/urandom
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+landlock:
+  compatibility: best_effort
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+network_policies:
+  discord:
+    name: openab-discord
+    endpoints:
+      - host: discord.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: full
+      - host: gateway.discord.gg
+        port: 443
+        protocol: websocket
+        enforcement: enforce
+        access: full
+      - host: cdn.discordapp.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+      - host: media.discordapp.net
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        access: read-only
+    binaries:
+      - { path: /usr/local/bin/openab }
+  kiro:
+    name: kiro-cli
+    endpoints:
+      - { host: app.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: assets.app.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+      - { host: cli.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: prod.us-east-1.auth.desktop.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: prod.us-east-1.telemetry.desktop.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: prod.download.desktop.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+      - { host: prod.download.cli.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+      - { host: desktop-release.q.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+      - { host: q.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: q.eu-central-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: runtime.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: runtime.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: management.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: management.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: telemetry.us-east-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: telemetry.eu-central-1.kiro.dev, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: cognito-identity.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: oidc.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: client-telemetry.us-east-1.amazonaws.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+    binaries:
+      - { path: /usr/local/bin/kiro-cli* }
