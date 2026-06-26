@@ -343,7 +343,7 @@ non-mentioned messages in ambient-enabled channels with a timer-based consumer.
 
 ```rust
 // Pseudocode — ambient consumer differs from turn-boundary consumer:
-async fn ambient_consumer_loop(rx, config) {
+async fn ambient_consumer_loop(rx, config, flush_semaphore) {
     loop {
         let first = rx.recv().await;           // park until first msg
         let deadline = Instant::now() + config.flush_interval_jittered();
@@ -362,12 +362,22 @@ async fn ambient_consumer_loop(rx, config) {
             }
         }
 
+        // Acquire global concurrency permit (blocks if max_concurrent_flushes reached)
+        let _permit = flush_semaphore.acquire().await;
+
         // Flush: dispatch batch with [NO_REPLY] system prompt
-        let response = dispatch_ambient_batch(batch).await;
-        if response.trim().eq_ignore_ascii_case("[NO_REPLY]") {
-            continue; // discard silently
+        match dispatch_ambient_batch(batch).await {
+            Ok(response) => {
+                if !response.trim().eq_ignore_ascii_case("[NO_REPLY]") {
+                    post_response(response).await;
+                }
+            }
+            Err(e) => {
+                warn!("ambient flush failed, discarding batch: {e}");
+                // Batch is discarded — next cycle starts fresh (fire-and-forget)
+            }
         }
-        post_response(response).await;
+        // _permit dropped here — releases semaphore slot
     }
 }
 ```
