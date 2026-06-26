@@ -324,23 +324,31 @@ has memory of what it said/declined recently. Sessions expire after
 
 ### Configuration
 
+All ambient settings are grouped under a top-level `[ambient]` section:
+
 ```toml
-[discord.ambient]
+[ambient]
 enabled = false                       # master switch
-channels = ["1490282656913559673"]    # required — explicit allowlist, empty = disabled
 flush_interval_seconds = 60           # time-based flush trigger (±20% jitter applied)
 flush_max_messages = 10               # count-based flush trigger
 flush_hard_cap = 50                   # safety cap — force flush at this count
 context_window = 20                   # historical messages fetched via Discord API before batch
-
-[pool.ambient]
-max_sessions = 5                      # separate pool for ambient dispatches
-ambient_session_ttl_minutes = 60      # ambient session inactivity timeout
-ambient_context_flushes = 3           # rolling window of retained flush history
-
-[ambient.limits]
 max_concurrent_flushes = 3            # max simultaneous LLM calls across all ambient channels
+
+[ambient.pool]
+max_sessions = 5                      # separate pool for ambient dispatches
+session_ttl_minutes = 60              # ambient session inactivity timeout
+context_flushes = 3                   # rolling window of retained flush history
+
+[ambient.discord]
+channels = ["1490282656913559673"]    # required — explicit allowlist, empty = disabled
 ```
+
+**Design rationale:** flush parameters (`flush_interval_seconds`, `flush_max_messages`,
+etc.) are platform-agnostic and live at the `[ambient]` level. Platform-specific
+settings (channel allowlists) live under `[ambient.<platform>]`. This allows
+future multi-platform support (`[ambient.slack]`, `[ambient.telegram]`) without
+restructuring.
 
 **`channels` semantics:** an explicit allowlist is **required**. If `channels`
 is empty or omitted while `enabled = true`, ambient mode is **not activated**
