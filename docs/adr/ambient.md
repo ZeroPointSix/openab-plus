@@ -201,8 +201,8 @@ Discord Channel
 │  ┌────────────────────────────────────────────────────────────┐  │
 │  │ Ambient Dispatch (batch)                                   │  │
 │  │                                                            │  │
-│  │ • Lock buffer → drain all messages → unlock immediately    │  │
-│  │   (new messages enter a fresh buffer cycle)                │  │
+│  │ • Drain messages from mpsc channel into batch              │  │
+│  │   (new messages queue for next flush cycle)                │  │
 │  │ • Prepend: channel history (context_window via API)        │  │
 │  │ • Prepend system instruction:                              │  │
 │  │   "You are in ambient mode. Below is a batch of recent     │  │
@@ -223,16 +223,18 @@ Discord Channel
 
 ### Buffer Lifecycle
 
-The `AmbientBuffer` operates as a **swap-and-drain** model:
+Conceptually, the ambient buffer operates as a **swap-and-drain** model —
+ingestion is decoupled from flush processing so neither blocks the other.
 
-1. Messages arrive → pushed into the active buffer (under a short lock).
-2. Flush triggers → lock the buffer, **swap** it with a fresh empty buffer,
-   unlock immediately. The drained batch is processed asynchronously.
-3. New messages arriving during flush processing enter the fresh buffer and
-   will be part of the **next** flush cycle.
+In practice, this is implemented via the existing `Dispatcher` infrastructure
+using a bounded `mpsc::channel` per ambient channel (see Implementation Notes).
+The mpsc channel provides the same decoupling guarantees: `submit()` pushes
+messages into the channel (non-blocking for senders), and the ambient consumer
+loop drains messages via `rx.recv()` with a deadline. The "swap" happens
+implicitly — once the consumer drains and moves into flush processing, new
+messages queue in the channel buffer for the next cycle.
 
-This eliminates race conditions: the lock is held only for the swap operation
-(microseconds), and flush processing is fully decoupled from ingestion.
+The key invariant: flush processing never blocks message ingestion.
 
 ### Flush Triggers
 
@@ -243,27 +245,48 @@ condition is met (whichever comes first):
 |---------|---------|-------------|
 | Time | `flush_interval_seconds = 60` | Seconds since first buffered message |
 | Count | `flush_max_messages = 10` | Max messages to accumulate before flush |
-| Hard cap | `flush_hard_cap = 50` | Safety cap — force flush regardless of timer state |
-| Mention | immediate | Any message that @mentions the bot triggers instant flush |
+| Hard cap | `flush_hard_cap = 50` | Safety cap — force flush if `flush_max_messages` is set high or disabled |
+
+**Relationship between `flush_max_messages` and `flush_hard_cap`:**
+`flush_max_messages` is the operational trigger (default 10). `flush_hard_cap`
+is a safety net for deployments where operators set `flush_max_messages` to a
+very large value (or 0 to disable count-based flushing) to rely solely on
+timer-based flushes. In that scenario, `flush_hard_cap` prevents unbounded
+buffer growth during message spikes. With default values (10 and 50), the hard
+cap is effectively dormant — this is intentional.
+| Mention | immediate | @mention discards buffer, triggers normal mention dispatch (not a flush) |
 
 **Flush interval jitter:** to prevent thundering herd when many channels flush
 simultaneously, the actual interval is `flush_interval_seconds ± 20%` (random
 per-channel, recomputed each cycle).
 
-**Immediate flush on @mention:** when a message that `@mentions` the bot enters
-the buffer, the ambient buffer for that channel is **discarded** (not flushed).
-The @mention message is dispatched via the normal mention-triggered path (with
-full reactions, threading, etc.). Rationale: the bot is about to reply directly
-via mention — flushing the ambient buffer simultaneously would produce a
-redundant double-reply.
+**@mention handling:** when a `@mention` is detected at the Handler level
+(before the buffer), the system:
+1. Discards the ambient buffer for that channel (messages are lost — not flushed).
+2. If an ambient flush is already in-flight, sets a `cancelled` flag to suppress
+   the ambient response before posting (see Concurrent reply prevention below).
+3. Dispatches the @mention via the normal mention-triggered path (with full
+   reactions, threading, etc.).
+
+Rationale: the bot is about to reply directly via mention — flushing the ambient
+buffer simultaneously would produce a redundant double-reply. The discarded
+messages provided conversational context that the mention dispatch can retrieve
+via `context_window` (Discord API history fetch) if needed.
 
 **Concurrent reply prevention:** to prevent double-replying to the same channel:
-- The ambient consumer holds a per-channel `AtomicBool` lock (`flushing`).
-- When a @mention arrives on an ambient channel, the system:
+- The ambient consumer holds a per-channel `AtomicBool` flag (`flushing`) with
+  a **safety timeout** (`flush_timeout_seconds = 120`). If the flag remains set
+  beyond the timeout (e.g., consumer panicked/OOM), it is automatically reset
+  and the condition is logged as an error.
+- When a @mention arrives on an ambient channel (detected at Handler level,
+  before the buffer), the system:
   1. If ambient consumer is idle (not flushing): discard buffer, dispatch
      mention normally.
-  2. If ambient consumer is mid-flush: cancel/ignore the ambient response
-     (set a `cancelled` flag checked before posting), then dispatch mention.
+  2. If ambient consumer is mid-flush: set a `cancelled` flag **and** suppress
+     the ambient response atomically using a `post_guard` — the guard is
+     acquired before the `[NO_REPLY]` check and held through `post_response()`.
+     The mention dispatch path invalidates the guard, ensuring no ambient
+     message is posted after cancellation.
 - Conversely, if a mention dispatch is already in-flight, the ambient consumer
   skips posting its response — the user already got a direct reply.
 - This ensures at most one bot response is posted to a channel at any given
@@ -334,6 +357,7 @@ flush_max_messages = 10               # count-based flush trigger
 flush_hard_cap = 50                   # safety cap — force flush at this count
 context_window = 20                   # historical messages fetched via Discord API before batch
 max_concurrent_flushes = 3            # max simultaneous LLM calls across all ambient channels
+flush_timeout_seconds = 120           # safety timeout — auto-reset flushing flag if exceeded
 
 [ambient.pool]
 max_sessions = 5                      # separate pool for ambient dispatches
@@ -342,6 +366,7 @@ context_flushes = 3                   # rolling window of retained flush history
 
 [ambient.discord]
 channels = ["1490282656913559673"]    # required — explicit allowlist, empty = disabled
+allow_bot_messages = false            # whether other bots' messages enter ambient buffer
 ```
 
 **Design rationale:** flush parameters (`flush_interval_seconds`, `flush_max_messages`,
@@ -454,17 +479,19 @@ building a parallel buffer system.
 | Reactions | Full (👀🤔🔥🆗) | Suppressed |
 | Session pool | Main pool | Ambient pool (separate `max_sessions`) |
 
-**New `message_processing_mode` value:** extend the enum to include `"ambient"`:
+**Not a new `message_processing_mode`:** ambient mode is a **parallel dispatch
+path**, not a replacement for the primary processing mode. The existing
+`message_processing_mode` enum (`per-message`, `per-thread`, `per-lane`) is
+unchanged. Ambient mode is configured separately via `[ambient]` and runs as
+a separate Dispatcher instance alongside the primary one.
 
 ```toml
-# Existing modes (unchanged):
+# Existing modes (unchanged) — applies to mention-triggered messages:
 message_processing_mode = "per-message"   # 1 msg → 1 turn
 message_processing_mode = "per-thread"    # batch at turn boundary
 message_processing_mode = "per-lane"      # batch at turn boundary, per-sender
 
-# New mode (this ADR):
-# Configured separately in [discord.ambient] — not via message_processing_mode.
-# Ambient is a parallel dispatch path, not a replacement for the primary mode.
+# Ambient mode is independent — configured in [ambient], not here.
 ```
 
 Ambient mode runs as a **separate Dispatcher instance** alongside the primary
@@ -501,14 +528,22 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore, channel_flushing) {
         // Acquire global concurrency permit (blocks if max_concurrent_flushes reached)
         let _permit = flush_semaphore.acquire().await;
 
-        // Mark channel as flushing (prevents concurrent mention reply)
-        channel_flushing.store(true, Ordering::Release);
+        // Mark channel as flushing (with safety timeout for auto-reset)
+        let _flushing_guard = FlushingGuard::new(
+            channel_flushing,
+            config.flush_timeout_seconds,
+        ); // auto-resets on drop OR timeout
 
         // Flush: dispatch batch with [NO_REPLY] system prompt
         match dispatch_ambient_batch(batch).await {
             Ok(response) => {
                 if !response.trim().eq_ignore_ascii_case("[NO_REPLY]") {
-                    post_response(response).await;  // no "thinking" msg — post directly
+                    // Atomic check-and-post: acquire post_guard to prevent
+                    // race with mention cancellation
+                    if let Some(_guard) = post_guard.try_acquire() {
+                        post_response(response).await;
+                    }
+                    // else: mention arrived, cancelled — skip posting
                 }
             }
             Err(e) => {
@@ -516,7 +551,7 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore, channel_flushing) {
             }
         }
 
-        channel_flushing.store(false, Ordering::Release);
+        // _flushing_guard dropped here — resets channel_flushing
         // _permit dropped here — releases semaphore slot
     }
 }
@@ -535,14 +570,14 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore, channel_flushing) {
   (existing `bot_id` check). **For ambient channels, `allow_bot_messages`
   defaults to `"off"`** regardless of the global setting — other bots' messages
   are excluded from the ambient buffer unless the operator explicitly opts in.
-  Even if opted in, the existing `MAX_CONSECUTIVE_BOT_TURNS` hard cap (applied
-  at ingest, before `submit`) prevents infinite loops. The ambient system prompt
+  Even if opted in, the existing `max_bot_turns` config (default 100, hard
+  cap 1000 — applied at ingest, before `submit`) prevents infinite loops. The ambient system prompt
   also explicitly instructs: "Do not reply to other bot messages unless directly
   relevant to a human's question."
 - **Mention detection reuse:** the existing `is_mentioned` logic in
   `Handler::message()` (src/discord.rs) fires **before** the buffer push.
-  If mentioned, the message takes the normal dispatch path; remaining buffer
-  is flushed as ambient.
+  If mentioned, the message takes the normal dispatch path; the ambient buffer
+  for that channel is discarded (not flushed).
 - **Bot echo prevention:** `msg.author.id == bot_id` check (already exists in
   Handler::message) ensures bot's own messages never enter the buffer.
 - **Reactions suppressed:** ambient dispatches skip `StatusReactionController`
@@ -550,5 +585,6 @@ async fn ambient_consumer_loop(rx, config, flush_semaphore, channel_flushing) {
 - **Serialization with normal dispatch:** the ambient session key
   (`ambient:discord:<channel_id>`) is different from mention session keys
   (`discord:<thread_id>`), so they never contend on the same session lock.
-  If a normal @mention arrives while an ambient flush is in-flight, both
-  proceed independently (different sessions, different pools).
+  However, concurrent reply prevention (see above) ensures at most one response
+  is posted per channel — if a @mention arrives mid-flush, the ambient response
+  is cancelled via the `post_guard` mechanism.
