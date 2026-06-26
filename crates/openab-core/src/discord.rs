@@ -2855,7 +2855,7 @@ fn turn_limit_warning_present(messages: &[(bool, &str)]) -> bool {
 /// garbage in Discord messages.
 fn strip_ansi_codes(s: &str) -> String {
     static ANSI_RE: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap());
+        LazyLock::new(|| regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\([A-Z]").unwrap());
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
@@ -2957,6 +2957,12 @@ mod tests {
     #[test]
     fn strip_ansi_passthrough_clean_text() {
         assert_eq!(strip_ansi_codes("no codes here"), "no codes here");
+    }
+
+    #[test]
+    fn strip_ansi_removes_non_sgr_sequences() {
+        let input = "\x1b[?25lhello\x1b[?25h \x1b(Bworld";
+        assert_eq!(strip_ansi_codes(input), "hello world");
     }
 
     // --- resolve_mentions tests ---
