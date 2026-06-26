@@ -163,8 +163,8 @@ Not all messages enter the ambient buffer:
 - ✅ **User messages** in ambient-enabled channels (without @mention) → buffer
 - ✅ **Bot messages from other bots** (if `allow_bot_messages` permits) → buffer
 - ❌ **Own bot messages** → never buffered (prevents echo loops)
-- ❌ **Messages that @mention the bot** → bypass buffer, trigger immediate
-  flush of existing buffer + normal mention dispatch
+- ❌ **Messages that @mention the bot** → bypass buffer, discard existing
+  buffer contents + normal mention dispatch
 - ❌ **Messages in threads created by the bot** → handled by existing
   thread-based session logic, not ambient
 
