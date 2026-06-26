@@ -775,6 +775,15 @@ impl EventHandler for Handler {
                     Ok(block) => {
                         debug!(url = %attachment.url, filename = %attachment.filename, "adding image attachment");
                         extra_blocks.push(block);
+                        extra_blocks.push(ContentBlock::Text {
+                            text: format!(
+                                "[Image attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {} (expires ~24h)",
+                                attachment.filename,
+                                attachment.content_type.as_deref().unwrap_or("unknown"),
+                                attachment.size,
+                                attachment.url,
+                            ),
+                        });
                     }
                     Err(media::MediaFetchError::NotAnImage) => {
                         if media::is_video_file(
@@ -3013,6 +3022,44 @@ mod tests {
         assert!(text.contains("content_type: video/mp4"));
         assert!(text.contains("size_bytes: 12345"));
         assert!(text.contains("url: https://cdn.discordapp.com/attachments/demo.mp4"));
+    }
+
+    #[test]
+    fn image_attachment_block_includes_url_and_metadata() {
+        // Simulates the format string used in the image attachment handler.
+        let filename = "screenshot.png";
+        let content_type = Some("image/png");
+        let size: u32 = 142048;
+        let url = "https://cdn.discordapp.com/attachments/123/456/screenshot.png";
+
+        let text = format!(
+            "[Image attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {} (expires ~24h)",
+            filename,
+            content_type.unwrap_or("unknown"),
+            size,
+            url,
+        );
+
+        assert!(text.contains("[Image attachment]"));
+        assert!(text.contains("filename: screenshot.png"));
+        assert!(text.contains("content_type: image/png"));
+        assert!(text.contains("size_bytes: 142048"));
+        assert!(text.contains("url: https://cdn.discordapp.com/attachments/123/456/screenshot.png"));
+        assert!(text.contains("(expires ~24h)"));
+    }
+
+    #[test]
+    fn image_attachment_block_missing_content_type_falls_back() {
+        let content_type: Option<&str> = None;
+        let text = format!(
+            "[Image attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {} (expires ~24h)",
+            "photo.jpg",
+            content_type.unwrap_or("unknown"),
+            99999,
+            "https://cdn.discordapp.com/attachments/1/2/photo.jpg",
+        );
+
+        assert!(text.contains("content_type: unknown"));
     }
 
     // --- thread-race error detection ---
