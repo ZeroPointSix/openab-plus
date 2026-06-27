@@ -1230,6 +1230,10 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
 // ---------------------------------------------------------------------------
 
 /// Top-level `[ambient]` configuration for passive channel listening.
+///
+/// NOTE: ADR #1211 originally specified `[discord.ambient]`. The implementation
+/// uses top-level `[ambient]` with nested `[ambient.discord]` to allow future
+/// multi-platform ambient support without restructuring config.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AmbientConfig {
     /// Master switch (default: false).

@@ -208,7 +208,7 @@ impl AmbientDispatcher {
 
         // Lazily spawn consumer if not yet started for this channel.
         if !channels.contains_key(channel_id) {
-            let (tx, rx) = tokio::sync::mpsc::channel(self.config.flush_hard_cap);
+            let (tx, rx) = tokio::sync::mpsc::channel(self.config.flush_hard_cap.max(1));
             let flushing = Arc::new(AtomicBool::new(false));
             let post_guard = Arc::new(PostGuard::new());
 
@@ -300,13 +300,17 @@ async fn ambient_consumer_loop(
         };
 
         // Compute jittered deadline: flush_interval ± 20%
-        let base = Duration::from_secs(config.flush_interval_seconds);
+        // Guard: interval must be >= 1s to avoid gen_range panic on empty range.
+        let base_secs = config.flush_interval_seconds.max(1);
+        let base = Duration::from_secs(base_secs);
         let jitter_range = base.as_millis() as f64 * 0.2;
         let jitter_ms = rand::thread_rng().gen_range(-jitter_range..jitter_range) as i64;
         let interval = Duration::from_millis((base.as_millis() as i64 + jitter_ms).max(1000) as u64);
         let deadline = tokio::time::Instant::now() + interval;
 
         let mut batch = vec![first];
+        // Guard: flush_max_messages must be >= 1 to avoid immediate single-msg flush.
+        let flush_max = config.flush_max_messages.max(1);
 
         // Accumulate until trigger fires.
         loop {
@@ -318,10 +322,10 @@ async fn ambient_consumer_loop(
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Some(msg)) => {
                     batch.push(msg);
-                    if batch.len() >= config.flush_max_messages {
+                    if batch.len() >= flush_max {
                         break;
                     }
-                    if batch.len() >= config.flush_hard_cap {
+                    if batch.len() >= config.flush_hard_cap.max(1) {
                         break;
                     }
                 }
@@ -346,8 +350,8 @@ async fn ambient_consumer_loop(
             }
         };
 
-        // Set flushing flag with safety timeout.
-        let flush_timeout = Duration::from_secs(config.flush_timeout_seconds);
+        // Set flushing flag with safety timeout (clamped to [5s, 600s]).
+        let flush_timeout = Duration::from_secs(config.flush_timeout_seconds.clamp(5, 600));
         let _flushing_guard = FlushingGuard::new(Arc::clone(&flushing), flush_timeout);
 
         // Check post_guard BEFORE building payload (mention may have cancelled during accumulation).
@@ -376,12 +380,19 @@ async fn ambient_consumer_loop(
 
         // Dispatch batch to agent. For ambient mode, we use stream_prompt_blocks
         // with a dummy reaction controller (enabled=false) to suppress all reactions.
-        // The NO_REPLY check must be handled at a higher level (response filtering).
         //
-        // TODO(ambient-v2): implement response capture mode so we can intercept
-        // [NO_REPLY] before the message is posted. For v1, the system prompt
-        // strongly instructs the agent, and we accept that rare false-positives
-        // may briefly appear before being deleted.
+        // ⚠️ KNOWN LIMITATIONS (v1, accepted):
+        // 1. [NO_REPLY] filtering: `is_no_reply()` is defined but not yet wired
+        //    into the response path. The system prompt instructs the agent to
+        //    return `[NO_REPLY]` but there is no post-filter to suppress it.
+        //    Rare false-positive replies may appear until v2 response capture.
+        // 2. Tool access: ambient flush shares the same DispatchTarget as @mention,
+        //    meaning the agent has full tool access during ambient flushes. For v1
+        //    this is accepted (system prompt restricts behavior); v2 should use a
+        //    restricted target or disable tools for ambient sessions.
+        //
+        // TODO(ambient-v2): implement response capture mode to intercept
+        // [NO_REPLY] before posting, and restrict tool access for ambient.
         let dummy_msg_ref = MessageRef {
             channel: channel_ref.clone(),
             message_id: String::new(),
