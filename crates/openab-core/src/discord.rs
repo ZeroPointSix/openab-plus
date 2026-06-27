@@ -532,7 +532,9 @@ impl EventHandler for Handler {
         // to normal bot gating + dispatch (same as before).
         if msg.author.bot && in_ambient_context && !is_mentioned {
             if let Some(ambient) = self.ambient.as_ref() {
-                if ambient.allow_bot_messages() {
+                if !ambient.allow_bot_messages() {
+                    debug!(channel_id = %msg.channel_id, bot_id = %msg.author.id, "ambient early-route: bot msg rejected (allow_bot_messages=false)");
+                } else {
                     let prompt = resolve_mentions(&msg.content, bot_id, &self.allowed_role_ids);
                     if prompt.is_empty() && msg.attachments.is_empty() {
                         return;
@@ -562,6 +564,7 @@ impl EventHandler for Handler {
                     };
 
                     let target = Arc::clone(&self.router) as Arc<dyn DispatchTarget>;
+                    debug!(channel_id = %msg.channel_id, bot_id = %msg.author.id, "ambient early-route: bot msg buffered");
                     ambient.submit(
                         &channel_id.to_string(),
                         channel_ref,
