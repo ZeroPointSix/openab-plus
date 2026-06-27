@@ -286,10 +286,6 @@ impl AmbientDispatcher {
             flush_semaphore,
         }
     }
-
-    /// Check if ambient mode is active and this channel is in the allowlist.
-    pub fn is_ambient_channel(&self, channel_id: u64) -> bool {
-        self.config.enabled && !self.enabled_channels.is_empty() && self.enabled_channels.contains(&channel_id)
     }
 
     /// Decide whether a message should be ambient-buffered.
