@@ -551,7 +551,7 @@ impl EventHandler for Handler {
         // Thread detection: single to_channel() call for both allowed and
         // non-allowed channels. Uses thread_metadata (not parent_id) to
         // identify threads — see detect_thread() doc comments for rationale.
-        let (in_thread, bot_owns_thread, thread_parent_id, is_dm, is_structural_thread) = match msg
+        let (in_thread, bot_owns_thread, thread_parent_id, is_dm, is_structural_thread, structural_parent_id) = match msg
             .channel_id
             .to_channel(&ctx.http)
             .await
@@ -559,9 +559,10 @@ impl EventHandler for Handler {
             Ok(serenity::model::channel::Channel::Guild(gc)) => {
                 let parent = gc.parent_id.map(|id| id.get().to_string());
                 let has_thread_metadata = gc.thread_metadata.is_some();
+                let parent_u64 = gc.parent_id.map(|id| id.get());
                 let result = detect_thread(
                     has_thread_metadata,
-                    gc.parent_id.map(|id| id.get()),
+                    parent_u64,
                     gc.owner_id.map(|id| id.get()),
                     bot_id.get(),
                     &self.allowed_channels,
@@ -580,22 +581,23 @@ impl EventHandler for Handler {
                 (
                     result.0,
                     result.1.unwrap_or(false),
-                    parent,
+                    if has_thread_metadata { parent } else { None },
                     false,
                     has_thread_metadata,
+                    if has_thread_metadata { parent_u64 } else { None },
                 )
             }
             Ok(serenity::model::channel::Channel::Private(_)) => {
                 tracing::debug!(channel_id = %msg.channel_id, "DM channel");
-                (false, false, None, true, false)
+                (false, false, None, true, false, None)
             }
             Ok(other) => {
                 tracing::debug!(channel_id = %msg.channel_id, kind = ?other, "not a guild thread");
-                (false, false, None, false, false)
+                (false, false, None, false, false, None)
             }
             Err(e) => {
                 tracing::debug!(channel_id = %msg.channel_id, error = %e, "to_channel failed");
-                (false, false, None, false, false)
+                (false, false, None, false, false, None)
             }
         };
 
@@ -609,12 +611,7 @@ impl EventHandler for Handler {
         // Uses structural thread detection (thread_metadata) decoupled from the
         // normal dispatch allowlist, so ambient-only channels work correctly.
         let in_ambient_context = self.ambient.as_ref().is_some_and(|ambient| {
-            let parent_u64 = thread_parent_id.as_deref().and_then(|p| {
-                p.parse::<u64>().map_err(|e| {
-                    tracing::debug!(parent_id = p, error = %e, "failed to parse thread parent_id");
-                }).ok()
-            });
-            ambient.should_buffer(channel_id, is_structural_thread, bot_owns_thread, parent_u64)
+            ambient.should_buffer(channel_id, is_structural_thread, bot_owns_thread, structural_parent_id)
         });
 
         if !is_dm && !in_allowed_channel && !in_thread && !in_ambient_context {
