@@ -346,11 +346,12 @@ impl AmbientDispatcher {
 
     /// Discard the ambient buffer for a channel (called when @mention arrives).
     /// Also cancels any in-flight ambient response via the post_guard.
-    /// The consumer will drain buffered messages when it sees the cancellation.
+    /// The consumer discards the current batch; remaining buffered messages
+    /// carry into the next cycle.
     pub async fn discard_buffer(&self, channel_id: &str) {
         let channels = self.channels.lock().await;
         if let Some(state) = channels.get(channel_id) {
-            // Cancel any in-flight post — consumer drains the buffer on next check.
+            // Cancel any in-flight post — consumer discards current batch on next check.
             state.post_guard.cancel();
             debug!(channel_id, "ambient buffer discard requested (mention arrived)");
         }
