@@ -20,6 +20,9 @@ use crate::adapter::{ChannelRef, ChatAdapter, MessageRef};
 use crate::config::AmbientConfig;
 use crate::dispatch::DispatchTarget;
 
+use anyhow::Result;
+use async_trait::async_trait;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -128,6 +131,86 @@ impl PostGuard {
     /// Reset for next flush cycle.
     pub fn reset(&self) {
         self.cancelled.store(false, Ordering::Release);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AmbientCaptureAdapter — intercepts send_message for [NO_REPLY] filtering
+// ---------------------------------------------------------------------------
+
+/// Wraps a real `ChatAdapter` and intercepts `send_message` to suppress
+/// `[NO_REPLY]` responses before they reach the channel.
+struct AmbientCaptureAdapter {
+    inner: Arc<dyn ChatAdapter>,
+}
+
+#[async_trait]
+impl ChatAdapter for AmbientCaptureAdapter {
+    fn platform(&self) -> &'static str {
+        self.inner.platform()
+    }
+
+    fn message_limit(&self) -> usize {
+        self.inner.message_limit()
+    }
+
+    fn use_streaming(&self, _other_bot_present: bool) -> bool {
+        false // Force non-streaming so text is collected before send
+    }
+
+    async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef> {
+        // Filter [NO_REPLY] before it reaches the channel.
+        if is_no_reply(content) {
+            debug!("ambient: suppressed [NO_REPLY] response");
+            return Ok(MessageRef {
+                channel: channel.clone(),
+                message_id: String::new(),
+            });
+        }
+        self.inner.send_message(channel, content).await
+    }
+
+    async fn create_thread(
+        &self,
+        channel: &ChannelRef,
+        trigger_msg: &MessageRef,
+        title: &str,
+    ) -> Result<ChannelRef> {
+        self.inner.create_thread(channel, trigger_msg, title).await
+    }
+
+    async fn add_reaction(&self, msg: &MessageRef, emoji: &str) -> Result<()> {
+        self.inner.add_reaction(msg, emoji).await
+    }
+
+    async fn remove_reaction(&self, msg: &MessageRef, emoji: &str) -> Result<()> {
+        self.inner.remove_reaction(msg, emoji).await
+    }
+
+    async fn edit_message(&self, msg: &MessageRef, content: &str) -> Result<()> {
+        self.inner.edit_message(msg, content).await
+    }
+
+    async fn send_message_with_reply(
+        &self,
+        channel: &ChannelRef,
+        content: &str,
+        reply_to_message_id: &str,
+    ) -> Result<MessageRef> {
+        if is_no_reply(content) {
+            debug!("ambient: suppressed [NO_REPLY] reply");
+            return Ok(MessageRef {
+                channel: channel.clone(),
+                message_id: String::new(),
+            });
+        }
+        self.inner
+            .send_message_with_reply(channel, content, reply_to_message_id)
+            .await
+    }
+
+    async fn delete_message(&self, msg: &MessageRef) -> Result<()> {
+        self.inner.delete_message(msg).await
     }
 }
 
@@ -379,28 +462,24 @@ async fn ambient_consumer_loop(
             continue;
         }
 
-        // Dispatch batch to agent. For ambient mode, we use stream_prompt_blocks
-        // with a dummy reaction controller (enabled=false) to suppress all reactions.
+        // Dispatch batch to agent using AmbientCaptureAdapter which intercepts
+        // [NO_REPLY] responses before they reach the channel. Non-streaming mode
+        // ensures text is fully collected before send_message is called, allowing
+        // is_no_reply() to filter the sentinel pre-delivery.
         //
-        // ⚠️ KNOWN LIMITATIONS (v1, accepted):
-        // 1. [NO_REPLY] filtering: `is_no_reply()` is defined but not yet wired
-        //    into the response path. The system prompt instructs the agent to
-        //    return `[NO_REPLY]` but there is no post-filter to suppress it.
-        //    Rare false-positive replies may appear until v2 response capture.
-        // 2. Tool access: ambient flush shares the same DispatchTarget as @mention,
-        //    meaning the agent has full tool access during ambient flushes. For v1
-        //    this is accepted (system prompt restricts behavior); v2 should use a
-        //    restricted target or disable tools for ambient sessions.
-        //
-        // TODO(ambient-v2): implement response capture mode to intercept
-        // [NO_REPLY] before posting, and restrict tool access for ambient.
+        // ⚠️ KNOWN LIMITATION (v1, accepted):
+        // Tool access: ambient flush shares the same DispatchTarget as @mention.
+        // v2 should use a restricted target or disable tools for ambient sessions.
+        let capture_adapter: Arc<dyn ChatAdapter> = Arc::new(AmbientCaptureAdapter {
+            inner: Arc::clone(&adapter),
+        });
         let dummy_msg_ref = MessageRef {
             channel: channel_ref.clone(),
             message_id: String::new(),
         };
         let reactions = Arc::new(crate::reactions::StatusReactionController::new(
             false, // disabled — no reactions for ambient
-            Arc::clone(&adapter),
+            Arc::clone(&capture_adapter),
             dummy_msg_ref,
             crate::config::ReactionEmojis::default(),
             crate::config::ReactionTiming::default(),
@@ -414,7 +493,7 @@ async fn ambient_consumer_loop(
 
         match target
             .stream_prompt_blocks(
-                &adapter,
+                &capture_adapter,
                 &session_key,
                 content_blocks,
                 &channel_ref,
