@@ -36,18 +36,41 @@ app.kubernetes.io/instance: {{ .ctx.Release.Name }}
 app.kubernetes.io/component: {{ .agent }}
 {{- end }}
 
-{{/* Per-agent resource name: <fullname>-<agentKey> */}}
+{{/* Per-agent resource name: nameOverride > <fullname>-<agentKey> */}}
 {{- define "openab.agentFullname" -}}
+{{- if and .cfg (.cfg.nameOverride) (ne .cfg.nameOverride "") }}
+{{- .cfg.nameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
 {{- printf "%s-%s" (include "openab.fullname" .ctx) .agent | trunc 63 | trimSuffix "-" }}
 {{- end }}
+{{- end }}
 
-{{/* Resolve image: agent-level string override → global default (repository:tag, tag defaults to appVersion) */}}
+{{/* Secret name to use for Slack credentials.
+     If existingSecret is set, reference it; otherwise fall back to the chart-managed agent secret.
+     Call with: dict "ctx" $ "agent" $name "cfg" $cfg */}}
+{{- define "openab.slackSecretName" -}}
+{{- if and .cfg.slack (.cfg.slack.existingSecret | default "" | trim) -}}
+{{- .cfg.slack.existingSecret | trim -}}
+{{- else -}}
+{{- include "openab.agentFullname" . -}}
+{{- end -}}
+{{- end }}
+
+{{/* Resolve image: agent-level string override → unified default (repository:<tag>-<agent>).
+    All agents use the same format: ghcr.io/openabdev/openab:<tag>-<agent>
+    There is no "default" agent — every agent must be explicitly identified in the tag.
+    Per-agent image override (string with ":") is used verbatim for full backward compat.
+    Call with: dict "ctx" $ "agent" $name "cfg" $cfg */}}
 {{- define "openab.agentImage" -}}
 {{- if and .cfg.image (kindIs "string" .cfg.image) (ne .cfg.image "") }}
+{{- if contains ":" .cfg.image }}
 {{- .cfg.image }}
 {{- else }}
+{{- printf "%s:%s" .cfg.image (default .ctx.Chart.AppVersion .ctx.Values.image.tag) }}
+{{- end }}
+{{- else }}
 {{- $tag := default .ctx.Chart.AppVersion .ctx.Values.image.tag }}
-{{- printf "%s:%s" .ctx.Values.image.repository $tag }}
+{{- printf "%s:%s-%s" .ctx.Values.image.repository $tag .agent }}
 {{- end }}
 {{- end }}
 
@@ -64,4 +87,14 @@ app.kubernetes.io/component: {{ .agent }}
 {{/* Persistence enabled: default true unless explicitly set to false */}}
 {{- define "openab.persistenceEnabled" -}}
 {{- if and . .persistence (eq (.persistence.enabled | toString) "false") }}false{{ else }}true{{ end }}
+{{- end }}
+
+{{/* Validate secretEnv entries: each must have name, secretName, and secretKey.
+     Call with: dict "secretEnv" $cfg.secretEnv "agentName" $name */}}
+{{- define "openab.validateSecretEnv" -}}
+{{- range .secretEnv }}
+{{- if not (and .name .secretName .secretKey) }}
+{{- fail (printf "agents.%s.secretEnv entries require name, secretName, and secretKey" $.agentName) }}
+{{- end }}
+{{- end }}
 {{- end }}

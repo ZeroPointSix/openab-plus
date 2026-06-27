@@ -1,25 +1,67 @@
-mod acp;
-mod adapter;
-mod config;
-mod discord;
-mod error_display;
-mod format;
-mod media;
-mod reactions;
-mod setup;
-mod slack;
-mod stt;
+mod ctl;
+#[cfg(any(
+    feature = "telegram",
+    feature = "line",
+    feature = "feishu",
+    feature = "googlechat",
+    feature = "wecom",
+    feature = "teams",
+))]
+mod unified_adapter;
+use openab_core::acp;
+use openab_core::adapter::{self, AdapterRouter};
+use openab_core::bot_turns;
+use openab_core::config;
+use openab_core::cron;
+#[cfg(feature = "discord")]
+use openab_core::discord;
+use openab_core::dispatch;
+use openab_core::gateway;
+use openab_core::hooks;
+use openab_core::multibot_cache;
+#[cfg(feature = "discord")]
+use openab_core::remind;
+use openab_core::secrets;
+use openab_core::setup;
+#[cfg(feature = "slack")]
+use openab_core::slack;
 
-use adapter::AdapterRouter;
 use clap::Parser;
+#[cfg(feature = "discord")]
+use serenity::gateway::GatewayError;
+#[cfg(feature = "discord")]
 use serenity::prelude::*;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-use tracing::{error, info};
+use std::sync::{Arc, Mutex};
+use tracing::{error, info, warn};
+
+/// Wait for SIGINT (ctrl_c) or, on unix, SIGTERM.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to install SIGTERM handler, falling back to ctrl_c only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => { info!("SIGTERM received"); }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
 
 #[derive(Parser)]
-#[command(name = "openab")]
+#[command(name = "openab", version)]
 #[command(about = "Multi-platform ACP agent broker (Discord, Slack)", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -30,7 +72,8 @@ struct Cli {
 enum Commands {
     /// Run the bot (default)
     Run {
-        /// Config file path (default: config.toml)
+        /// Config file path or URL — local path, https://, http://, or s3://<bucket>/<key> (default: config.toml)
+        #[arg(short = 'c', long = "config", value_name = "CONFIG")]
         config: Option<String>,
     },
     /// Launch the interactive setup wizard
@@ -38,6 +81,37 @@ enum Commands {
         /// Output file path for generated config (default: config.toml)
         #[arg(short, long)]
         output: Option<String>,
+    },
+    /// Internal: AgentCore WebSocket shell bridge (ACP↔WebSocket)
+    #[cfg(feature = "agentcore")]
+    AgentcoreBridge {
+        /// AgentCore Runtime ARN
+        #[arg(long)]
+        runtime_arn: String,
+        /// AWS region
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        /// ACP agent command to run in the PTY (default: kiro-cli acp --trust-all-tools)
+        #[arg(long, default_value = "kiro-cli acp --trust-all-tools")]
+        command: String,
+    },
+    /// Set a runtime value (e.g. thread.name)
+    Set {
+        /// Key to set (e.g. thread.name)
+        key: String,
+        /// Value to set
+        value: String,
+        /// Target thread/channel ID
+        #[arg(long)]
+        thread: Option<String>,
+    },
+    /// Get a runtime value
+    Get {
+        /// Key to get (e.g. thread.name)
+        key: String,
+        /// Target thread/channel ID
+        #[arg(long)]
+        thread: Option<String>,
     },
 }
 
@@ -50,162 +124,750 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cmd = Cli::parse().command.unwrap_or(Commands::Run { config: None });
+    let cmd = Cli::parse()
+        .command
+        .unwrap_or(Commands::Run { config: None });
 
-    match cmd {
+    let config_arg = match cmd {
         Commands::Setup { output } => {
             setup::run_setup(output.map(PathBuf::from))?;
-            Ok(())
+            return Ok(());
         }
-        Commands::Run { config } => {
-            let config_path = config
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("config.toml"));
+        #[cfg(feature = "agentcore")]
+        Commands::AgentcoreBridge { runtime_arn, region, command } => {
+            return acp::agentcore::run_bridge(&runtime_arn, &region, &command).await;
+        }
+        Commands::Set { key, value, thread } => {
+            let resp = ctl::send_request(&ctl::Request {
+                action: ctl::Action::Set,
+                key,
+                value: Some(value),
+                thread_id: thread.or_else(|| std::env::var("OPENAB_THREAD_ID").ok()),
+            })
+            .await?;
+            if resp.ok {
+                println!("✓ {}", resp.message);
+            } else {
+                eprintln!("✗ {}", resp.message);
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Commands::Get { key, thread } => {
+            let resp = ctl::send_request(&ctl::Request {
+                action: ctl::Action::Get,
+                key,
+                value: None,
+                thread_id: thread.or_else(|| std::env::var("OPENAB_THREAD_ID").ok()),
+            })
+            .await?;
+            if resp.ok {
+                println!("{}", resp.value.unwrap_or_default());
+            } else {
+                eprintln!("✗ {}", resp.message);
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        Commands::Run { config } => config,
+    };
 
-            let mut cfg = config::load_config(&config_path)?;
-            info!(
-                agent_cmd = %cfg.agent.command,
-                pool_max = cfg.pool.max_sessions,
-                discord = cfg.discord.is_some(),
-                slack = cfg.slack.is_some(),
-                reactions = cfg.reactions.enabled,
-                "config loaded"
+    // -- Run path --
+    let config_source = config_arg.unwrap_or_else(|| "config.toml".into());
+
+    // First pass: load config (env vars expanded, secrets NOT resolved yet)
+    let raw_expanded = config::load_config_raw_from_source(&config_source).await?;
+
+    let mut cfg = config::parse_config_str(&raw_expanded, &config_source)?;
+    info!(
+        agent_cmd = %cfg.agent.command,
+        pool_max = cfg.pool.max_sessions,
+        discord = cfg.discord.is_some(),
+        slack = cfg.slack.is_some(),
+        reactions = cfg.reactions.enabled,
+        "config loaded"
+    );
+
+    if cfg.discord.is_none() && cfg.slack.is_none() && cfg.gateway.is_none() {
+        anyhow::bail!(
+            "no adapter configured — add [discord], [slack], and/or [gateway] to config.toml"
+        );
+    }
+
+    // --- pre_seed: download & extract S3 zips before pre_boot ---
+    #[cfg(feature = "pre-seed")]
+    if let Some(ref pre_seed) = cfg.hooks.pre_seed {
+        if !pre_seed.sources.is_empty() {
+            openab_core::pre_seed::run(pre_seed).await?;
+        }
+    }
+
+    // Validate and run pre_boot hook (before agent pool creation)
+    if let Some(ref hook) = cfg.hooks.pre_boot {
+        hooks::validate_hook("pre_boot", hook)?;
+        hooks::run_hook("pre_boot", hook).await?;
+    }
+    if let Some(ref hook) = cfg.hooks.pre_shutdown {
+        hooks::validate_hook("pre_shutdown", hook)?;
+    }
+
+    // Resolve secrets (after pre_boot hooks so exec:// scripts are available)
+    if !cfg.secrets.refs.is_empty() {
+        let resolved = secrets::resolve(&cfg.secrets).await?;
+        let substituted = secrets::substitute(&raw_expanded, &resolved);
+        cfg = config::parse_config_str(&substituted, &config_source)?;
+    }
+
+    let shutdown_hook = cfg.hooks.pre_shutdown.clone();
+
+    let pool = Arc::new(acp::SessionPool::new(cfg.agent, cfg.pool.max_sessions));
+    let ttl_secs = cfg.pool.session_ttl_hours * 3600;
+
+    // Resolve STT config (auto-detect GROQ_API_KEY from env)
+    if cfg.stt.enabled {
+        if cfg.stt.api_key.is_empty() && cfg.stt.base_url.contains("groq.com") {
+            if let Ok(key) = std::env::var("GROQ_API_KEY") {
+                if !key.is_empty() {
+                    info!("stt.api_key not set, using GROQ_API_KEY from environment");
+                    cfg.stt.api_key = key;
+                }
+            }
+        }
+        if cfg.stt.api_key.is_empty() {
+            anyhow::bail!("stt.enabled = true but no API key found — set stt.api_key in config or export GROQ_API_KEY");
+        }
+        info!(model = %cfg.stt.model, base_url = %cfg.stt.base_url, "STT enabled");
+    }
+
+    let router = Arc::new(AdapterRouter::new(
+        pool.clone(),
+        cfg.reactions,
+        cfg.markdown.tables,
+        cfg.pool.prompt_hard_timeout_secs,
+        cfg.pool.liveness_check_secs,
+        cfg.workspace.aliases,
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| {
+            tracing::warn!(
+                "HOME environment variable is not set — falling back to /tmp as bot_home. \
+                 This weakens the workspace security boundary."
+            );
+            "/tmp".into()
+        })),
+    ));
+
+    // Shutdown signal for Slack adapter
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let dispatchers: Arc<Mutex<Vec<Arc<dispatch::Dispatcher>>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Spawn cleanup task
+    let cleanup_pool = pool.clone();
+    let cleanup_dispatchers = dispatchers.clone();
+    let cleanup_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            cleanup_pool.cleanup_idle(ttl_secs).await;
+            for d in cleanup_dispatchers.lock().unwrap().iter() {
+                d.sweep_stale();
+            }
+        }
+    });
+
+    // Pre-build shared adapters for cron scheduler
+    #[cfg(feature = "discord")]
+    let shared_discord_adapter: Option<Arc<dyn adapter::ChatAdapter>> =
+        cfg.discord.as_ref().map(|dc| {
+            let http = Arc::new(serenity::http::Http::new(&dc.bot_token));
+            Arc::new(discord::DiscordAdapter::new(http)) as Arc<dyn adapter::ChatAdapter>
+        });
+    #[cfg(not(feature = "discord"))]
+    let shared_discord_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
+
+    let session_ttl_dur = std::time::Duration::from_secs(ttl_secs);
+
+    // Initialize multibot cache
+    let multibot_cache_path = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
+        .join(".openab")
+        .join("cache")
+        .join("threads.json");
+    let multibot_cache = multibot_cache::MultibotCache::load(multibot_cache_path);
+
+    #[cfg(feature = "slack")]
+    let shared_slack_adapter: Option<Arc<slack::SlackAdapter>> = cfg.slack.as_ref().map(|s| {
+        Arc::new(slack::SlackAdapter::new(
+            s.bot_token.clone(),
+            session_ttl_dur,
+            s.allow_bot_messages,
+            s.assistant_mode,
+            multibot_cache.clone(),
+            s.streaming,
+        ))
+    });
+    #[cfg(not(feature = "slack"))]
+    let shared_slack_adapter: Option<Arc<dyn adapter::ChatAdapter>> = None;
+
+    // Shared slot for Discord ShardMessenger (set in ready handler, used by ctl for agent.status)
+    let ctl_shard: ctl::ShardSlot = Arc::new(std::sync::OnceLock::new());
+
+    // Thread registry: thread_id → platform. Populated on message dispatch.
+    let ctl_registry = ctl::new_registry();
+
+    // Spawn control socket server for `openab set/get` IPC
+    let ctl_handle = {
+        let mut adapters = std::collections::HashMap::new();
+        if let Some(ref a) = shared_discord_adapter {
+            adapters.insert("discord".into(), a.clone());
+        }
+        if let Some(ref a) = shared_slack_adapter {
+            adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
+        if adapters.is_empty() {
+            None
+        } else {
+            Some(ctl::spawn_server(Arc::new(ctl::RuntimeHandler::new(
+                adapters,
+                ctl_registry.clone(),
+                ctl_shard.clone(),
+            ))))
+        }
+    };
+
+    // Validate cronjob config at startup
+    let mut configured_platforms: Vec<&str> = Vec::new();
+    if cfg.discord.is_some() {
+        configured_platforms.push("discord");
+    }
+    if cfg.slack.is_some() {
+        configured_platforms.push("slack");
+    }
+    cron::validate_cronjobs(&cfg.cron.jobs, &configured_platforms)?;
+
+    // Spawn Slack adapter (background task)
+    #[cfg(feature = "slack")]
+    let slack_handle = if let Some(slack_cfg) = cfg.slack {
+        let allow_all_channels =
+            config::resolve_allow_all(slack_cfg.allow_all_channels, &slack_cfg.allowed_channels);
+        let allow_all_users =
+            config::resolve_allow_all(slack_cfg.allow_all_users, &slack_cfg.allowed_users);
+        if !allow_all_channels && slack_cfg.allowed_channels.is_empty() {
+            warn!("allow_all_channels=false with empty allowed_channels for Slack — bot will deny all channels");
+        }
+        info!(
+            allow_all_channels,
+            allow_all_users,
+            channels = slack_cfg.allowed_channels.len(),
+            users = slack_cfg.allowed_users.len(),
+            allow_bot_messages = ?slack_cfg.allow_bot_messages,
+            allow_user_messages = ?slack_cfg.allow_user_messages,
+            "starting slack adapter"
+        );
+        let router = router.clone();
+        let stt = cfg.stt.clone();
+        let max_bot_turns = slack_cfg.max_bot_turns;
+        let slack_shutdown_rx = shutdown_rx.clone();
+        let adapter = shared_slack_adapter
+            .clone()
+            .expect("shared_slack_adapter must exist when slack config is present");
+        let (slack_cap, slack_grouping, slack_idle) = dispatch::dispatch_params(
+            &slack_cfg.message_processing_mode,
+            slack_cfg.max_buffered_messages,
+        );
+        let slack_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+            router.clone(),
+            slack_cap,
+            slack_cfg.max_batch_tokens,
+            slack_grouping,
+            slack_idle,
+        ));
+        dispatchers.lock().unwrap().push(slack_dispatcher.clone());
+        let slack_allowed_users: std::collections::HashSet<String> =
+            slack_cfg.allowed_users.into_iter().collect();
+        Some(tokio::spawn(async move {
+            if let Err(e) = slack::run_slack_adapter(
+                adapter,
+                slack_cfg.app_token,
+                allow_all_channels,
+                allow_all_users,
+                slack_cfg.allowed_channels.into_iter().collect(),
+                slack_allowed_users,
+                slack_cfg.allow_bot_messages,
+                slack_cfg.trusted_bot_ids.into_iter().collect(),
+                slack_cfg.allow_user_messages,
+                max_bot_turns,
+                stt,
+                slack_shutdown_rx,
+                slack_dispatcher,
+            )
+            .await
+            {
+                error!("slack adapter error: {e}");
+            }
+        }))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "slack"))]
+    let slack_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Spawn Gateway adapter (background task)
+    let gateway_handle = if let Some(gw_cfg) = cfg.gateway {
+        let router = router.clone();
+        let shutdown_rx = shutdown_rx.clone();
+        info!(url = %gw_cfg.url, "starting gateway adapter");
+        let (gw_cap, gw_grouping, gw_idle) = dispatch::dispatch_params(
+            &gw_cfg.message_processing_mode,
+            gw_cfg.max_buffered_messages,
+        );
+        let gw_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+            router.clone(),
+            gw_cap,
+            gw_cfg.max_batch_tokens,
+            gw_grouping,
+            gw_idle,
+        ));
+        dispatchers.lock().unwrap().push(gw_dispatcher.clone());
+        let params = gateway::GatewayParams {
+            url: gw_cfg.url,
+            platform: gw_cfg.platform,
+            token: gw_cfg.token,
+            bot_username: gw_cfg.bot_username,
+            allow_all_channels: config::resolve_allow_all(
+                gw_cfg.allow_all_channels,
+                &gw_cfg.allowed_channels,
+            ),
+            allowed_channels: gw_cfg.allowed_channels,
+            allow_all_users: config::resolve_allow_all(
+                gw_cfg.allow_all_users,
+                &gw_cfg.allowed_users,
+            ),
+            allowed_users: gw_cfg.allowed_users,
+            allow_bot_messages: gw_cfg.allow_bot_messages,
+            trusted_bot_ids: gw_cfg.trusted_bot_ids,
+            streaming: gw_cfg.streaming,
+            streaming_placeholder: gw_cfg.streaming_placeholder,
+            stt: cfg.stt.clone(),
+        };
+        let gw_router = router.clone();
+        Some(tokio::spawn(async move {
+            if let Err(e) =
+                gateway::run_gateway_adapter(params, shutdown_rx, gw_dispatcher, gw_router).await
+            {
+                error!("gateway adapter error: {e}");
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Spawn cron scheduler (background task)
+    // Spawn embedded webhook server when gateway adapters are compiled in (unified mode).
+    // In unified mode, platform webhooks hit this axum server directly → Dispatcher.submit(),
+    // bypassing the WebSocket hop of the two-process model.
+    #[cfg(any(
+        feature = "telegram",
+        feature = "line",
+        feature = "feishu",
+        feature = "googlechat",
+        feature = "wecom",
+        feature = "teams",
+    ))]
+    let _unified_handle = {
+        use openab_core::gateway::{GatewayEventContext, process_gateway_event};
+
+        // Check if any gateway platform env vars are configured
+        let has_telegram = std::env::var("TELEGRAM_BOT_TOKEN").is_ok();
+        let has_line = std::env::var("LINE_CHANNEL_SECRET").is_ok();
+        let has_feishu = std::env::var("FEISHU_APP_ID").is_ok();
+        let has_googlechat = std::env::var("GOOGLE_CHAT_ENABLED")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        let has_wecom = std::env::var("WECOM_CORP_ID").is_ok();
+        let has_teams = std::env::var("TEAMS_APP_ID").is_ok();
+
+        if has_telegram || has_line || has_feishu || has_googlechat || has_wecom || has_teams {
+            let listen_addr = std::env::var("GATEWAY_LISTEN")
+                .unwrap_or_else(|_| "0.0.0.0:8080".into());
+
+            // Create a dedicated dispatcher for unified gateway events
+            let unified_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+                router.clone(),
+                1,
+                24_000,
+                dispatch::BatchGrouping::Thread,
+                dispatch::PER_MESSAGE_CONSUMER_IDLE_TIMEOUT,
+            ));
+            dispatchers.lock().unwrap().push(unified_dispatcher.clone());
+
+            // Bridge: reuse gateway crate's AppState + webhook handlers.
+            // Events flow: webhook → adapter handler → event_tx → bridge task → process_gateway_event() → Dispatcher
+            // This reuses 100% of existing adapter code (signature verify, parsing, etc).
+            let (event_tx, _) = tokio::sync::broadcast::channel::<String>(256);
+
+            // Build gateway AppState from env vars (shared factory with standalone gateway)
+            let gw_state = Arc::new(openab_gateway::AppState::from_env(event_tx.clone(), None));
+
+            // Build axum router with platform webhook routes
+            let mut app = axum::Router::new()
+                .route("/health", axum::routing::get(|| async { "ok" }));
+
+            #[cfg(feature = "telegram")]
+            if gw_state.telegram_bot_token.is_some() {
+                let path = std::env::var("TELEGRAM_WEBHOOK_PATH")
+                    .unwrap_or_else(|_| "/webhook/telegram".into());
+                info!(path = %path, "unified: telegram adapter enabled");
+                app = app.route(&path, axum::routing::post(openab_gateway::adapters::telegram::webhook));
+            }
+
+            #[cfg(feature = "line")]
+            {
+                info!("unified: line adapter enabled");
+                app = app.route("/webhook/line", axum::routing::post(openab_gateway::adapters::line::webhook));
+            }
+
+            #[cfg(feature = "feishu")]
+            if gw_state.feishu.is_some() {
+                let path = std::env::var("FEISHU_WEBHOOK_PATH")
+                    .unwrap_or_else(|_| "/webhook/feishu".into());
+                info!(path = %path, "unified: feishu adapter enabled");
+                app = app.route(&path, axum::routing::post(openab_gateway::adapters::feishu::webhook));
+            }
+
+            #[cfg(feature = "wecom")]
+            if let Some(ref w) = gw_state.wecom {
+                info!(path = %w.config.webhook_path, "unified: wecom adapter enabled");
+                app = app
+                    .route(&w.config.webhook_path, axum::routing::get(openab_gateway::adapters::wecom::verify))
+                    .route(&w.config.webhook_path, axum::routing::post(openab_gateway::adapters::wecom::webhook));
+            }
+
+            #[cfg(feature = "teams")]
+            if gw_state.teams.is_some() {
+                let path = std::env::var("TEAMS_WEBHOOK_PATH")
+                    .unwrap_or_else(|_| "/webhook/teams".into());
+                info!(path = %path, "unified: teams adapter enabled");
+                app = app.route(&path, axum::routing::post(openab_gateway::adapters::teams::webhook));
+            }
+
+            #[cfg(feature = "googlechat")]
+            if gw_state.google_chat.is_some() {
+                let path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
+                    .unwrap_or_else(|_| "/webhook/googlechat".into());
+                info!(path = %path, "unified: googlechat adapter enabled");
+                app = app.route(&path, axum::routing::post(openab_gateway::adapters::googlechat::webhook));
+            }
+
+            let app = app.with_state(gw_state.clone());
+
+            // Bridge task: receive events from adapters via event_tx, dispatch to core
+            let unified_adapter: Arc<dyn adapter::ChatAdapter> = Arc::new(
+                unified_adapter::UnifiedGatewayAdapter::new(gw_state.clone())
             );
 
-            if cfg.discord.is_none() && cfg.slack.is_none() {
-                anyhow::bail!("no adapter configured — add [discord] and/or [slack] to config.toml");
-            }
+            // Read security gating from env (mirrors [gateway] config section)
+            let gw_allow_all_channels = std::env::var("GATEWAY_ALLOW_ALL_CHANNELS")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
+            let gw_allowed_channels: std::collections::HashSet<String> =
+                std::env::var("GATEWAY_ALLOWED_CHANNELS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            let gw_allow_all_users = std::env::var("GATEWAY_ALLOW_ALL_USERS")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(true);
+            let gw_allowed_users: std::collections::HashSet<String> =
+                std::env::var("GATEWAY_ALLOWED_USERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            let gw_bot_username = std::env::var("GATEWAY_BOT_USERNAME").ok();
 
-            let pool = Arc::new(acp::SessionPool::new(cfg.agent, cfg.pool.max_sessions));
-            let ttl_secs = cfg.pool.session_ttl_hours * 3600;
+            let gw_allow_bot_messages = std::env::var("GATEWAY_ALLOW_BOT_MESSAGES")
+                .map(|v| !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false);
+            let gw_trusted_bot_ids: std::collections::HashSet<String> =
+                std::env::var("GATEWAY_TRUSTED_BOT_IDS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
 
-            // Resolve STT config (auto-detect GROQ_API_KEY from env)
-            if cfg.stt.enabled {
-                if cfg.stt.api_key.is_empty() && cfg.stt.base_url.contains("groq.com") {
-                    if let Ok(key) = std::env::var("GROQ_API_KEY") {
-                        if !key.is_empty() {
-                            info!("stt.api_key not set, using GROQ_API_KEY from environment");
-                            cfg.stt.api_key = key;
-                        }
-                    }
-                }
-                if cfg.stt.api_key.is_empty() {
-                    anyhow::bail!("stt.enabled = true but no API key found — set stt.api_key in config or export GROQ_API_KEY");
-                }
-                info!(model = %cfg.stt.model, base_url = %cfg.stt.base_url, "STT enabled");
-            }
+            let event_ctx = Arc::new(GatewayEventContext {
+                adapter: unified_adapter,
+                dispatcher: unified_dispatcher,
+                router: router.clone(),
+                allow_all_channels: config::resolve_allow_all(
+                    Some(gw_allow_all_channels),
+                    &gw_allowed_channels.iter().cloned().collect::<Vec<_>>(),
+                ),
+                allowed_channels: gw_allowed_channels,
+                allow_all_users: config::resolve_allow_all(
+                    Some(gw_allow_all_users),
+                    &gw_allowed_users.iter().cloned().collect::<Vec<_>>(),
+                ),
+                allowed_users: gw_allowed_users,
+                allow_bot_messages: gw_allow_bot_messages,
+                trusted_bot_ids: gw_trusted_bot_ids,
+                bot_username: gw_bot_username,
+                stt_config: cfg.stt.clone(),
+            });
 
-            let router = Arc::new(AdapterRouter::new(pool.clone(), cfg.reactions));
-
-            // Shutdown signal for Slack adapter
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-
-            // Spawn cleanup task
-            let cleanup_pool = pool.clone();
-            let cleanup_handle = tokio::spawn(async move {
+            // Spawn the event bridge (event_tx → process_gateway_event)
+            let mut event_rx = event_tx.subscribe();
+            let bridge_ctx = event_ctx.clone();
+            tokio::spawn(async move {
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    cleanup_pool.cleanup_idle(ttl_secs).await;
+                    match event_rx.recv().await {
+                        Ok(event_json) => {
+                            let ctx = bridge_ctx.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = process_gateway_event(&event_json, &ctx).await {
+                                    tracing::warn!(error = %e, "unified bridge: event processing failed");
+                                }
+                            });
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "unified bridge: event_rx lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
 
-            // Spawn Slack adapter (background task)
-            let slack_handle = if let Some(slack_cfg) = cfg.slack {
-                info!(
-                    channels = slack_cfg.allowed_channels.len(),
-                    users = slack_cfg.allowed_users.len(),
-                    allow_bot_messages = ?slack_cfg.allow_bot_messages,
-                    allow_user_messages = ?slack_cfg.allow_user_messages,
-                    "starting slack adapter"
-                );
-                let router = router.clone();
-                let stt = cfg.stt.clone();
-                let session_ttl = std::time::Duration::from_secs(ttl_secs);
-                Some(tokio::spawn(async move {
-                    if let Err(e) = slack::run_slack_adapter(
-                        slack_cfg.bot_token,
-                        slack_cfg.app_token,
-                        slack_cfg.allowed_channels.into_iter().collect(),
-                        slack_cfg.allowed_users.into_iter().collect(),
-                        slack_cfg.allow_bot_messages,
-                        slack_cfg.trusted_bot_ids.into_iter().collect(),
-                        slack_cfg.allow_user_messages,
-                        session_ttl,
-                        stt,
-                        router,
-                        shutdown_rx,
-                    )
-                    .await
-                    {
-                        error!("slack adapter error: {e}");
+            info!(addr = %listen_addr, "unified webhook server starting");
+
+            Some(tokio::spawn(async move {
+                let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        error!(addr = %listen_addr, error = %e, "unified webhook server bind failed");
+                        return;
                     }
-                }))
-            } else {
-                None
-            };
-
-            // Run Discord adapter (foreground, blocking) or wait for ctrl_c
-            if let Some(discord_cfg) = cfg.discord {
-                let allowed_channels =
-                    parse_id_set(&discord_cfg.allowed_channels, "discord.allowed_channels")?;
-                let allowed_users = parse_id_set(&discord_cfg.allowed_users, "discord.allowed_users")?;
-                let trusted_bot_ids = parse_id_set(&discord_cfg.trusted_bot_ids, "discord.trusted_bot_ids")?;
-                info!(
-                    channels = allowed_channels.len(),
-                    users = allowed_users.len(),
-                    trusted_bots = trusted_bot_ids.len(),
-                    allow_bot_messages = ?discord_cfg.allow_bot_messages,
-                    "starting discord adapter"
-                );
-
-                let handler = discord::Handler {
-                    router,
-                    allowed_channels,
-                    allowed_users,
-                    stt_config: cfg.stt.clone(),
-                    adapter: std::sync::OnceLock::new(),
-                    allow_bot_messages: discord_cfg.allow_bot_messages,
-                    trusted_bot_ids,
                 };
+                info!(addr = %listen_addr, "unified webhook server listening");
+                if let Err(e) = axum::serve(listener, app).await {
+                    error!(error = %e, "unified webhook server error");
+                }
+            }))
+        } else {
+            None
+        }
+    };
 
-                let intents = GatewayIntents::GUILD_MESSAGES
-                    | GatewayIntents::MESSAGE_CONTENT
-                    | GatewayIntents::GUILDS;
-
-                let mut client = Client::builder(&discord_cfg.bot_token, intents)
-                    .event_handler(handler)
-                    .await?;
-
-                // Graceful Discord shutdown on ctrl_c
-                let shard_manager = client.shard_manager.clone();
-                tokio::spawn(async move {
-                    tokio::signal::ctrl_c().await.ok();
-                    info!("shutdown signal received");
-                    shard_manager.shutdown_all().await;
-                });
-
-                info!("discord bot running");
-                client.start().await?;
+    let usercron_path = if cfg.cron.usercron_enabled {
+        cfg.cron.usercron_path.as_ref().map(|p| {
+            let path = std::path::PathBuf::from(p);
+            if path.is_absolute() {
+                path
             } else {
-                // No Discord — just wait for ctrl_c
-                info!("running without discord, press ctrl+c to stop");
-                tokio::signal::ctrl_c().await.ok();
-                info!("shutdown signal received");
+                std::env::var("HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_default()
+                    .join(".openab")
+                    .join(path)
             }
+        })
+    } else {
+        None
+    };
+    let has_cron_work = !cfg.cron.jobs.is_empty() || usercron_path.is_some();
+    let cron_handle = if has_cron_work {
+        let shutdown_rx = shutdown_rx.clone();
+        let cronjobs = cfg.cron.jobs.clone();
+        let cron_router = router.clone();
+        let mut cron_adapters: std::collections::HashMap<String, Arc<dyn adapter::ChatAdapter>> =
+            std::collections::HashMap::new();
+        if let Some(ref a) = shared_discord_adapter {
+            cron_adapters.insert("discord".into(), a.clone());
+        }
+        #[cfg(feature = "slack")]
+        if let Some(ref a) = shared_slack_adapter {
+            cron_adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
+        }
+        let cron_platforms: Vec<String> =
+            configured_platforms.iter().map(|s| s.to_string()).collect();
+        info!(baseline = cronjobs.len(), usercron = ?usercron_path, "starting cron scheduler");
+        Some(tokio::spawn(async move {
+            cron::run_scheduler(
+                cronjobs,
+                usercron_path,
+                cron_platforms,
+                cron_router,
+                cron_adapters,
+                shutdown_rx,
+            )
+            .await;
+        }))
+    } else {
+        None
+    };
 
-            // Cleanup
-            cleanup_handle.abort();
-            // Signal Slack adapter to shut down gracefully
-            let _ = shutdown_tx.send(true);
-            if let Some(handle) = slack_handle {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    // Run Discord adapter (foreground, blocking) or wait for ctrl_c
+    #[cfg(feature = "discord")]
+    if let Some(discord_cfg) = cfg.discord {
+        let allow_all_channels = config::resolve_allow_all(
+            discord_cfg.allow_all_channels,
+            &discord_cfg.allowed_channels,
+        );
+        let allow_all_users =
+            config::resolve_allow_all(discord_cfg.allow_all_users, &discord_cfg.allowed_users);
+        let allowed_channels =
+            parse_id_set(&discord_cfg.allowed_channels, "discord.allowed_channels")?;
+        if !allow_all_channels && allowed_channels.is_empty() {
+            warn!("allow_all_channels=false with empty allowed_channels for Discord — bot will deny all channels");
+        }
+        let allowed_users = parse_id_set(&discord_cfg.allowed_users, "discord.allowed_users")?;
+        let trusted_bot_ids =
+            parse_id_set(&discord_cfg.trusted_bot_ids, "discord.trusted_bot_ids")?;
+        let allowed_role_ids =
+            parse_id_set(&discord_cfg.allowed_role_ids, "discord.allowed_role_ids")?;
+        info!(
+            allow_all_channels,
+            allow_all_users,
+            channels = allowed_channels.len(),
+            users = allowed_users.len(),
+            trusted_bots = trusted_bot_ids.len(),
+            role_triggers = allowed_role_ids.len(),
+            allow_bot_messages = ?discord_cfg.allow_bot_messages,
+            allow_user_messages = ?discord_cfg.allow_user_messages,
+            allow_dm = discord_cfg.allow_dm,
+            "starting discord adapter"
+        );
+
+        let (discord_cap, discord_grouping, discord_idle) = dispatch::dispatch_params(
+            &discord_cfg.message_processing_mode,
+            discord_cfg.max_buffered_messages,
+        );
+        let discord_dispatcher = Arc::new(dispatch::Dispatcher::with_idle_timeout(
+            router.clone(),
+            discord_cap,
+            discord_cfg.max_batch_tokens,
+            discord_grouping,
+            discord_idle,
+        ));
+        dispatchers.lock().unwrap().push(discord_dispatcher.clone());
+
+        // Initialize reminder store
+        let reminder_path = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_default()
+            .join(".openab")
+            .join("reminders.json");
+        let reminder_store = remind::ReminderStore::load(reminder_path);
+
+        let handler = discord::Handler {
+            router,
+            allow_all_channels,
+            allow_all_users,
+            allowed_channels,
+            allowed_users,
+            stt_config: cfg.stt.clone(),
+            adapter: std::sync::OnceLock::new(),
+            allow_bot_messages: discord_cfg.allow_bot_messages,
+            trusted_bot_ids,
+            allow_user_messages: discord_cfg.allow_user_messages,
+            allowed_role_ids,
+            participated_threads: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            multibot_threads: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            multibot_cache,
+            session_ttl: std::time::Duration::from_secs(ttl_secs),
+            max_bot_turns: discord_cfg.max_bot_turns,
+            bot_turns: tokio::sync::Mutex::new(bot_turns::BotTurnTracker::new(
+                discord_cfg.max_bot_turns,
+            )),
+            allow_dm: discord_cfg.allow_dm,
+            dispatcher: discord_dispatcher,
+            reminder_store: reminder_store.clone(),
+            scheduled_ids: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+        };
+
+        let intents = GatewayIntents::GUILD_MESSAGES
+            | GatewayIntents::MESSAGE_CONTENT
+            | GatewayIntents::GUILDS
+            | GatewayIntents::DIRECT_MESSAGES
+            | GatewayIntents::GUILD_MESSAGE_REACTIONS;
+
+        let mut client = Client::builder(&discord_cfg.bot_token, intents)
+            .event_handler(handler)
+            .await?;
+
+        let shard_manager = client.shard_manager.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            info!("shutdown signal received");
+            shard_manager.shutdown_all().await;
+        });
+
+        info!("discord bot running");
+        match client.start().await {
+            Err(serenity::Error::Gateway(GatewayError::DisallowedGatewayIntents)) => {
+                error!(
+                    "Discord rejected privileged intents. \
+                     Enable MESSAGE CONTENT INTENT at: \
+                     https://discord.com/developers/applications → Bot → Privileged Gateway Intents"
+                );
+                std::process::exit(1);
             }
-            let shutdown_pool = pool;
-            shutdown_pool.shutdown().await;
-            info!("openab shut down");
-            Ok(())
+            Err(serenity::Error::Gateway(GatewayError::InvalidAuthentication)) => {
+                error!(
+                    "Discord rejected bot token. \
+                     Verify your bot_token in config.toml is correct and has not been reset."
+                );
+                std::process::exit(1);
+            }
+            Err(e) => return Err(e.into()),
+            Ok(_) => {}
+        }
+    } else {
+        info!("running without discord, press ctrl+c to stop");
+        shutdown_signal().await;
+        info!("shutdown signal received");
+    }
+    // When discord feature is disabled at compile time, use this fallback block.
+    // (When discord feature IS enabled but no [discord] config exists, the `else`
+    // branch of the `if let Some(discord_cfg)` above handles shutdown instead.)
+    #[cfg(not(feature = "discord"))]
+    {
+        info!("running without discord, press ctrl+c to stop");
+        shutdown_signal().await;
+        info!("shutdown signal received");
+    }
+
+    // Cleanup
+    cleanup_handle.abort();
+    if let Some(h) = ctl_handle {
+        h.abort();
+        let _ = std::fs::remove_file(ctl::socket_path());
+    }
+    let _ = shutdown_tx.send(true);
+    if let Some(handle) = slack_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+    if let Some(handle) = gateway_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    }
+    if let Some(handle) = cron_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(35), handle).await;
+    }
+    for d in dispatchers.lock().unwrap().iter() {
+        d.shutdown();
+    }
+    let shutdown_pool = pool;
+    shutdown_pool.shutdown().await;
+    if let Some(ref hook) = shutdown_hook {
+        if let Err(e) = hooks::run_hook("pre_shutdown", hook).await {
+            error!(error = %e, "pre_shutdown hook failed");
         }
     }
+    info!("openab shut down");
+    Ok(())
 }
 
 fn parse_id_set(raw: &[String], label: &str) -> anyhow::Result<HashSet<u64>> {
@@ -225,4 +887,59 @@ fn parse_id_set(raw: &[String], label: &str) -> anyhow::Result<HashSet<u64>> {
         );
     }
     Ok(set)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_no_args_defaults_to_run() {
+        let cli = Cli::try_parse_from(["openab"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_run_no_args_defaults_config() {
+        let cli = Cli::try_parse_from(["openab", "run"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Run { config } => assert!(config.is_none()),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn cli_run_with_short_flag_local() {
+        let cli = Cli::try_parse_from(["openab", "run", "-c", "my-config.toml"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Run { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn cli_run_with_long_flag_local() {
+        let cli = Cli::try_parse_from(["openab", "run", "--config", "my-config.toml"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Run { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn cli_run_with_remote_url() {
+        let cli = Cli::try_parse_from(["openab", "run", "-c", "https://example.com/config.toml"])
+            .unwrap();
+        match cli.command.unwrap() {
+            Commands::Run { config } => assert!(config.unwrap().starts_with("https://")),
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn cli_setup_subcommand() {
+        let cli = Cli::try_parse_from(["openab", "setup"]).unwrap();
+        assert!(matches!(cli.command.unwrap(), Commands::Setup { .. }));
+    }
 }
