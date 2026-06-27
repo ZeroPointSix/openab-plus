@@ -172,7 +172,7 @@ impl AmbientDispatcher {
             .iter()
             .filter_map(|s| s.parse().ok())
             .collect();
-        let flush_semaphore = Arc::new(Semaphore::new(config.max_concurrent_flushes));
+        let flush_semaphore = Arc::new(Semaphore::new(config.max_concurrent_flushes.max(1)));
         Self {
             config,
             channels: Mutex::new(HashMap::new()),
