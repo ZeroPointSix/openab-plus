@@ -273,6 +273,12 @@ impl AmbientDispatcher {
             .filter_map(|s| s.parse().ok())
             .collect();
         let flush_semaphore = Arc::new(Semaphore::new(config.max_concurrent_flushes.max(1)));
+        if config.enabled && !enabled_channels.is_empty() {
+            tracing::info!(
+                channels = ?enabled_channels,
+                "ambient: thread observation is default-on for configured channels"
+            );
+        }
         Self {
             config,
             channels: Mutex::new(HashMap::new()),

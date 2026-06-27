@@ -551,15 +551,16 @@ impl EventHandler for Handler {
         // Thread detection: single to_channel() call for both allowed and
         // non-allowed channels. Uses thread_metadata (not parent_id) to
         // identify threads — see detect_thread() doc comments for rationale.
-        let (in_thread, bot_owns_thread, thread_parent_id, is_dm) = match msg
+        let (in_thread, bot_owns_thread, thread_parent_id, is_dm, is_structural_thread) = match msg
             .channel_id
             .to_channel(&ctx.http)
             .await
         {
             Ok(serenity::model::channel::Channel::Guild(gc)) => {
                 let parent = gc.parent_id.map(|id| id.get().to_string());
+                let has_thread_metadata = gc.thread_metadata.is_some();
                 let result = detect_thread(
-                    gc.thread_metadata.is_some(),
+                    has_thread_metadata,
                     gc.parent_id.map(|id| id.get()),
                     gc.owner_id.map(|id| id.get()),
                     bot_id.get(),
@@ -571,7 +572,7 @@ impl EventHandler for Handler {
                     channel_id = %msg.channel_id,
                     parent_id = ?gc.parent_id,
                     owner_id = ?gc.owner_id,
-                    has_thread_metadata = gc.thread_metadata.is_some(),
+                    has_thread_metadata,
                     in_thread = result.0,
                     bot_owns = ?result.1,
                     "thread check"
@@ -579,21 +580,22 @@ impl EventHandler for Handler {
                 (
                     result.0,
                     result.1.unwrap_or(false),
-                    if result.0 { parent } else { None },
+                    parent,
                     false,
+                    has_thread_metadata,
                 )
             }
             Ok(serenity::model::channel::Channel::Private(_)) => {
                 tracing::debug!(channel_id = %msg.channel_id, "DM channel");
-                (false, false, None, true)
+                (false, false, None, true, false)
             }
             Ok(other) => {
                 tracing::debug!(channel_id = %msg.channel_id, kind = ?other, "not a guild thread");
-                (false, false, None, false)
+                (false, false, None, false, false)
             }
             Err(e) => {
                 tracing::debug!(channel_id = %msg.channel_id, error = %e, "to_channel failed");
-                (false, false, None, false)
+                (false, false, None, false, false)
             }
         };
 
@@ -603,7 +605,19 @@ impl EventHandler for Handler {
             return;
         }
 
-        if !is_dm && !in_allowed_channel && !in_thread {
+        // Check if message is in an ambient context (needed before early return).
+        // Uses structural thread detection (thread_metadata) decoupled from the
+        // normal dispatch allowlist, so ambient-only channels work correctly.
+        let in_ambient_context = self.ambient.as_ref().is_some_and(|ambient| {
+            let parent_u64 = thread_parent_id.as_deref().and_then(|p| {
+                p.parse::<u64>().map_err(|e| {
+                    tracing::debug!(parent_id = p, error = %e, "failed to parse thread parent_id");
+                }).ok()
+            });
+            ambient.should_buffer(channel_id, is_structural_thread, bot_owns_thread, parent_u64)
+        });
+
+        if !is_dm && !in_allowed_channel && !in_thread && !in_ambient_context {
             return;
         }
 
@@ -613,11 +627,9 @@ impl EventHandler for Handler {
         //  - a message in a thread under an ambient channel (including
         //    bot-owned threads — the bot passively observes all threads).
         // @mention in an ambient context → discard buffer + normal dispatch.
-        if let Some(ref ambient) = self.ambient {
-            let parent_u64 = thread_parent_id
-                .as_deref()
-                .and_then(|p| p.parse::<u64>().ok());
-            if !is_dm && ambient.should_buffer(channel_id, in_thread, bot_owns_thread, parent_u64) {
+        if in_ambient_context {
+            let ambient = self.ambient.as_ref().unwrap();
+            if !is_dm {
                 if is_mentioned {
                     // Discard ambient buffer — mention takes priority.
                     ambient.discard_buffer(&channel_id.to_string()).await;
