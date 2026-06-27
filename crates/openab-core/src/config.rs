@@ -1324,14 +1324,23 @@ impl Default for AmbientPoolConfig {
 }
 
 /// `[ambient.discord]` — Discord-specific ambient settings.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AmbientDiscordConfig {
     /// Explicit channel allowlist. Required — empty means ambient is disabled.
     #[serde(default)]
     pub channels: Vec<String>,
-    /// Whether other bots' messages enter the ambient buffer. Default: false.
-    #[serde(default)]
+    /// Whether other bots' messages enter the ambient buffer. Default: true.
+    #[serde(default = "default_true")]
     pub allow_bot_messages: bool,
+}
+
+impl Default for AmbientDiscordConfig {
+    fn default() -> Self {
+        Self {
+            channels: Vec::new(),
+            allow_bot_messages: true,
+        }
+    }
 }
 
 fn default_flush_interval_seconds() -> u64 {

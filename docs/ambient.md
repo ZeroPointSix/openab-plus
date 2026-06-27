@@ -26,7 +26,7 @@ debug = false                     # ⚠️ Only enable in test channels (exposes
 
 [ambient.discord]
 channels = ["1234567890"]         # Channel IDs to monitor (and their threads)
-allow_bot_messages = false        # Include other bots' messages in buffer
+allow_bot_messages = true         # Include other bots' messages in buffer (default)
 ```
 
 ### Custom Instructions
@@ -61,7 +61,7 @@ You are passively observing a Discord channel.
 | `flush_timeout_seconds` | `120` | Safety timeout — resets flushing state if exceeded. Clamped to [5, 600]. |
 | `instructions_file` | `~/.openab/config/ambient.md` | Path to custom instructions file. First 2000 chars used as system prompt. Falls back to built-in default if missing. |
 | `channels` | `[]` | Explicit channel allowlist (required). Empty = ambient disabled. |
-| `allow_bot_messages` | `false` | Whether other bots' messages enter the ambient buffer. |
+| `allow_bot_messages` | `true` | Whether other bots' messages enter the ambient buffer. |
 
 > **Threads are observed by default.** Messages in **threads** whose parent is a configured channel are buffered too (most OpenAB conversation happens in auto-created threads, not the parent channel). **Both** bot-owned and non-owned threads are observed — the bot passively follows all thread conversation under an ambient channel. An @mention in any thread discards its buffer and triggers immediate dispatch, so there is no double-reply. Each thread batches independently (keyed by the thread ID).
 
