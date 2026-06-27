@@ -50,6 +50,8 @@ allow_bot_messages = false        # Include other bots' messages in buffer
 > | `[ambient.discord].channels` | Passive observation | Bot silently buffers messages (no @mention required) and decides whether to reply |
 >
 > A channel can appear in one or both. Ambient observation does **not** require the channel to also be in `allowed_channels`.
+>
+> **@mention always works in ambient channels.** Even if a channel is only in `[ambient.discord].channels` (not in `allowed_channels`), an @mention still triggers immediate normal dispatch — the ambient buffer is discarded and the bot responds directly. The only difference between the two configs is behavior **without** a mention: `allowed_channels` ignores unmentioned messages entirely, while `ambient.discord.channels` passively observes them.
 
 ### Reserved fields (v2, not yet enforced)
 
