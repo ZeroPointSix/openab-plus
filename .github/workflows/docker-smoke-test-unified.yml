@@ -30,7 +30,7 @@ jobs:
         with:
           context: .
           file: Dockerfile.unified
-          target: builder
+          target: local_builder
           load: true
           tags: openab-builder:local
           cache-to: type=gha,scope=unified-smoke-builder,mode=max

@@ -1,14 +1,23 @@
 # Dockerfile.unified — Single multi-target Dockerfile for all OpenAB agent variants.
 # Usage: docker build --target <agent> -t ghcr.io/openabdev/openab:<tag>-<agent> .
 #
-# The shared builder compiles the openab binary once (unified mode, superset).
-# Each agent target is a thin runtime layer that installs only the agent CLI.
+# Architecture:
+#   local_builder — compiles the openab binary (only runs locally or in build-core CI job)
+#   builder       — alias that resolves to local_builder (default) or a prebuilt registry
+#                   image (when BUILDER_IMAGE is overridden in CI). BuildKit prunes
+#                   local_builder when it's not needed.
+#   <agent>       — thin runtime layer that installs only the agent CLI + copies binary
+#                   from builder stage.
+
+# Global ARG — must be declared before first FROM for use in FROM instructions
+ARG BUILDER_IMAGE=local_builder
 
 # =============================================================================
-# Stage: builder — compile openab binary (unified mode)
+# Stage: local_builder — compile openab binary (unified mode)
+# Only executed during build-core or local dev. When BUILDER_IMAGE is overridden
+# (CI build-agents), BuildKit prunes this stage entirely via dependency analysis.
 # =============================================================================
-ARG BUILDER_IMAGE=rust:1-bookworm
-FROM ${BUILDER_IMAGE} AS builder
+FROM rust:1-bookworm AS local_builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
@@ -29,6 +38,11 @@ RUN cd openab-agent && printf '\n[workspace]\n' >> Cargo.toml && cargo build --r
 # Build agy-acp adapter (used by antigravity variant) — copied late to avoid cache busts
 COPY agy-acp/ agy-acp/
 RUN cd agy-acp && printf '\n[workspace]\n' >> Cargo.toml && cargo build --release
+
+# =============================================================================
+# Stage: builder — resolves to either local_builder or prebuilt registry image
+# =============================================================================
+FROM ${BUILDER_IMAGE} AS builder
 
 # =============================================================================
 # Stage: base-debian — shared runtime base for debian-based agents
