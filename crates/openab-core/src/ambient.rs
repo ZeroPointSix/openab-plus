@@ -259,6 +259,8 @@ impl AmbientDispatcher {
     }
 
     /// Check if a channel is currently mid-flush.
+    /// Used by v2 rate-limiting (min_flush_interval_seconds) — kept for forward compat.
+    #[allow(dead_code)]
     pub async fn is_flushing(&self, channel_id: &str) -> bool {
         let channels = self.channels.lock().await;
         channels
@@ -348,7 +350,14 @@ async fn ambient_consumer_loop(
         let flush_timeout = Duration::from_secs(config.flush_timeout_seconds);
         let _flushing_guard = FlushingGuard::new(Arc::clone(&flushing), flush_timeout);
 
-        // Reset post_guard for this flush cycle.
+        // Check post_guard BEFORE building payload (mention may have cancelled during accumulation).
+        if !post_guard.can_post() {
+            while rx.try_recv().is_ok() {}
+            debug!(channel_id = %channel_id, "ambient flush cancelled by mention during accumulation, buffer drained");
+            continue;
+        }
+
+        // Reset post_guard for this flush cycle — safe now because we checked first.
         post_guard.reset();
 
         // Build the batch payload.

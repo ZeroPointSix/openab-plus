@@ -1279,6 +1279,9 @@ impl Default for AmbientConfig {
 }
 
 /// `[ambient.pool]` — dedicated session pool for ambient dispatches.
+///
+/// NOTE: Pool management is not yet implemented (v2 follow-up). These settings
+/// are parsed and validated on startup but not enforced at runtime.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AmbientPoolConfig {
     /// Max concurrent ambient sessions. Default: 5.
