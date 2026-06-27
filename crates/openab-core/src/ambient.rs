@@ -45,8 +45,6 @@ Rules:
 /// A single message buffered for ambient dispatch.
 #[derive(Debug)]
 pub struct AmbientMessage {
-    /// Serialised SenderContext JSON.
-    pub sender_json: String,
     /// Author display name.
     pub sender_name: String,
     /// User-visible prompt text.
@@ -299,6 +297,10 @@ async fn ambient_consumer_loop(
             }
         };
 
+        // Reset post_guard at the start of each batch cycle. This ensures a
+        // previous cancellation doesn't permanently block future cycles.
+        post_guard.reset();
+
         // Compute jittered deadline: flush_interval ± 20%
         // Guard: interval must be >= 1s to avoid gen_range panic on empty range.
         let base_secs = config.flush_interval_seconds.max(1);
@@ -360,9 +362,6 @@ async fn ambient_consumer_loop(
             debug!(channel_id = %channel_id, "ambient flush cancelled by mention during accumulation, buffer drained");
             continue;
         }
-
-        // Reset post_guard for this flush cycle — safe now because we checked first.
-        post_guard.reset();
 
         // Build the batch payload.
         let session_key = format!("ambient:{}:{}", channel_ref.platform, channel_id);
