@@ -646,7 +646,7 @@ impl EventHandler for Handler {
 
                     let ambient_msg = crate::ambient::AmbientMessage {
                         sender_json: String::new(), // Not needed for ambient
-                        sender_name: display_name.clone(),
+                        sender_name: display_name.to_owned(),
                         prompt,
                         extra_blocks: Vec::new(), // Skip attachments for ambient v1
                         arrived_at: std::time::Instant::now(),

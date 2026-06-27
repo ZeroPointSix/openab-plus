@@ -248,17 +248,12 @@ impl AmbientDispatcher {
 
     /// Discard the ambient buffer for a channel (called when @mention arrives).
     /// Also cancels any in-flight ambient response via the post_guard.
+    /// The consumer will drain buffered messages when it sees the cancellation.
     pub async fn discard_buffer(&self, channel_id: &str) {
         let channels = self.channels.lock().await;
         if let Some(state) = channels.get(channel_id) {
-            // Cancel any in-flight post.
+            // Cancel any in-flight post — consumer drains the buffer on next check.
             state.post_guard.cancel();
-
-            // Drain the mpsc channel (discard all buffered messages).
-            // We create a temp receiver by closing and re-opening — simpler to
-            // just drain via try_recv pattern. But since we only have the sender,
-            // we signal cancellation and let the consumer handle it.
-            // The consumer checks post_guard.can_post() before posting.
             debug!(channel_id, "ambient buffer discard requested (mention arrived)");
         }
     }
@@ -392,7 +387,9 @@ async fn ambient_consumer_loop(
 
         // Check post_guard before dispatching (mention may have cancelled).
         if !post_guard.can_post() {
-            debug!(channel_id = %channel_id, "ambient flush cancelled by mention");
+            // Drain any remaining buffered messages so stale context is discarded.
+            while rx.try_recv().is_ok() {}
+            debug!(channel_id = %channel_id, "ambient flush cancelled by mention, buffer drained");
             continue;
         }
 
@@ -465,4 +462,54 @@ fn build_ambient_payload(batch: &[AmbientMessage]) -> Vec<ContentBlock> {
 /// Check if a response is the NO_REPLY sentinel.
 pub fn is_no_reply(response: &str) -> bool {
     response.trim().to_lowercase() == NO_REPLY_SENTINEL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_no_reply_exact() {
+        assert!(is_no_reply("[NO_REPLY]"));
+        assert!(is_no_reply("[no_reply]"));
+        assert!(is_no_reply("[No_Reply]"));
+    }
+
+    #[test]
+    fn is_no_reply_with_whitespace() {
+        assert!(is_no_reply("  [NO_REPLY]  "));
+        assert!(is_no_reply("\n[no_reply]\n"));
+        assert!(is_no_reply("\t [NO_REPLY] \t"));
+    }
+
+    #[test]
+    fn is_no_reply_rejects_partial() {
+        assert!(!is_no_reply("NO_REPLY"));
+        assert!(!is_no_reply("[NO_REPLY] sure"));
+        assert!(!is_no_reply("I have [NO_REPLY] for you"));
+        assert!(!is_no_reply(""));
+    }
+
+    #[test]
+    fn post_guard_lifecycle() {
+        let guard = PostGuard::new();
+        assert!(guard.can_post());
+
+        guard.cancel();
+        assert!(!guard.can_post());
+
+        guard.reset();
+        assert!(guard.can_post());
+    }
+
+    #[test]
+    fn post_guard_double_cancel() {
+        let guard = PostGuard::new();
+        guard.cancel();
+        guard.cancel();
+        assert!(!guard.can_post());
+
+        guard.reset();
+        assert!(guard.can_post());
+    }
 }
