@@ -290,9 +290,11 @@ impl AmbientDispatcher {
     ///
     /// - Top-level message directly in an ambient channel → yes (buffer keyed by
     ///   `channel_id`).
-    /// - Thread message → yes when the thread's `parent_id` is an ambient channel
-    ///   and the bot does NOT own the thread. Owned threads are actively handled
-    ///   by normal (immediate) dispatch, so observing them here would double up.
+    /// - Thread message → yes when the thread's `parent_id` is an ambient channel,
+    ///   regardless of whether the bot owns the thread. Bot-owned threads are
+    ///   also observed so the bot can passively follow conversation without
+    ///   requiring an @mention. An @mention in any ambient context discards the
+    ///   buffer and falls through to immediate dispatch — no double handling.
     ///   Threads are batched independently (keyed by the thread's `channel_id`).
     ///
     /// Threads under an ambient channel are observed by default — most OpenAB
@@ -303,7 +305,7 @@ impl AmbientDispatcher {
         &self,
         channel_id: u64,
         in_thread: bool,
-        bot_owns_thread: bool,
+        _bot_owns_thread: bool,
         parent_id: Option<u64>,
     ) -> bool {
         if !self.config.enabled || self.enabled_channels.is_empty() {
@@ -312,7 +314,7 @@ impl AmbientDispatcher {
         if !in_thread {
             return self.enabled_channels.contains(&channel_id);
         }
-        !bot_owns_thread && parent_id.is_some_and(|p| self.enabled_channels.contains(&p))
+        parent_id.is_some_and(|p| self.enabled_channels.contains(&p))
     }
 
     /// Whether bot messages are allowed in the ambient buffer.
@@ -636,12 +638,13 @@ mod tests {
     #[test]
     fn should_buffer_thread_under_ambient_channel_by_default() {
         let d = dispatcher(&["100"], true);
-        // Thread under an ambient channel, bot does not own it → buffer (default).
+        // Thread under an ambient channel, bot does not own it → buffer.
         assert!(d.should_buffer(999, true, false, Some(100)));
         // Thread whose parent is NOT an ambient channel → no.
         assert!(!d.should_buffer(999, true, false, Some(200)));
-        // Thread the bot owns → normal dispatch handles it, not ambient.
-        assert!(!d.should_buffer(999, true, true, Some(100)));
+        // Thread the bot owns → ALSO buffered (bot passively observes its own
+        // threads; @mention triggers immediate dispatch with buffer discard).
+        assert!(d.should_buffer(999, true, true, Some(100)));
         // Thread with no resolvable parent → no.
         assert!(!d.should_buffer(999, true, false, None));
     }

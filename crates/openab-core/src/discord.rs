@@ -610,8 +610,8 @@ impl EventHandler for Handler {
         // --- Ambient Mode routing ---
         // Route to ambient when the message belongs to an ambient context:
         //  - a top-level message directly in an ambient channel, or
-        //  - (include_threads) a message in a thread under an ambient channel
-        //    that the bot does NOT own (owned threads use normal dispatch).
+        //  - a message in a thread under an ambient channel (including
+        //    bot-owned threads — the bot passively observes all threads).
         // @mention in an ambient context → discard buffer + normal dispatch.
         if let Some(ref ambient) = self.ambient {
             let parent_u64 = thread_parent_id

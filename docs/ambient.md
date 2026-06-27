@@ -40,7 +40,7 @@ allow_bot_messages = false        # Include other bots' messages in buffer
 | `channels` | `[]` | Explicit channel allowlist (required). Empty = ambient disabled. |
 | `allow_bot_messages` | `false` | Whether other bots' messages enter the ambient buffer. |
 
-> **Threads are observed by default.** Messages in **threads** whose parent is a configured channel are buffered too (most OpenAB conversation happens in auto-created threads, not the parent channel). Threads the bot does **not** own are observed passively; threads the bot **owns** are handled by normal (immediate) dispatch instead, so there's no double-reply. Each thread batches independently (keyed by the thread ID), and an @mention in a thread discards its buffer and gets an immediate reply.
+> **Threads are observed by default.** Messages in **threads** whose parent is a configured channel are buffered too (most OpenAB conversation happens in auto-created threads, not the parent channel). **Both** bot-owned and non-owned threads are observed — the bot passively follows all thread conversation under an ambient channel. An @mention in any thread discards its buffer and triggers immediate dispatch, so there is no double-reply. Each thread batches independently (keyed by the thread ID).
 
 ### Reserved fields (v2, not yet enforced)
 
