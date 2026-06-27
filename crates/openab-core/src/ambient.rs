@@ -358,8 +358,10 @@ async fn ambient_consumer_loop(
 
         // Check post_guard BEFORE building payload (mention may have cancelled during accumulation).
         if !post_guard.can_post() {
-            while rx.try_recv().is_ok() {}
-            debug!(channel_id = %channel_id, "ambient flush cancelled by mention during accumulation, buffer drained");
+            // Don't drain — messages buffered after the mention are still valid
+            // for the next batch cycle. The current batch is discarded but future
+            // messages will be picked up when the loop restarts and reset() clears.
+            debug!(channel_id = %channel_id, "ambient flush cancelled by mention during accumulation");
             continue;
         }
 
@@ -406,9 +408,7 @@ async fn ambient_consumer_loop(
 
         // Check post_guard before dispatching (mention may have cancelled).
         if !post_guard.can_post() {
-            // Drain any remaining buffered messages so stale context is discarded.
-            while rx.try_recv().is_ok() {}
-            debug!(channel_id = %channel_id, "ambient flush cancelled by mention, buffer drained");
+            debug!(channel_id = %channel_id, "ambient flush cancelled by mention before dispatch");
             continue;
         }
 
