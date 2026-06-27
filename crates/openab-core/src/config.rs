@@ -1250,6 +1250,7 @@ pub struct AmbientConfig {
     #[serde(default = "default_flush_hard_cap")]
     pub flush_hard_cap: usize,
     /// Historical messages fetched via Discord API before the batch. Default: 20.
+    /// NOTE: Not yet implemented (v2 follow-up). Parsed but not used at runtime.
     #[serde(default = "default_context_window")]
     pub context_window: usize,
     /// Max simultaneous LLM calls across all ambient channels. Default: 3.

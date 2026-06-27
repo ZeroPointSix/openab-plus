@@ -5,6 +5,23 @@
 //! Ambient mode listens to all messages in configured channels (without @mention)
 //! and periodically flushes them as a batch to the LLM. The agent replies only
 //! when it has something valuable to add; otherwise it returns `[NO_REPLY]`.
+//!
+//! # Why a standalone module (not extending Dispatcher)
+//!
+//! ADR §Implementation Notes suggests reusing Dispatcher infrastructure. This
+//! implementation deliberately builds a separate module because ambient's
+//! requirements diverge from normal dispatch:
+//!
+//! - No trigger message — passive listening has no `MessageRef` to anchor
+//!   reactions or reply_to.
+//! - No streaming / placeholder — ambient is non-interactive; responses use
+//!   `AmbientCaptureAdapter` (non-streaming) for `[NO_REPLY]` pre-filtering.
+//! - No per-sender batching (Lane mode) — ambient batches by channel, not sender.
+//! - No `BotTurnTracker` integration — ambient has independent reply budget (v2).
+//!
+//! Forcing these into `Dispatcher` would require pervasive `if ambient { ... }`
+//! branches, increasing regression risk for the existing dispatch path. Clean
+//! separation keeps both paths simple and independently testable.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
