@@ -461,6 +461,16 @@ impl EventHandler for Handler {
                     .iter()
                     .any(|r| self.allowed_role_ids.contains(&r.get())));
 
+        // Early-gating optimization for bot messages to avoid unnecessary
+        // async/HTTP thread detection calls when ambient mode is inactive and
+        // the bot would gate it out anyway. (#1197 regression safety)
+        if msg.author.bot && !is_mentioned && self.ambient.is_none() {
+            match self.allow_bot_messages {
+                AllowBots::Off | AllowBots::Mentions => return,
+                AllowBots::All => {} // fall through — still needs thread detection for normal dispatch
+            }
+        }
+
         // Thread detection: single to_channel() call for both allowed and
         // non-allowed channels. Moved before bot gating so ambient context
         // can be resolved early — bot messages in ambient contexts must bypass
