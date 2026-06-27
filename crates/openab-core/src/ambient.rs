@@ -104,6 +104,12 @@ pub struct PostGuard {
     cancelled: AtomicBool,
 }
 
+impl Default for PostGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PostGuard {
     pub fn new() -> Self {
         Self {
@@ -272,6 +278,7 @@ impl AmbientDispatcher {
 // ---------------------------------------------------------------------------
 
 /// Per-channel consumer that accumulates messages and flushes them as a batch.
+#[allow(clippy::too_many_arguments)]
 async fn ambient_consumer_loop(
     channel_id: String,
     channel_ref: ChannelRef,
