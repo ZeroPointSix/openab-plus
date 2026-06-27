@@ -286,6 +286,35 @@ impl AmbientDispatcher {
         self.config.enabled && !self.enabled_channels.is_empty() && self.enabled_channels.contains(&channel_id)
     }
 
+    /// Decide whether a message should be ambient-buffered.
+    ///
+    /// - Top-level message directly in an ambient channel → yes (buffer keyed by
+    ///   `channel_id`).
+    /// - Thread message → yes when the thread's `parent_id` is an ambient channel
+    ///   and the bot does NOT own the thread. Owned threads are actively handled
+    ///   by normal (immediate) dispatch, so observing them here would double up.
+    ///   Threads are batched independently (keyed by the thread's `channel_id`).
+    ///
+    /// Threads under an ambient channel are observed by default — most OpenAB
+    /// conversation happens in auto-created threads, not the parent channel.
+    ///
+    /// Returns false when ambient is disabled or no channels are configured.
+    pub fn should_buffer(
+        &self,
+        channel_id: u64,
+        in_thread: bool,
+        bot_owns_thread: bool,
+        parent_id: Option<u64>,
+    ) -> bool {
+        if !self.config.enabled || self.enabled_channels.is_empty() {
+            return false;
+        }
+        if !in_thread {
+            return self.enabled_channels.contains(&channel_id);
+        }
+        !bot_owns_thread && parent_id.is_some_and(|p| self.enabled_channels.contains(&p))
+    }
+
     /// Whether bot messages are allowed in the ambient buffer.
     pub fn allow_bot_messages(&self) -> bool {
         self.config.discord.allow_bot_messages
@@ -583,6 +612,46 @@ pub fn is_no_reply(response: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dispatcher(channels: &[&str], enabled: bool) -> AmbientDispatcher {
+        let config = AmbientConfig {
+            enabled,
+            discord: crate::config::AmbientDiscordConfig {
+                channels: channels.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        AmbientDispatcher::new(config)
+    }
+
+    #[test]
+    fn should_buffer_toplevel_message_in_ambient_channel() {
+        let d = dispatcher(&["100"], true);
+        assert!(d.should_buffer(100, false, false, None));
+        // Different channel → not buffered.
+        assert!(!d.should_buffer(200, false, false, None));
+    }
+
+    #[test]
+    fn should_buffer_thread_under_ambient_channel_by_default() {
+        let d = dispatcher(&["100"], true);
+        // Thread under an ambient channel, bot does not own it → buffer (default).
+        assert!(d.should_buffer(999, true, false, Some(100)));
+        // Thread whose parent is NOT an ambient channel → no.
+        assert!(!d.should_buffer(999, true, false, Some(200)));
+        // Thread the bot owns → normal dispatch handles it, not ambient.
+        assert!(!d.should_buffer(999, true, true, Some(100)));
+        // Thread with no resolvable parent → no.
+        assert!(!d.should_buffer(999, true, false, None));
+    }
+
+    #[test]
+    fn should_buffer_false_when_ambient_disabled() {
+        let d = dispatcher(&["100"], false);
+        assert!(!d.should_buffer(100, false, false, None));
+        assert!(!d.should_buffer(999, true, false, Some(100)));
+    }
 
     #[test]
     fn is_no_reply_exact() {

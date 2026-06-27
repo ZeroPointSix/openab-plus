@@ -23,7 +23,7 @@ max_concurrent_flushes = 3        # Global LLM concurrency limit
 flush_timeout_seconds = 120       # Safety timeout per flush
 
 [ambient.discord]
-channels = ["1234567890"]         # Channel IDs to monitor
+channels = ["1234567890"]         # Channel IDs to monitor (and their threads)
 allow_bot_messages = false        # Include other bots' messages in buffer
 ```
 
@@ -39,6 +39,8 @@ allow_bot_messages = false        # Include other bots' messages in buffer
 | `flush_timeout_seconds` | `120` | Safety timeout — resets flushing state if exceeded. Clamped to [5, 600]. |
 | `channels` | `[]` | Explicit channel allowlist (required). Empty = ambient disabled. |
 | `allow_bot_messages` | `false` | Whether other bots' messages enter the ambient buffer. |
+
+> **Threads are observed by default.** Messages in **threads** whose parent is a configured channel are buffered too (most OpenAB conversation happens in auto-created threads, not the parent channel). Threads the bot does **not** own are observed passively; threads the bot **owns** are handled by normal (immediate) dispatch instead, so there's no double-reply. Each thread batches independently (keyed by the thread ID), and an @mention in a thread discards its buffer and gets an immediate reply.
 
 ### Reserved fields (v2, not yet enforced)
 

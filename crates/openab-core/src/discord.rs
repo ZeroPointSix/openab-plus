@@ -608,11 +608,16 @@ impl EventHandler for Handler {
         }
 
         // --- Ambient Mode routing ---
-        // If the message is in an ambient-enabled channel, NOT a @mention,
-        // NOT in a thread, and NOT a DM → route to ambient dispatcher.
-        // @mention in an ambient channel → discard buffer + normal dispatch.
+        // Route to ambient when the message belongs to an ambient context:
+        //  - a top-level message directly in an ambient channel, or
+        //  - (include_threads) a message in a thread under an ambient channel
+        //    that the bot does NOT own (owned threads use normal dispatch).
+        // @mention in an ambient context → discard buffer + normal dispatch.
         if let Some(ref ambient) = self.ambient {
-            if ambient.is_ambient_channel(channel_id) && !in_thread && !is_dm {
+            let parent_u64 = thread_parent_id
+                .as_deref()
+                .and_then(|p| p.parse::<u64>().ok());
+            if !is_dm && ambient.should_buffer(channel_id, in_thread, bot_owns_thread, parent_u64) {
                 if is_mentioned {
                     // Discard ambient buffer — mention takes priority.
                     ambient.discard_buffer(&channel_id.to_string()).await;
