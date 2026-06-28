@@ -66,8 +66,7 @@ target "cursor" {
 }
 
 target "devin" {
-  dockerfile = "Dockerfile.unified"
-  target     = "devin"
+  dockerfile = "Dockerfile.devin"
   tags       = ["openab:devin"]
   contexts   = { builder = "target:builder" }
 }
