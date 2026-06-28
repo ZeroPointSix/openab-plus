@@ -41,7 +41,7 @@ Or via docker buildx bake:
 docker buildx bake devin
 ```
 
-The Dockerfile installs Devin CLI via the official install script (`https://cli.devin.ai/install.sh`).
+The Dockerfile installs a pinned version of Devin CLI from `static.devin.ai` with SHA256 checksum verification. The version is controlled by the `DEVIN_VERSION` build arg.
 
 ## Authentication
 
