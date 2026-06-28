@@ -97,6 +97,48 @@ Devin CLI provides:
 - **Session persistence**: Conversation history saved and resumable
 - **Models**: SWE-1.6 series with adaptive routing
 
+## Model Selection
+
+Devin CLI uses its own model routing by default (SWE-1.6 series). To specify a model at startup:
+
+```toml
+[agent]
+command = "devin"
+args = ["acp", "--model", "opus"]
+working_dir = "/home/agent"
+```
+
+Available models can be checked via the interactive CLI with `/model`. In ACP mode, the `--model` flag selects the model for the session.
+
+## MCP Usage
+
+Devin CLI supports MCP servers configured via `.devin/config.json` or `devin mcp add`:
+
+```bash
+# Add an MCP server (persists in ~/.config/devin/)
+kubectl exec -it deployment/openab-devin -- devin mcp add github \
+  -- npx -y @modelcontextprotocol/server-github
+
+# List configured servers
+kubectl exec -it deployment/openab-devin -- devin mcp list
+```
+
+MCP configuration can also be placed in the project's `.devin/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "ghp_xxx" }
+    }
+  }
+}
+```
+
+Devin CLI supports both stdio and HTTP (Streamable HTTP + SSE fallback) transports.
+
 ## AGENTS.md Compatibility
 
 Devin CLI reads `AGENTS.md` from the project root — the same file OpenAB already uses. It also reads `CLAUDE.md` (for Claude Code compatibility) and rules from `.cursor/rules/` and `.windsurf/rules/`.
