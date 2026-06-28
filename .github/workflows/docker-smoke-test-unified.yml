@@ -35,17 +35,7 @@ jobs:
           tags: openab-builder:local
           cache-to: type=gha,scope=unified-smoke-builder,mode=max
 
-  # Verify the BUILDER_IMAGE override path (the key CI optimization)
-  smoke-test-override:
-    if: github.event.pull_request.draft == false
-    needs: build-builder
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build agent target using prebuilt builder (override path)
+      - name: Verify override path (BUILDER_IMAGE=prebuilt)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -54,7 +44,6 @@ jobs:
           load: true
           tags: openab-override-test:test
           build-args: BUILDER_IMAGE=openab-builder:local
-          cache-from: type=gha,scope=unified-smoke-builder
 
       - name: Verify binary exists via override path
         run: docker run --rm --entrypoint which openab-override-test:test openab
