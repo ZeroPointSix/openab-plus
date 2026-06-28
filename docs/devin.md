@@ -4,7 +4,7 @@ How to run OpenAB with [Devin CLI](https://docs.devin.ai/cli) as the agent backe
 
 ## Prerequisites
 
-- A [Devin](https://devin.ai/) subscription (Enterprise or individual plan)
+- A [Devin](https://devin.ai/) subscription (Enterprise or individual plan) from Cognition AI
 - Devin CLI with native ACP support (`devin acp`)
 
 ## Architecture
@@ -60,19 +60,7 @@ devin auth login --force-manual-token-flow
 kubectl rollout restart deployment/openab-devin
 ```
 
-Credentials are stored under `~/.config/devin/` and persist across pod restarts via PVC.
-
-### Alternative: WINDSURF_API_KEY
-
-For legacy Windsurf credentials, set the `WINDSURF_API_KEY` environment variable:
-
-```toml
-[agent]
-command = "devin"
-args = ["acp"]
-working_dir = "/home/agent"
-env = { WINDSURF_API_KEY = "${WINDSURF_API_KEY}" }
-```
+Credentials are stored under `~/.local/share/devin/` and persist across pod restarts via PVC.
 
 ## Helm Install
 
@@ -115,7 +103,7 @@ Devin CLI reads `AGENTS.md` from the project root — the same file OpenAB alrea
 
 ## Known Limitations
 
-- Requires a paid Devin subscription; no free tier for CLI access
+- Requires a paid Devin subscription (Cognition AI); no free tier for CLI access
 - `devin auth login` requires interactive terminal for browser flow; use `--force-manual-token-flow` in headless environments
 - Enterprise features (team settings, controls) require Devin Enterprise plan
-- Devin CLI is the rebranded Windsurf CLI (Codeium); legacy credentials still work via `WINDSURF_API_KEY`
+- Config file must be mounted at `/etc/openab/config.toml` at runtime (not baked into image)

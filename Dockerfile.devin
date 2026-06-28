@@ -20,11 +20,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini git unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Devin CLI via official install script
-RUN HOME=/root curl -fsSL https://cli.devin.ai/install.sh | HOME=/root bash && \
-    cp /root/.local/bin/devin /usr/local/bin/devin && \
-    chmod +x /usr/local/bin/devin && \
-    rm -rf /root/.local/share/devin /root/.local/bin/devin
+# Install Devin CLI (pinned version with SHA256 verification)
+ARG DEVIN_VERSION=2026.8.18
+ARG DEVIN_SHA256_AMD64=dd4bba20593086bf708474792c11ab0c9428be5b2419ff5c182ec5f1099a0661
+ARG DEVIN_SHA256_ARM64=127e7a8baf2e09cb0fd23871af989dc9e32e3bfa7f497b1f6560cc52f5bf19c6
+ARG TARGETPLATFORM
+RUN set -eux; \
+    case "${TARGETPLATFORM:-linux/amd64}" in \
+      "linux/amd64") arch=x86_64-unknown-linux; sha="${DEVIN_SHA256_AMD64}" ;; \
+      "linux/arm64") arch=aarch64-unknown-linux; sha="${DEVIN_SHA256_ARM64}" ;; \
+      *) echo "Unsupported platform: ${TARGETPLATFORM}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://static.devin.ai/cli/${DEVIN_VERSION}/devin-${DEVIN_VERSION}-${arch}.tar.gz" \
+      -o /tmp/devin.tar.gz && \
+    echo "${sha}  /tmp/devin.tar.gz" | sha256sum -c - && \
+    tar xzf /tmp/devin.tar.gz -C /tmp && \
+    install -m 0755 /tmp/devin /usr/local/bin/devin && \
+    rm -rf /tmp/devin*
 
 # Install gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -40,7 +52,7 @@ WORKDIR /home/agent
 
 COPY --from=builder --chown=agent:agent /build/target/release/openab /usr/local/bin/openab
 
-RUN mkdir -p /home/agent/.config/devin && chown -R agent:agent /home/agent
+RUN chown -R agent:agent /home/agent
 
 USER agent
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
