@@ -35,8 +35,8 @@ RUN set -eux; \
       -o /tmp/devin.tar.gz && \
     echo "${sha}  /tmp/devin.tar.gz" | sha256sum -c - && \
     tar xzf /tmp/devin.tar.gz -C /tmp && \
-    install -m 0755 /tmp/devin /usr/local/bin/devin && \
-    rm -rf /tmp/devin*
+    install -m 0755 /tmp/bin/devin /usr/local/bin/devin && \
+    rm -rf /tmp/devin* /tmp/bin /tmp/share
 
 # Install gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
