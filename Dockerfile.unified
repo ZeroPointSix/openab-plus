@@ -1,8 +1,10 @@
 # Dockerfile.unified — Single multi-target Dockerfile for all OpenAB agent variants.
 # Usage: docker build --target <agent> -t ghcr.io/openabdev/openab:<tag>-<agent> .
 #
+# Requires BuildKit (default in Docker 23.0+). Not compatible with legacy builder or Kaniko.
+#
 # Architecture:
-#   local_builder — compiles the openab binary (only runs locally or in build-core CI job)
+#   local_builder — compiles the openab binary (pruned by BuildKit when BUILDER_IMAGE is overridden)
 #   builder       — alias that resolves to local_builder (default) or a prebuilt registry
 #                   image (when BUILDER_IMAGE is overridden in CI). BuildKit prunes
 #                   local_builder when it's not needed.
@@ -43,9 +45,11 @@ RUN cd agy-acp && printf '\n[workspace]\n' >> Cargo.toml && cargo build --releas
 # Stage: builder — resolves to either local_builder or prebuilt registry image
 # =============================================================================
 FROM ${BUILDER_IMAGE} AS builder
-RUN test -x /build/target/release/openab \
-    && test -x /build/openab-agent/target/release/openab-agent \
-    && test -x /build/agy-acp/target/release/agy-acp
+RUN for bin in /build/target/release/openab \
+              /build/openab-agent/target/release/openab-agent \
+              /build/agy-acp/target/release/agy-acp; do \
+      test -x "$bin" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }; \
+    done
 
 # =============================================================================
 # Stage: base-debian — shared runtime base for debian-based agents
