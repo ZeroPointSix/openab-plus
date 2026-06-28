@@ -43,6 +43,9 @@ RUN cd agy-acp && printf '\n[workspace]\n' >> Cargo.toml && cargo build --releas
 # Stage: builder — resolves to either local_builder or prebuilt registry image
 # =============================================================================
 FROM ${BUILDER_IMAGE} AS builder
+RUN test -x /build/target/release/openab \
+    && test -x /build/openab-agent/target/release/openab-agent \
+    && test -x /build/agy-acp/target/release/agy-acp
 
 # =============================================================================
 # Stage: base-debian — shared runtime base for debian-based agents
