@@ -102,6 +102,27 @@ pub async fn webhook(
     headers: axum::http::HeaderMap,
     Json(update): Json<TelegramUpdate>,
 ) -> axum::http::StatusCode {
+    // Log source IP for monitoring (phase 1: observe before enforcing)
+    let source_ip = headers.get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| headers.get("x-real-ip").and_then(|v| v.to_str().ok()).map(|s| s.to_string()))
+        .or_else(|| headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()).map(|s| s.to_string()))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let is_telegram_subnet = check_telegram_subnet(&source_ip);
+    tracing::info!(
+        source_ip = %source_ip,
+        is_telegram = is_telegram_subnet,
+        "telegram webhook received"
+    );
+
+    if state.telegram_trusted_source_only && !is_telegram_subnet {
+        warn!(source_ip = %source_ip, "webhook rejected: source IP not in Telegram subnet");
+        return axum::http::StatusCode::FORBIDDEN;
+    }
+
     if let Some(ref expected) = state.telegram_secret_token {
         let provided = headers
             .get("x-telegram-bot-api-secret-token")
@@ -252,6 +273,27 @@ fn is_markdown_parse_error(description: &str) -> bool {
 /// - False positives are acceptable (rich renders simple text fine too), but we avoid
 ///   unnecessary API switches for plain prose to reduce risk surface.
 /// - LaTeX and blockquotes are intentionally omitted for now (Phase 2).
+/// Check if an IP is within Telegram's known webhook source subnets.
+/// See: https://core.telegram.org/bots/webhooks
+/// Subnets: 149.154.160.0/20, 91.108.4.0/22
+fn check_telegram_subnet(ip_str: &str) -> bool {
+    let ip: std::net::IpAddr = match ip_str.parse() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 149.154.160.0/20 → 149.154.160.0 - 149.154.175.255
+            let in_range1 = octets[0] == 149 && octets[1] == 154 && (octets[2] >= 160 && octets[2] <= 175);
+            // 91.108.4.0/22 → 91.108.4.0 - 91.108.7.255
+            let in_range2 = octets[0] == 91 && octets[1] == 108 && (octets[2] >= 4 && octets[2] <= 7);
+            in_range1 || in_range2
+        }
+        std::net::IpAddr::V6(_) => false,
+    }
+}
+
 fn is_complex_markdown(text: &str) -> bool {
     // 🟡 Code blocks intentionally NOT routed to rich — sendMessage preserves
     // syntax highlighting (language header + copy button) which RichBlockPreformatted lacks.
