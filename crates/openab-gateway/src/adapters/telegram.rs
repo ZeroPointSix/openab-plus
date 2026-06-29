@@ -324,6 +324,34 @@ async fn send_rich_message(
 ///
 /// Design: ephemeral 30-second preview. Caller must follow up with
 /// sendRichMessage to persist. Same draft_id = animated transition.
+/// Dismiss a thinking draft by sending an empty text via sendMessageDraft.
+/// Per Bot API 10.0: "Pass an empty text to show a Thinking… placeholder",
+/// and sending empty text to an existing draft_id clears it.
+async fn dismiss_draft(
+    client: &reqwest::Client,
+    bot_token: &str,
+    chat_id: &str,
+    thread_id: &Option<String>,
+    draft_id: i64,
+) -> Result<(), String> {
+    let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendMessageDraft");
+    let mut body = serde_json::json!({
+        "chat_id": chat_id,
+        "draft_id": draft_id,
+        "text": "",
+    });
+    if let Some(tid) = thread_id {
+        body["message_thread_id"] = serde_json::json!(tid.parse::<i64>().unwrap_or(0));
+    }
+    let resp = client.post(&url).json(&body).send().await.map_err(|e| e.to_string())?;
+    let json: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if json["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(json["description"].as_str().unwrap_or("unknown error").to_string())
+    }
+}
+
 /// Wired but unused until gateway streaming infrastructure integrates.
 #[allow(dead_code)]
 async fn send_rich_message_draft(
@@ -478,8 +506,8 @@ pub async fn handle_reply(
             let is_thinking_emoji = matches!(reply.content.text.as_str(), "👀" | "🤔" | "👨\u{200d}💻" | "🔥" | "⚡");
             if is_thinking_emoji {
                 let draft_id = compute_draft_id(&reply.channel.id, &reply.channel.thread_id);
-                if let Err(e) = send_rich_message_draft(
-                    client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, "",
+                if let Err(e) = dismiss_draft(
+                    client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id,
                 ).await {
                     warn!("failed to dismiss thinking draft: {e}");
                 }
