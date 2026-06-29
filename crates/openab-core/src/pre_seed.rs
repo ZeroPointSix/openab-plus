@@ -299,15 +299,26 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
             );
         }
 
-        // F1: Validate symlink targets BEFORE writing them to disk. Skipping
-        // escaping entries at this point eliminates the time-of-check/time-of-use
-        // window that a post-extraction sweep would leave open.
+        // F1: Validate symlink/hardlink targets BEFORE writing them to disk.
+        // Skipping escaping entries eliminates the TOCTOU window.
+        //
+        // F9: Hard link targets in tar are relative to the archive root (dest),
+        // NOT the link's parent directory. Symlink targets are relative to the
+        // symlink's parent. Handle them with different resolution semantics.
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
             if let Ok(Some(link_target)) = entry.link_name() {
                 if let Ok(entry_path) = entry.path() {
                     let out_path = dest.join(&*entry_path);
-                    if symlink_escapes(dest, &out_path, &link_target) {
+                    let escapes = if entry_type.is_hard_link() {
+                        // Hard link targets in tar are relative to archive root
+                        let resolved = normalize_path(&dest.join(&*link_target));
+                        let root_normalized = normalize_path(dest);
+                        !resolved.starts_with(&root_normalized)
+                    } else {
+                        symlink_escapes(dest, &out_path, &link_target)
+                    };
+                    if escapes {
                         warn!(
                             "hooks.pre_seed: skipping link with escaping target: {} -> {}",
                             entry_path.display(),
@@ -1072,6 +1083,84 @@ mod tests {
         assert!(
             dir.path().join("evil").symlink_metadata().is_err(),
             "escaping symlink should never be written to disk"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_tarball_allows_valid_hard_link_within_root() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+
+        let buf = Vec::new();
+        let enc = GzEncoder::new(buf, Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        // Create a real file at lib/core.so
+        let mut header = tar::Header::new_gnu();
+        header.set_size(7);
+        header.set_mode(0o644);
+        builder
+            .append_data(&mut header, "lib/core.so", &b"ELF\x00\x00\x00\x00"[..])
+            .unwrap();
+
+        // F9: Hard link at bin/core.so -> lib/core.so (relative to archive root)
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_size(0);
+        header.set_mode(0o644);
+        builder
+            .append_link(&mut header, "bin/core.so", "lib/core.so")
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        let tarball_bytes = enc.finish().unwrap();
+
+        extract_tarball_with_limits(&tarball_bytes, dir.path(), deadline).unwrap();
+
+        // Both files should exist and have identical content
+        assert!(dir.path().join("lib/core.so").exists());
+        assert!(dir.path().join("bin/core.so").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("bin/core.so")).unwrap(),
+            std::fs::read(dir.path().join("lib/core.so")).unwrap(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_tarball_skips_escaping_hard_link() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+
+        let buf = Vec::new();
+        let enc = GzEncoder::new(buf, Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        // F9: Hard link with escaping target -> ../../../etc/passwd (relative to archive root)
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Link);
+        header.set_size(0);
+        header.set_mode(0o644);
+        builder
+            .append_link(&mut header, "evil_link", "../../../etc/passwd")
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        let tarball_bytes = enc.finish().unwrap();
+
+        extract_tarball_with_limits(&tarball_bytes, dir.path(), deadline).unwrap();
+
+        // Escaping hard link should be skipped — never written to disk
+        assert!(
+            dir.path().join("evil_link").symlink_metadata().is_err(),
+            "escaping hard link should never be written to disk"
         );
     }
 }
