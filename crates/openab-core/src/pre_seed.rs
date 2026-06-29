@@ -300,24 +300,27 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
             );
         }
 
-        entry.unpack_in(dest)?;
-
-        // Skip symlinks with escaping targets created by unpack_in
-        #[cfg(unix)]
-        if let Ok(path) = entry.path() {
-            let out_path = dest.join(&*path);
-            if out_path.symlink_metadata().map(|m| m.is_symlink()).unwrap_or(false) {
-                if let Ok(target) = std::fs::read_link(&out_path) {
-                    if symlink_escapes(dest, &out_path, &target) {
-                        let _ = std::fs::remove_file(&out_path);
+        // F1: Validate symlink targets BEFORE writing them to disk. Skipping
+        // escaping entries at this point eliminates the time-of-check/time-of-use
+        // window that a post-extraction sweep would leave open.
+        let entry_type = entry.header().entry_type();
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            if let Ok(Some(link_target)) = entry.link_name() {
+                if let Ok(entry_path) = entry.path() {
+                    let out_path = dest.join(&*entry_path);
+                    if symlink_escapes(dest, &out_path, &link_target) {
                         warn!(
-                            "hooks.pre_seed: removed symlink with escaping target: {}",
-                            target.display()
+                            "hooks.pre_seed: skipping link with escaping target: {} -> {}",
+                            entry_path.display(),
+                            link_target.display()
                         );
+                        continue;
                     }
                 }
             }
         }
+
+        entry.unpack_in(dest)?;
 
         // Manually set permissions (strip suid/sgid/sticky, like zip path)
         #[cfg(unix)]
@@ -344,6 +347,11 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
 /// whether the normalized result stays within root. This allows relative symlinks
 /// with `..` components (e.g., `../aws-cli/v2/current/bin/aws`) as long as they
 /// don't escape the extraction root.
+///
+/// F6: `normalize_path` resolves `..` across the *entire* joined path, including any
+/// `..` components in `link_path.parent()` itself (e.g., a tar entry like
+/// `a/../b/link`). This makes the containment check robust regardless of how the
+/// entry path is structured. (In practice `tar::Entry::path` is already sanitized.)
 fn symlink_escapes(root: &Path, link_path: &Path, link_target: &Path) -> bool {
     // Absolute symlinks always escape
     if link_target.is_absolute() {
@@ -356,7 +364,15 @@ fn symlink_escapes(root: &Path, link_path: &Path, link_target: &Path) -> bool {
     !resolved.starts_with(&root_normalized)
 }
 
-/// Normalize a path by resolving `.` and `..` components without touching the filesystem.
+/// Normalize a path by resolving `.` and `..` components lexically (no filesystem
+/// access, avoiding canonicalize TOCTOU).
+///
+/// F5: Leading `..` components that would traverse above the path root are dropped
+/// rather than preserved. For a pure-relative input like `../../etc`, this yields
+/// `etc` (the leading `..` have nothing to pop). Callers in this module always pass
+/// absolute paths (the extraction root and entries joined onto it), so a dropped
+/// leading `..` cannot produce a false "contained" result — see `symlink_escapes`,
+/// where both sides are absolute and compared via component-wise `starts_with`.
 fn normalize_path(path: &Path) -> std::path::PathBuf {
     let mut components = Vec::new();
     for component in path.components() {
@@ -377,10 +393,16 @@ fn normalize_path(path: &Path) -> std::path::PathBuf {
 }
 
 /// Create a symlink on Unix, or copy the resolved target on other platforms.
-/// Rejects symlink targets that escape the extraction root.
+///
+/// SAFETY PRECONDITION (F2): This function only rejects *absolute* symlink targets.
+/// It has no `root` parameter and therefore CANNOT validate whether a relative
+/// target escapes the extraction root. Callers MUST pre-validate relative targets
+/// with [`symlink_escapes`] before calling this. The sole caller, `move_recursive`,
+/// receives entries that were already validated during `extract_tarball_with_limits`.
 #[allow(unused_variables)]
 fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow::Result<()> {
-    // Reject absolute symlinks unconditionally
+    // Reject absolute symlinks unconditionally. Relative-target containment is the
+    // caller's responsibility (see SAFETY PRECONDITION above).
     if link_target.is_absolute() {
         anyhow::bail!(
             "hooks.pre_seed: rejecting symlink with absolute target: {}",
@@ -393,14 +415,27 @@ fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow:
     }
     #[cfg(not(unix))]
     {
+        // F3/F7: On non-Unix platforms we materialize the link by copying its target.
+        // Directory targets cannot be copied with std::fs::copy, and the target may
+        // not have been moved into place yet during move_recursive. Treat both as
+        // non-fatal: skip the link rather than aborting the whole extraction.
         let resolved = src.parent().unwrap_or(Path::new(".")).join(link_target);
-        if resolved.exists() {
-            std::fs::copy(&resolved, dst)?;
-        } else {
-            anyhow::bail!(
-                "hooks.pre_seed: symlink target does not exist: {}",
-                resolved.display()
-            );
+        match resolved.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => {
+                warn!(
+                    "hooks.pre_seed: skipping directory symlink on non-unix platform: {}",
+                    resolved.display()
+                );
+            }
+            Ok(_) => {
+                std::fs::copy(&resolved, dst)?;
+            }
+            Err(_) => {
+                warn!(
+                    "hooks.pre_seed: skipping symlink with unresolved target: {}",
+                    resolved.display()
+                );
+            }
         }
     }
     Ok(())
@@ -880,6 +915,33 @@ mod tests {
     }
 
     #[test]
+    fn normalize_path_drops_leading_parent_dir_on_relative() {
+        // F5: leading `..` on a pure-relative path have nothing to pop and are dropped.
+        let p = normalize_path(Path::new("../../etc/passwd"));
+        assert_eq!(p, std::path::PathBuf::from("etc/passwd"));
+    }
+
+    #[test]
+    fn symlink_escapes_handles_parent_with_dotdot() {
+        // F6: link_path itself contains `..` — normalization resolves it across the
+        // whole joined path. dest/a/../b/link -> target ../x resolves to dest/x.
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/a/../b/link");
+        let link_target = Path::new("../x");
+        // parent = /tmp/extract/a/../b ; join ../x ; normalize -> /tmp/extract/x : within root
+        assert!(!symlink_escapes(root, link_path, link_target));
+    }
+
+    #[test]
+    fn symlink_escapes_parent_with_dotdot_still_blocks_escape() {
+        // F6: even with `..` in the entry path, a real escape is still caught.
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/a/../b/link");
+        let link_target = Path::new("../../../../etc/passwd");
+        assert!(symlink_escapes(root, link_path, link_target));
+    }
+
+    #[test]
     fn symlink_escapes_allows_relative_within_root() {
         let root = Path::new("/tmp/extract");
         let link_path = Path::new("/tmp/extract/bin/aws");
@@ -977,7 +1039,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn extract_tarball_removes_escaping_symlink() {
+    fn extract_tarball_skips_escaping_symlink_without_writing() {
         use flate2::write::GzEncoder;
         use flate2::Compression;
 
@@ -1002,10 +1064,10 @@ mod tests {
 
         extract_tarball_with_limits(&tarball_bytes, dir.path(), deadline).unwrap();
 
-        // The escaping symlink should have been removed
+        // F1: the escaping symlink is skipped before unpacking — it never touches disk
         assert!(
-            !dir.path().join("evil").exists(),
-            "escaping symlink should be removed"
+            dir.path().join("evil").symlink_metadata().is_err(),
+            "escaping symlink should never be written to disk"
         );
     }
 }
