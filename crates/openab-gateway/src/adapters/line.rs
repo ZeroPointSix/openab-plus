@@ -1146,23 +1146,7 @@ mod tests {
     #[tokio::test]
     async fn webhook_acknowledges_before_async_event_forwarding() {
         let (event_tx, mut event_rx) = broadcast::channel::<String>(8);
-        let state = Arc::new(crate::AppState {
-            telegram_bot_token: None,
-            telegram_secret_token: None,
-            telegram_rich_messages: false,
-            line_channel_secret: None,
-            line_access_token: None,
-            teams: None,
-            teams_service_urls: Mutex::new(HashMap::new()),
-            feishu: None,
-            google_chat: None,
-            wecom: None,
-            ws_token: None,
-            event_tx,
-            reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            line_webhook_semaphore: Arc::new(Semaphore::new(crate::LINE_WEBHOOK_CONCURRENCY_MAX)),
-            client: reqwest::Client::new(),
-        });
+        let state = Arc::new(crate::AppState::test_default(event_tx));
 
         let body = axum::body::Bytes::from(
             serde_json::json!({
