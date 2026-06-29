@@ -19,7 +19,13 @@ ARG BUILDER_IMAGE=local_builder
 # Only executed during build-core or local dev. When BUILDER_IMAGE is overridden
 # (CI build-agents), BuildKit prunes this stage entirely via dependency analysis.
 # =============================================================================
-FROM rust:1-bookworm AS local_builder
+# Pinned to prevent silent glibc upgrades that break runtime compatibility.
+# Update this digest when:
+#   - A crate requires a newer Rust compiler version
+#   - A Rust security advisory is published
+#   - Routine maintenance (every few months)
+# To get new digest: docker pull rust:1-bookworm && docker inspect rust:1-bookworm --format '{{index .RepoDigests 0}}'
+FROM rust:1-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS local_builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates/openab-core/Cargo.toml crates/openab-core/Cargo.toml
