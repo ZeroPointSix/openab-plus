@@ -162,16 +162,32 @@ return responses  # may be partial (>= 0)
 
 ---
 
-## 5. Aggregation Strategies
+## 5. Operating Modes & Aggregation Strategies
 
-### Strategy 1: Synthesis (Default)
+The MoA endpoint is fundamentally a **virtual agent / proxy** — it has no opinion of its own. It routes the request to multiple downstream agents and aggregates the result. Two primary operating modes:
 
-Call a designated aggregator model (e.g., the coordinator's own LLM backend) with all collected responses as context:
+### Mode A: Pure Aggregation (No Model)
+
+The endpoint collects responses and merges them **without an additional LLM call**. It acts purely as a proxy + combiner.
+
+| Strategy | How | Use Case |
+|----------|-----|----------|
+| Majority Vote | Count discrete answers, return the majority | Code review verdicts, yes/no, classification |
+| Concatenation | Join all responses with attribution | "Give me all perspectives" |
+| Longest / First | Return the most detailed or fastest response | Low-latency passthrough |
+
+**Pros:** No extra latency, no extra cost, no additional model needed
+**Cons:** No conflict resolution, no optimization, raw output
+
+### Mode B: Aggregation + Synthesis (With Model)
+
+The endpoint collects responses, then calls an **aggregator model** to synthesize, resolve contradictions, and optimize the final output. The aggregator adds its own reasoning on top.
 
 ```
 System: You are an aggregator. Multiple AI models have answered the same question.
         Synthesize their responses into one high-quality answer.
         Preserve the best insights from each. Resolve contradictions.
+        Add your own analysis where the responses are incomplete.
 
 User: [original prompt]
 
@@ -180,16 +196,28 @@ Context:
 - Model B (Codex): [response B]
 - Model C (Grok): [response C]
 
-Produce a single, coherent response.
+Produce a single, coherent, optimized response.
 ```
 
-### Strategy 2: Best-of-N
+**Pros:** Higher quality output, conflict resolution, coherent single voice
+**Cons:** Extra LLM call adds latency + cost, requires an aggregator model
 
-Use a judge model to rank responses and return the highest-quality one unchanged.
+### Mode C: Best-of-N (Judge Model)
 
-### Strategy 3: Majority Vote
+Collect responses, use a judge model to score/rank them, return the best one unchanged.
 
-For tasks with discrete answers (code review verdicts, yes/no decisions), count the majority answer.
+**Pros:** Returns a real model's full response (not a rewrite), quality selection
+**Cons:** Requires a judge call, doesn't combine insights across responses
+
+### Configuration
+
+```toml
+[moa.presets.default]
+mode = "synthesis"              # "pure" | "synthesis" | "best_of_n"
+aggregator_model = "coordinator" # only needed for "synthesis" and "best_of_n" modes
+```
+
+When `mode = "pure"`, no aggregator model is required — the gateway handles merging locally.
 
 ---
 
