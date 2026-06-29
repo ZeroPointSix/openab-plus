@@ -470,6 +470,18 @@ pub async fn handle_reply(
                 ).await;
             }
         }
+        // Dismiss thinking draft immediately on remove_reaction
+        if rich_messages && reply.command.as_deref() == Some("remove_reaction") {
+            let is_thinking_emoji = matches!(reply.content.text.as_str(), "👀" | "🤔" | "👨\u{200d}💻" | "🔥" | "⚡");
+            if is_thinking_emoji {
+                let chan: i64 = reply.channel.id.parse::<i64>().unwrap_or(1).abs();
+                let tid: i64 = reply.channel.thread_id.as_deref().and_then(|t| t.parse::<i64>().ok()).unwrap_or(0).abs();
+                let draft_id: i64 = (chan.wrapping_add(tid)) % 1_000_000 + 1;
+                let _ = send_rich_message_draft(
+                    client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, "",
+                ).await;
+            }
+        }
 
         let msg_key = format!("{}:{}", reply.channel.id, reply.reply_to);
         let emoji = &reply.content.text;
