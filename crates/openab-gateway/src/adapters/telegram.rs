@@ -286,8 +286,6 @@ fn is_complex_markdown(text: &str) -> bool {
     })
 }
 
-/// Send a rich message via Bot API 10.1 sendRichMessage.
-///
 /// Compute a stable draft_id from channel + thread to avoid collisions in forum topics.
 fn compute_draft_id(chat_id: &str, thread_id: &Option<String>) -> i64 {
     let chan: i64 = chat_id.parse::<i64>().unwrap_or(1).abs();
@@ -295,6 +293,8 @@ fn compute_draft_id(chat_id: &str, thread_id: &Option<String>) -> i64 {
     (chan.wrapping_add(tid)) % 1_000_000 + 1
 }
 
+/// Send a rich message via Bot API 10.1 sendRichMessage.
+///
 /// Design: we pass agent markdown directly via InputRichMessage.markdown.
 /// Rich Markdown is GFM-compatible, so no conversion layer is needed.
 /// The API handles rendering (tables, syntax highlighting, headings, etc.)
