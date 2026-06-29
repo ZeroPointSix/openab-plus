@@ -388,15 +388,38 @@ The default is **localhost-only** — safe by default, opt-in to broader exposur
 
 ## 9. Differences from Hermes MoA
 
+### OpenAB Advantages (Discord-as-Bus)
+
+| # | Advantage | Why |
+|---|-----------|-----|
+| 1 | **Zero API key management** | MoA gateway holds no model credentials. Each agent manages its own auth — could even be free-tier accounts. |
+| 2 | **Agent diversity beyond public APIs** | Hermes can only aggregate models with public LLM APIs. OpenAB can aggregate Copilot, Cursor, Kiro, OpenCode — things that have no callable LLM endpoint but can respond as Discord bots. |
+| 3 | **Full-capability responses** | Hermes reference models get bare prompts (no tools, no system prompt). OpenAB agents respond with their full toolchain — code search, file read, web search, shell exec. Each "reference" is a complete agent, not a stripped-down model call. |
+| 4 | **Trivial horizontal scaling** | Add a model = add a bot to the channel. No config change, no API key, no gateway redeploy. |
+| 5 | **Built-in audit trail** | All conversations live in Discord — traceable, debuggable, replayable. Hermes reference calls are internal and ephemeral. |
+| 6 | **Distributed cost** | Each agent pod pays its own model bill. No single concentrated API bill. Different team members can sponsor different agents. |
+
+### OpenAB Disadvantages
+
+| # | Disadvantage | Mitigation |
+|---|--------------|------------|
+| 1 | **Higher latency** (30–60s vs 5–15s) | Acceptable for async tasks (code review, analysis, research). Not suited for interactive chat. |
+| 2 | **Discord dependency** | Discord rate limits, outages affect the pipeline. Could add a direct-call fallback path later. |
+| 3 | **Less deterministic timing** | Agents respond at their own pace; some may skip. Early-complete + min_responses config handles this. |
+
+### Comparison Table
+
 | Aspect | Hermes MoA | OpenAB MoA |
 |--------|-----------|------------|
-| Message bus | Direct API calls to each provider | Discord channel as message bus |
-| Agent management | Config file with provider/model pairs | Existing bot deployments |
+| Message bus | Direct API calls to each provider | Discord channel |
+| Agent management | Config file with provider/model pairs | Bots in a channel |
+| What gets aggregated | Bare model outputs (no tools) | Full agent responses (with tools) |
 | Latency | ~5–15s (parallel API calls) | ~30–60s (Discord message flow) |
-| Tool calls | Aggregator can emit tool calls | Aggregator returns text only (v1) |
-| Exposure | Internal to agent loop, not an API | Standalone OpenAI-compatible endpoint |
-| Adding models | Edit config.yaml | Add a bot to the channel |
-| Cost model | Pay per API call to each provider | Each bot uses its own credentials |
+| Tool calls | Only aggregator can use tools | Every agent uses its own tools |
+| Exposure | Internal to agent loop | Standalone OpenAI-compatible endpoint |
+| Adding models | Edit config.yaml + add API key | Add a bot to the channel |
+| Cost model | Centralized API bill | Each bot uses its own credentials |
+| Audit | Ephemeral internal context | Persistent Discord history |
 
 ---
 
