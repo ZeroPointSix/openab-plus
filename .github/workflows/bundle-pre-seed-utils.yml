@@ -74,8 +74,6 @@ jobs:
           unzip -q /tmp/awscli.zip -d /tmp
           /tmp/aws/install --install-dir ./aws-cli --bin-dir ./bin
           rm -rf /tmp/aws /tmp/awscli.zip
-          # Verify
-          ./bin/aws --version
 
       - name: Download ghp from ghpool release
         env:
@@ -154,7 +152,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="utils-v${{ needs.resolve.outputs.aws_cli_version }}-ghp${{ needs.resolve.outputs.ghpool_version }}"
+          TAG="pre-seed-utils-v${{ needs.resolve.outputs.aws_cli_version }}-ghp${{ needs.resolve.outputs.ghpool_version }}"
           gh release create "$TAG" \
             --repo ${{ github.repository }} \
             --title "pre_seed utils (AWS CLI ${{ needs.resolve.outputs.aws_cli_version }} + ghp ${{ needs.resolve.outputs.ghpool_version }})" \
