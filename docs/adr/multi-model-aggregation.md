@@ -219,6 +219,15 @@ aggregator_model = "coordinator" # only needed for "synthesis" and "best_of_n" m
 
 When `mode = "pure"`, no aggregator model is required — the gateway handles merging locally.
 
+### Cost Considerations
+
+The aggregator does **not** need an expensive model. The real inference/reasoning is already done by the downstream agents — the aggregator's job is purely editorial:
+
+- **Pure mode:** Zero model cost. Just programmatic concat/vote logic.
+- **Synthesis mode:** Only text reorganization and deduplication. The cheapest available model (GPT-4o-mini, Claude Haiku, or even a local model) is sufficient. No complex reasoning required — it's a formatting task, not an inference task.
+
+This means the MoA overhead cost is negligible regardless of mode.
+
 ---
 
 ## 6. API Interface
