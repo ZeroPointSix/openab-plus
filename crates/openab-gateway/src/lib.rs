@@ -232,10 +232,6 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
     #[cfg(feature = "telegram")]
-    let telegram_trusted_source_only = std::env::var("TELEGRAM_TRUSTED_SOURCE_ONLY")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    #[cfg(feature = "telegram")]
     if telegram_bot_token.is_some() {
         let webhook_path =
             std::env::var("TELEGRAM_WEBHOOK_PATH").unwrap_or_else(|_| "/webhook/telegram".into());
@@ -251,8 +247,6 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     let telegram_secret_token: Option<String> = None;
     #[cfg(not(feature = "telegram"))]
     let telegram_rich_messages = false;
-    #[cfg(not(feature = "telegram"))]
-    let telegram_trusted_source_only = false;
 
     // LINE adapter
     #[cfg(feature = "line")]
@@ -405,7 +399,9 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         telegram_bot_token,
         telegram_secret_token,
         telegram_rich_messages,
-        telegram_trusted_source_only,
+        telegram_trusted_source_only: std::env::var("TELEGRAM_TRUSTED_SOURCE_ONLY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
         line_channel_secret,
         line_access_token,
         #[cfg(feature = "teams")]
