@@ -7,7 +7,7 @@
 # =============================================================================
 # Stage: builder — compile openab binary (unified mode)
 # =============================================================================
-ARG BUILDER_IMAGE=rust:1-bookworm
+ARG BUILDER_IMAGE=rust:1-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc
 FROM ${BUILDER_IMAGE} AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
