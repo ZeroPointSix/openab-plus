@@ -33,13 +33,56 @@ As an API consumer, I want to call a single `POST /v1/chat/completions` endpoint
 
 Hermes Agent implements Mixture of Agents (MoA) as a **virtual model provider** integrated into its agent loop:
 
-1. User selects an MoA preset via `/model <preset> --provider moa`
-2. For each model call, Hermes runs configured **reference models** (without tool schemas) to get diverse perspectives
-3. Reference outputs are appended as private context to the **aggregator** model
-4. The aggregator produces the final response and can emit tool calls
-5. MoA is NOT a separate API endpoint — it's a model-selection concept within the agent
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Hermes Agent Loop                                                  │
+│                                                                     │
+│  User Prompt                                                        │
+│      │                                                              │
+│      ▼                                                              │
+│  ┌──────────────────────────────────────────────┐                   │
+│  │  MoA Provider (selected via /model --provider moa)               │
+│  │                                                                  │
+│  │  Step 1: Fan-out to Reference Models (parallel, no tools)        │
+│  │                                                                  │
+│  │      ┌──────────┐  ┌──────────────┐  ┌──────────┐               │
+│  │      │ GPT-5.5  │  │ DeepSeek-V4  │  │  Model C │  ...          │
+│  │      │(OpenAI)  │  │(OpenRouter)  │  │          │               │
+│  │      └────┬─────┘  └──────┬───────┘  └────┬─────┘               │
+│  │           │               │               │                      │
+│  │           ▼               ▼               ▼                      │
+│  │      response A      response B      response C                  │
+│  │           │               │               │                      │
+│  │           └───────────────┼───────────────┘                      │
+│  │                           ▼                                      │
+│  │  Step 2: Inject as private context                               │
+│  │                           │                                      │
+│  │                           ▼                                      │
+│  │  Step 3: Call Aggregator (with full tool schema)                  │
+│  │      ┌────────────────────────────────┐                          │
+│  │      │  Claude Opus (Aggregator)      │                          │
+│  │      │  • Sees: user prompt           │                          │
+│  │      │  • Sees: reference outputs     │                          │
+│  │      │  • Can: emit tool calls        │                          │
+│  │      │  • Produces: final response    │                          │
+│  │      └──────────────┬─────────────────┘                          │
+│  │                     │                                            │
+│  └─────────────────────┼────────────────────────────────────────────┘
+│                        ▼                                            │
+│  Final Response (returned to user as if from a single model)        │
+│                                                                     │
+│  If aggregator emits tool calls → Hermes executes tools             │
+│  → next iteration runs the SAME MoA process again                   │
+└─────────────────────────────────────────────────────────────────────┘
+```
 
-**Key difference for OpenAB:** Hermes directly calls each model's API. OpenAB's approach leverages Discord as the message bus — agents are already running as bots, each with their own backend. We route through Discord rather than making direct API calls.
+**Key characteristics:**
+- All API calls are direct (Hermes → each provider's API)
+- Reference models get only conversation text (no system prompt, no tools) — cheap calls
+- Aggregator is the "real" model — it can use tools, iterate, do everything a normal model does
+- Not a separate endpoint — it's a model selection within the existing agent loop
+- Latency: ~5–15s (parallel reference calls + aggregator call)
+- Config: `config.yaml` with explicit `provider/model` pairs per preset
 
 ### OpenAB Architecture
 
