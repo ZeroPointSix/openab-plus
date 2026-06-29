@@ -418,11 +418,29 @@ fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow:
     }
     #[cfg(not(unix))]
     {
-        // F3/F7: On non-Unix platforms we materialize the link by copying its target.
-        // Directory targets cannot be copied with std::fs::copy, and the target may
-        // not have been moved into place yet during move_recursive. Treat both as
-        // non-fatal: skip the link rather than aborting the whole extraction.
-        let resolved = src.parent().unwrap_or(Path::new(".")).join(link_target);
+        // On non-Unix platforms we materialize the link by copying its target.
+        // During move_recursive, files may already have been moved from the temp (src)
+        // directory to the destination (dst) directory. We check both locations to
+        // handle cross-directory symlinks regardless of processing order.
+        // Directory targets cannot be copied with std::fs::copy — skip with warning.
+        let resolved_src = src.parent().unwrap_or(Path::new(".")).join(link_target);
+        let resolved_dst = dst.parent().unwrap_or(Path::new(".")).join(link_target);
+
+        // Try source first (temp dir), then destination (already moved)
+        let resolved = if resolved_src.exists() {
+            resolved_src
+        } else if resolved_dst.exists() {
+            resolved_dst
+        } else {
+            warn!(
+                "hooks.pre_seed: skipping symlink with unresolved target: {} (checked {} and {})",
+                link_target.display(),
+                resolved_src.display(),
+                resolved_dst.display()
+            );
+            return Ok(());
+        };
+
         match resolved.symlink_metadata() {
             Ok(meta) if meta.is_dir() => {
                 warn!(
@@ -433,10 +451,12 @@ fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow:
             Ok(_) => {
                 std::fs::copy(&resolved, dst)?;
             }
-            Err(_) => {
+            Err(e) => {
                 warn!(
-                    "hooks.pre_seed: skipping symlink with unresolved target: {}",
-                    resolved.display()
+                    "hooks.pre_seed: skipping symlink copy failed: {} -> {}: {}",
+                    link_target.display(),
+                    resolved.display(),
+                    e
                 );
             }
         }
