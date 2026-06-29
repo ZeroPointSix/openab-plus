@@ -308,11 +308,7 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
             let out_path = dest.join(&*path);
             if out_path.symlink_metadata().map(|m| m.is_symlink()).unwrap_or(false) {
                 if let Ok(target) = std::fs::read_link(&out_path) {
-                    if target.is_absolute()
-                        || target
-                            .components()
-                            .any(|c| c == std::path::Component::ParentDir)
-                    {
+                    if symlink_escapes(dest, &out_path, &target) {
                         let _ = std::fs::remove_file(&out_path);
                         warn!(
                             "hooks.pre_seed: removed symlink with escaping target: {}",
@@ -343,18 +339,51 @@ fn extract_tarball_with_limits(data: &[u8], dest: &Path, deadline: Instant) -> a
     Ok(())
 }
 
+/// Check whether a symlink at `link_path` with target `link_target` escapes `root`.
+/// Resolves the target relative to the symlink's parent directory and checks
+/// whether the normalized result stays within root. This allows relative symlinks
+/// with `..` components (e.g., `../aws-cli/v2/current/bin/aws`) as long as they
+/// don't escape the extraction root.
+fn symlink_escapes(root: &Path, link_path: &Path, link_target: &Path) -> bool {
+    // Absolute symlinks always escape
+    if link_target.is_absolute() {
+        return true;
+    }
+    // Resolve the symlink target relative to the symlink's parent directory
+    let parent = link_path.parent().unwrap_or(root);
+    let resolved = normalize_path(&parent.join(link_target));
+    let root_normalized = normalize_path(root);
+    !resolved.starts_with(&root_normalized)
+}
+
+/// Normalize a path by resolving `.` and `..` components without touching the filesystem.
+fn normalize_path(path: &Path) -> std::path::PathBuf {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Only pop if there's something to pop and it's not a prefix/root
+                if components.last().is_some_and(|c| {
+                    !matches!(c, std::path::Component::RootDir | std::path::Component::Prefix(_))
+                }) {
+                    components.pop();
+                }
+            }
+            std::path::Component::CurDir => {}
+            _ => components.push(component),
+        }
+    }
+    components.iter().collect()
+}
+
 /// Create a symlink on Unix, or copy the resolved target on other platforms.
-/// Rejects symlink targets that escape via absolute path or `..` components.
+/// Rejects symlink targets that escape the extraction root.
 #[allow(unused_variables)]
 fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow::Result<()> {
-    // Reject symlinks that could escape the target directory
-    if link_target.is_absolute()
-        || link_target
-            .components()
-            .any(|c| c == std::path::Component::ParentDir)
-    {
+    // Reject absolute symlinks unconditionally
+    if link_target.is_absolute() {
         anyhow::bail!(
-            "hooks.pre_seed: rejecting symlink with escaping target: {}",
+            "hooks.pre_seed: rejecting symlink with absolute target: {}",
             link_target.display()
         );
     }
@@ -823,5 +852,160 @@ mod tests {
         extract_and_apply(cursor.get_ref(), &target, deadline).unwrap();
 
         assert_eq!(std::fs::read_to_string(target.join("test.txt")).unwrap(), "hello");
+    }
+
+    #[test]
+    fn normalize_path_resolves_parent_dir() {
+        let p = normalize_path(Path::new("/tmp/extract/bin/../aws-cli/v2"));
+        assert_eq!(p, std::path::PathBuf::from("/tmp/extract/aws-cli/v2"));
+    }
+
+    #[test]
+    fn normalize_path_resolves_multiple_parents() {
+        let p = normalize_path(Path::new("/a/b/c/../../d"));
+        assert_eq!(p, std::path::PathBuf::from("/a/d"));
+    }
+
+    #[test]
+    fn normalize_path_does_not_go_above_root() {
+        let p = normalize_path(Path::new("/a/../../../etc"));
+        // Can't go above /, so stays at /etc
+        assert_eq!(p, std::path::PathBuf::from("/etc"));
+    }
+
+    #[test]
+    fn normalize_path_removes_cur_dir() {
+        let p = normalize_path(Path::new("/a/./b/./c"));
+        assert_eq!(p, std::path::PathBuf::from("/a/b/c"));
+    }
+
+    #[test]
+    fn symlink_escapes_allows_relative_within_root() {
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/bin/aws");
+        let link_target = Path::new("../aws-cli/v2/current/bin/aws");
+        // ../aws-cli resolves to /tmp/extract/aws-cli — within root
+        assert!(!symlink_escapes(root, link_path, link_target));
+    }
+
+    #[test]
+    fn symlink_escapes_allows_sibling_relative() {
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/aws-cli/v2/current");
+        let link_target = Path::new("2.35.12");
+        // Resolves to /tmp/extract/aws-cli/v2/2.35.12 — within root
+        assert!(!symlink_escapes(root, link_path, link_target));
+    }
+
+    #[test]
+    fn symlink_escapes_rejects_absolute() {
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/bin/aws");
+        let link_target = Path::new("/usr/local/bin/aws");
+        assert!(symlink_escapes(root, link_path, link_target));
+    }
+
+    #[test]
+    fn symlink_escapes_rejects_traversal_above_root() {
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/bin/evil");
+        let link_target = Path::new("../../../etc/passwd");
+        // Resolves to /tmp/etc/passwd — outside root
+        assert!(symlink_escapes(root, link_path, link_target));
+    }
+
+    #[test]
+    fn symlink_escapes_rejects_deep_traversal() {
+        let root = Path::new("/tmp/extract");
+        let link_path = Path::new("/tmp/extract/a/b/c");
+        let link_target = Path::new("../../../../outside");
+        // Resolves to /tmp/outside — outside root
+        assert!(symlink_escapes(root, link_path, link_target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_tarball_preserves_relative_symlinks_with_parent_dir() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+
+        let buf = Vec::new();
+        let enc = GzEncoder::new(buf, Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        // Create a real file at aws-cli/bin/aws
+        let mut header = tar::Header::new_gnu();
+        header.set_size(11);
+        header.set_mode(0o755);
+        builder
+            .append_data(&mut header, "aws-cli/bin/aws", &b"#!/bin/bash"[..])
+            .unwrap();
+
+        // Create a relative symlink: bin/aws -> ../aws-cli/bin/aws
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        builder
+            .append_link(&mut header, "bin/aws", "../aws-cli/bin/aws")
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        let tarball_bytes = enc.finish().unwrap();
+
+        extract_tarball_with_limits(&tarball_bytes, dir.path(), deadline).unwrap();
+
+        // The symlink should exist and be resolvable
+        let symlink_path = dir.path().join("bin/aws");
+        assert!(
+            symlink_path.symlink_metadata().unwrap().is_symlink(),
+            "bin/aws should be a symlink"
+        );
+        assert_eq!(
+            std::fs::read_link(&symlink_path).unwrap(),
+            Path::new("../aws-cli/bin/aws")
+        );
+        // Verify it resolves to the real file
+        assert_eq!(
+            std::fs::read_to_string(&symlink_path).unwrap(),
+            "#!/bin/bash"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extract_tarball_removes_escaping_symlink() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+
+        let dir = tempfile::tempdir().unwrap();
+        let deadline = Instant::now() + std::time::Duration::from_secs(60);
+
+        let buf = Vec::new();
+        let enc = GzEncoder::new(buf, Compression::default());
+        let mut builder = tar::Builder::new(enc);
+
+        // Create an escaping symlink: evil -> ../../../etc/passwd
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        builder
+            .append_link(&mut header, "evil", "../../../etc/passwd")
+            .unwrap();
+
+        let enc = builder.into_inner().unwrap();
+        let tarball_bytes = enc.finish().unwrap();
+
+        extract_tarball_with_limits(&tarball_bytes, dir.path(), deadline).unwrap();
+
+        // The escaping symlink should have been removed
+        assert!(
+            !dir.path().join("evil").exists(),
+            "escaping symlink should be removed"
+        );
     }
 }
