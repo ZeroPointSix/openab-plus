@@ -18,6 +18,7 @@ pub async fn run(cfg: &PreSeedConfig) -> anyhow::Result<()> {
     if cfg.sources.is_empty() {
         return Ok(());
     }
+
     if cfg.sources.len() > MAX_SOURCES {
         anyhow::bail!(
             "hooks.pre_seed: too many sources ({}, max {})",
@@ -395,7 +396,10 @@ fn normalize_path(path: &Path) -> std::path::PathBuf {
     components.iter().collect()
 }
 
-/// Create a symlink on Unix, or copy the resolved target on other platforms.
+/// Create a relative symlink at `dst` pointing to `link_target`.
+///
+/// pre_seed refuses to run on non-Unix platforms (see [`run`]), so symlink creation
+/// is Unix-only. On non-Unix the call is unreachable, but we keep a defensive bail.
 ///
 /// SAFETY PRECONDITION (F2): This function only rejects *absolute* symlink targets.
 /// It has no `root` parameter and therefore CANNOT validate whether a relative
@@ -403,7 +407,7 @@ fn normalize_path(path: &Path) -> std::path::PathBuf {
 /// with [`symlink_escapes`] before calling this. The sole caller, `move_recursive`,
 /// receives entries that were already validated during `extract_tarball_with_limits`.
 #[allow(unused_variables)]
-fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow::Result<()> {
+fn create_symlink(link_target: &Path, dst: &Path) -> anyhow::Result<()> {
     // Reject absolute symlinks unconditionally. Relative-target containment is the
     // caller's responsibility (see SAFETY PRECONDITION above).
     if link_target.is_absolute() {
@@ -415,64 +419,19 @@ fn create_symlink_or_copy(link_target: &Path, dst: &Path, src: &Path) -> anyhow:
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(link_target, dst)?;
+        Ok(())
     }
     #[cfg(not(unix))]
     {
-        // On non-Unix platforms we materialize the link by copying its target.
-        // During move_recursive, files may already have been moved from the temp (src)
-        // directory to the destination (dst) directory. We check both locations to
-        // handle cross-directory symlinks regardless of processing order.
-        // Directory targets cannot be copied with std::fs::copy — skip with warning.
-        let resolved_src = src.parent().unwrap_or(Path::new(".")).join(link_target);
-        let resolved_dst = dst.parent().unwrap_or(Path::new(".")).join(link_target);
-
-        // Try source first (temp dir), then destination (already moved)
-        let resolved = if resolved_src.exists() {
-            resolved_src
-        } else if resolved_dst.exists() {
-            resolved_dst
-        } else {
-            warn!(
-                "hooks.pre_seed: skipping symlink with unresolved target: {} (checked {} and {})",
-                link_target.display(),
-                resolved_src.display(),
-                resolved_dst.display()
-            );
-            return Ok(());
-        };
-
-        match resolved.symlink_metadata() {
-            Ok(meta) if meta.is_dir() => {
-                warn!(
-                    "hooks.pre_seed: skipping directory symlink on non-unix platform: {}",
-                    resolved.display()
-                );
-            }
-            Ok(_) => {
-                std::fs::copy(&resolved, dst)?;
-            }
-            Err(e) => {
-                warn!(
-                    "hooks.pre_seed: skipping symlink copy failed: {} -> {}: {}",
-                    link_target.display(),
-                    resolved.display(),
-                    e
-                );
-            }
-        }
+        // Unreachable: run() bails on non-Unix before any extraction happens.
+        anyhow::bail!("hooks.pre_seed: symlinks are unsupported on non-unix platforms")
     }
-    Ok(())
 }
 
 /// Recursively move files from src directory into dst directory.
-/// Checks deadline cooperatively.
-/// On non-Unix platforms, symlinks are processed in a second pass after regular
-/// files/directories to ensure symlink targets exist when copied.
+/// Checks deadline cooperatively. Unix symlinks are created as-is (target string
+/// preserved), so processing order does not matter — no deferred pass needed.
 fn move_recursive(src: &Path, dst: &Path, deadline: Instant) -> anyhow::Result<()> {
-    // Collect symlinks for deferred processing (needed on non-Unix where symlinks are
-    // resolved by copying, so targets must already be in place).
-    let mut deferred_symlinks: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-
     for entry in std::fs::read_dir(src)? {
         if Instant::now() >= deadline {
             anyhow::bail!("hooks.pre_seed: timed out during move to target");
@@ -484,8 +443,17 @@ fn move_recursive(src: &Path, dst: &Path, deadline: Instant) -> anyhow::Result<(
 
         let meta = src_path.symlink_metadata()?;
         if meta.is_symlink() {
-            // Defer symlinks to second pass on all platforms for consistent behavior
-            deferred_symlinks.push((src_path, dst_path));
+            // Preserve symlinks as-is without following
+            let link_target = std::fs::read_link(&src_path)?;
+            // Remove existing dst (file or directory) before creating symlink
+            if let Ok(dst_meta) = dst_path.symlink_metadata() {
+                if dst_meta.is_dir() {
+                    std::fs::remove_dir_all(&dst_path)?;
+                } else {
+                    std::fs::remove_file(&dst_path)?;
+                }
+            }
+            create_symlink(&link_target, &dst_path)?;
         } else if meta.is_dir() {
             std::fs::create_dir_all(&dst_path)?;
             move_recursive(&src_path, &dst_path, deadline)?;
@@ -495,25 +463,6 @@ fn move_recursive(src: &Path, dst: &Path, deadline: Instant) -> anyhow::Result<(
                 std::fs::remove_file(&src_path)?;
             }
         }
-    }
-
-    // Second pass: process symlinks after all regular files are in place
-    for (src_path, dst_path) in deferred_symlinks {
-        if Instant::now() >= deadline {
-            anyhow::bail!("hooks.pre_seed: timed out during move to target");
-        }
-        let link_target = std::fs::read_link(&src_path)?;
-        // Remove existing dst (file or directory) before creating symlink
-        if let Ok(dst_meta) = dst_path.symlink_metadata() {
-            if dst_meta.is_dir() {
-                std::fs::remove_dir_all(&dst_path)?;
-            } else {
-                std::fs::remove_file(&dst_path)?;
-            }
-        }
-        create_symlink_or_copy(&link_target, &dst_path, &src_path)?;
-        // Clean up source symlink
-        let _ = std::fs::remove_file(&src_path);
     }
 
     Ok(())
