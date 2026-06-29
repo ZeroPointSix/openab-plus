@@ -53,6 +53,9 @@ impl AppState {
     /// from each other — adding a new adapter no longer forces changes in
     /// unrelated test files.
     ///
+    /// NOTE: Interim fix — the long-term solution is a full AdapterRegistry
+    /// (trait-object pattern) per the remaining scope of #1239.
+    ///
     /// See: <https://github.com/openabdev/openab/issues/1239>
     pub fn test_default(event_tx: broadcast::Sender<String>) -> Self {
         Self {
