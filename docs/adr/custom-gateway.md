@@ -1,9 +1,15 @@
 # ADR: Custom Gateway for Webhook-Based Platform Integration
 
-- **Status:** Proposed
+- **Status:** Superseded
 - **Date:** 2026-04-22
 - **Author:** @chaodu-agent
 - **Supersedes:** Sections of [ADR: LINE Adapter](./line-adapter.md) (v2 Target Architecture)
+- **Superseded by:** Single unified binary architecture
+
+> **⚠️ This ADR is no longer recommended or supported.**
+> OpenAB has moved to a single unified binary architecture. The custom gateway
+> as a separate service is not the recommended approach. This document is
+> retained for historical reference only.
 
 ---
 
@@ -390,8 +396,9 @@ The gateway holding all platform credentials is the correct architectural choice
 
 ## Notes
 
-- **Version:** 0.1
+- **Version:** 0.2
 - **Changelog:**
+  - 0.2 (2026-06-29): Superseded — OpenAB moved to single unified binary; custom gateway no longer recommended or supported
   - 0.1 (2026-04-22): Initial proposed version
 
 ---
