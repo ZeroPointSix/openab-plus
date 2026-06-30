@@ -510,13 +510,10 @@ pub async fn handle_reply(
         let emoji = &reply.content.text;
         let tg_emoji = match emoji.as_str() {
             "🆗" => "👍",
-            // Map mood faces to valid Telegram reaction emojis.
-            // Telegram has a fixed allowlist; unsupported emojis cause REACTION_INVALID.
-            "😊" => "😇",
-            "😏" => "😎",
-            "✌️" => "👌",
-            "💪" => "🔥",
-            "🦾" => "⚡",
+            // Mood faces are used on platforms that support multiple reactions (Discord).
+            // On Telegram (single reaction, non-premium), skip them to keep 👍 as the
+            // final "done" indicator instead of replacing it with a random face.
+            "😊" | "😎" | "🫡" | "🤓" | "😏" | "✌️" | "💪" | "🦾" => return,
             other => other,
         };
         let is_add = reply.command.as_deref() == Some("add_reaction");
