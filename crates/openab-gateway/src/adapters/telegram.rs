@@ -537,7 +537,13 @@ pub async fn handle_reply(
                 .unwrap_or_default()
         };
         let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/setMessageReaction");
-        let msg_id: i64 = reply.reply_to.parse().unwrap_or(0);
+        let msg_id: i64 = match reply.reply_to.parse() {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(reply_to = %reply.reply_to, error = %e, "invalid message_id for reaction, skipping");
+                return;
+            }
+        };
         let body = serde_json::json!({
             "chat_id": reply.channel.id,
             "message_id": msg_id,
