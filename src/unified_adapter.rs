@@ -162,13 +162,17 @@ impl ChatAdapter for UnifiedGatewayAdapter {
     }
 
     async fn add_reaction(&self, msg: &MessageRef, emoji: &str) -> Result<()> {
-        let reply = self.build_reply(&msg.channel, emoji, Some("add_reaction"), None);
+        let mut reply = self.build_reply(&msg.channel, emoji, Some("add_reaction"), None);
+        // Use the actual platform message_id (not origin_event_id which is a UUID)
+        reply.reply_to = msg.message_id.clone();
         self.dispatch_reply(&reply).await;
         Ok(())
     }
 
     async fn remove_reaction(&self, msg: &MessageRef, emoji: &str) -> Result<()> {
-        let reply = self.build_reply(&msg.channel, emoji, Some("remove_reaction"), None);
+        let mut reply = self.build_reply(&msg.channel, emoji, Some("remove_reaction"), None);
+        // Use the actual platform message_id (not origin_event_id which is a UUID)
+        reply.reply_to = msg.message_id.clone();
         self.dispatch_reply(&reply).await;
         Ok(())
     }
