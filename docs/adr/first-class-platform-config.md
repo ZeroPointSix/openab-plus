@@ -24,23 +24,75 @@ Currently, all gateway-connected platforms share a single `[gateway]` config sec
 # ❌ Current: one catch-all for ALL gateway platforms
 [gateway]
 url = "ws://openab-gateway:8080/ws"
-platform = "telegram"              # only identifies which gateway to connect to
-allowed_users = ["123456789"]      # shared list for ALL platforms behind this gateway
+platform = "telegram"
+allowed_users = ["123456789"]  # shared list — what platform is this ID for?
 ```
 
 This is fundamentally broken:
 - **ID format mixing** — Telegram UIDs (`123456789`) and LINE User IDs (`U1234abc...`) in the same list
 - **No per-platform trust** — trusting a Telegram user implicitly trusts that same string on LINE
-- **Asymmetry** — Discord and Slack get rich per-platform config; everything else is a second-class `[gateway]` blob
-- **Multi-gateway deployments** — running Telegram + LINE requires multiple `[gateway]` sections with unclear semantics
+- **Asymmetry** — Discord and Slack get rich per-platform config; everything else is second-class
+- **Multi-gateway deployments** — running Telegram + LINE requires unclear semantics
 
 ### Problem 2: Trust-all default is insecure
 
-All adapters auto-detect: empty `allowed_users` → `allow_all_users = true`. This means a fresh deployment with no user configuration trusts **everyone** by default.
+All adapters auto-detect: empty `allowed_users` → `allow_all_users = true`. A fresh deployment trusts **everyone** by default.
 
-## 3. Decision
+## 3. Trust Pyramid (Defense in Depth)
 
-### 3.1 Per-platform top-level config sections
+Three layers of security, from broadest (platform) to narrowest (user):
+
+```
+                          ▲
+                         ╱ ╲
+                        ╱   ╲
+                       ╱ L3  ╲         🔒 Layer 3: User Trust
+                      ╱       ╲        allowed_users per platform
+                     ╱ sender  ╲       "Is THIS PERSON allowed?"
+                    ╱  allowed? ╲
+                   ╱─────────────╲
+                  ╱               ╲
+                 ╱      L2         ╲    🔒 Layer 2: Channel/Group Trust
+                ╱                   ╲   allowed_channels, allowed_groups
+               ╱  channel/group      ╲  "Is this CONVERSATION allowed?"
+              ╱    allowed?           ╲
+             ╱─────────────────────────╲
+            ╱                           ╲
+           ╱           L1                ╲   🔒 Layer 1: Platform Authentication
+          ╱                               ╲  "Is this request REALLY from the platform?"
+         ╱   webhook signature / JWT /     ╲
+        ╱    secret token / IP range        ╲
+       ╱─────────────────────────────────────╲
+```
+
+### Layer 1: Platform Authentication (gateway layer — transport)
+
+Verifies the webhook request is genuinely from the platform, not spoofed. This is the **only** security check at the gateway level.
+
+| Platform | Auth Mechanism | How it works |
+|----------|---------------|--------------|
+| **Telegram** | Secret Token + IP Range | `X-Telegram-Bot-Api-Secret-Token` header; source IP in Telegram subnet (149.154.160.0/20, 91.108.4.0/22) |
+| **LINE** | HMAC-SHA256 Signature | `X-Line-Signature` = HMAC(channel_secret, request_body) |
+| **Feishu** | SHA256 Signature + Encrypt Key | SHA256(timestamp + nonce + encrypt_key + body) |
+| **WeCom** | Token Signature + AES Decrypt | SHA1(sort(token, timestamp, nonce, encrypt)); AES-256-CBC body decryption |
+| **Google Chat** | JWT (RS256) | Bearer token verified via Google JWKS; email claim = `chat@system.gserviceaccount.com` |
+| **MS Teams** | JWT (OpenID Connect) | RS256 JWT verified via Bot Framework OpenID metadata + JWKS |
+| **Slack** | Socket Mode WebSocket | App-Level Token (xapp-...) authenticates WS connection |
+| **Discord** | Gateway WebSocket | Bot Token authenticates WS connection |
+
+### Layer 2: Channel/Group Trust (core layer)
+
+Controls which conversations the bot participates in. Already implemented.
+
+### Layer 3: User Trust (core layer) ← This ADR
+
+Controls which individual senders can trigger agent actions. Currently defaults to allow-all. This ADR proposes flipping to deny-all.
+
+---
+
+## 4. Decision
+
+### 4.1 Per-platform top-level config sections
 
 Every platform gets its own section with platform-specific settings + unified trust fields:
 
@@ -73,7 +125,7 @@ allowed_groups = ["oc_xxxxx"]
 
 [wecom]
 corp_id = "${WECOM_CORP_ID}"
-agent_id = "${WECOM_AGENT_ID}"
+token = "${WECOM_TOKEN}"
 allowed_users = ["zhangsan"]
 
 [googlechat]
@@ -82,34 +134,30 @@ allowed_users = ["users/123456789"]
 
 [teams]
 app_id = "${TEAMS_APP_ID}"
+app_secret = "${TEAMS_APP_SECRET}"
 allowed_tenants = ["tenant-uuid"]
 allowed_users = ["29:1abc..."]
 ```
 
-### 3.2 Trust-none default
+### 4.2 Trust-none default
 
 ```
 Current:  empty allowed_users → allow_all_users = true  (TRUST ALL)
 Proposed: empty allowed_users → allow_all_users = false (TRUST NONE)
 ```
 
-When a message arrives from an untrusted sender, the system:
-1. Logs the event (sender ID, platform, timestamp)
-2. Replies with an echo message showing the sender their own ID
-3. Does NOT dispatch to any agent
+When a message arrives from an untrusted sender:
+1. Log the event (sender ID, platform, timestamp)
+2. Reply with an echo message showing the sender their own ID
+3. Do NOT dispatch to any agent
 
-### 3.3 Trust check at router level (single gate)
+### 4.3 Trust check at router level (single gate)
 
-Trust enforcement happens in **one place only**: `AdapterRouter::handle_message()`. The gateway remains a pure transport layer.
-
-```
-Gateway (transport):  webhook → verify authenticity → normalize → forward
-Core (policy):        AdapterRouter → TrustConfig::is_allowed(platform, sender_id) → echo or dispatch
-```
+Trust enforcement happens in **one place only**: `AdapterRouter::handle_message()`. The gateway remains a pure transport layer (L1 only).
 
 ---
 
-## 4. Architecture
+## 5. Architecture
 
 ```
 ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
@@ -119,33 +167,32 @@ Core (policy):        AdapterRouter → TrustConfig::is_allowed(platform, sender
        │                 │                 │                 │
        ▼                 ▼                 ▼                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                  openab-gateway (transport only)                      │
+│           openab-gateway — L1: Platform Authentication               │
 │                                                                     │
-│  ✅ Verify webhook signature / secret token / IP                    │
+│  ✅ Verify webhook signature / JWT / secret token / IP              │
 │  ✅ Normalize → GatewayEvent                                        │
-│  ✅ Forward ALL events                                               │
-│  ❌ No trust check, no user filtering                               │
+│  ✅ Forward ALL authenticated events                                 │
+│  ❌ No user filtering (L3 is in core)                               │
 └────────────────────────────┬────────────────────────────────────────┘
                              │ WebSocket
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         openab-core                                   │
+│                    openab-core — L2 + L3                              │
 │                                                                     │
 │  ┌───────────┐ ┌───────────┐ ┌─────────────────────────────┐       │
 │  │  Discord  │ │   Slack   │ │  GatewayAdapter             │       │
 │  │  Handler  │ │  Handler  │ │  (TG/LINE/Feishu/WeCom/GC)  │       │
 │  └─────┬─────┘ └─────┬─────┘ └──────────────┬──────────────┘       │
-│        │              │                      │                      │
 │        └──────────────┼──────────────────────┘                      │
 │                       ▼                                             │
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │ 🔒 AdapterRouter::handle_message()                            │  │
 │  │                                                               │  │
-│  │   trust = platform_trust_configs.get(adapter.platform())      │  │
-│  │   if !trust.is_allowed(sender_id):                            │  │
-│  │       log + echo sender ID + RETURN                           │  │
-│  │   else:                                                       │  │
-│  │       dispatch to ACP ✅                                       │  │
+│  │   L2: channel/group check (existing)                          │  │
+│  │   L3: TrustConfig::is_allowed(platform, sender_id)            │  │
+│  │                                                               │  │
+│  │   if denied → log + echo sender ID → RETURN                   │  │
+│  │   if allowed → dispatch to ACP ✅                              │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                       │                                             │
 │                       ▼                                             │
@@ -200,22 +247,20 @@ let _ = adapter.send_message(&msg.channel, &echo).await;
 
 ---
 
-## 5. Migration
+## 6. Migration
 
 ### Breaking change
 
-Existing deployments with no `allowed_users` configured will stop accepting messages after this change.
+Existing deployments with no `allowed_users` configured will stop accepting messages.
 
 ### Migration path
-
-Add `allow_all_users = true` to maintain old behavior:
 
 ```toml
 # Before (implicit trust-all):
 [discord]
 bot_token = "..."
 
-# After (explicit trust-all):
+# After (explicit trust-all to keep old behavior):
 [discord]
 bot_token = "..."
 allow_all_users = true
@@ -223,7 +268,7 @@ allow_all_users = true
 
 ### `[gateway]` deprecation
 
-The `[gateway]` section remains functional for backward compatibility but is deprecated. Users should migrate to per-platform sections:
+The `[gateway]` section remains functional for backward compatibility but is deprecated:
 
 ```toml
 # ❌ Deprecated
@@ -238,7 +283,7 @@ allowed_users = ["123"]
 
 ---
 
-## 6. Sender ID Formats
+## 7. Sender ID Formats
 
 | Platform | Config section | ID format | Example |
 |----------|---------------|-----------|---------|
@@ -253,7 +298,7 @@ allowed_users = ["123"]
 
 ---
 
-## 7. Implementation Plan
+## 8. Implementation Plan
 
 1. **Define `TrustConfig` struct** and `PlatformTrustConfigs` in `openab-core`
 2. **Add per-platform config parsing** — each `[platform]` section reads `allowed_users` and `allow_all_users`
@@ -263,13 +308,13 @@ allowed_users = ["123"]
    - `should_skip_event()` user filter in `gateway.rs`
    - `allowed_users` check in Feishu gateway adapter
 5. **Add echo reply** on deny using `ChatAdapter::send_message()`
-6. **Deprecation warning** for `[gateway].allowed_users` — log warning if old config detected
+6. **Deprecation warning** for `[gateway].allowed_users`
 7. **Update `config.toml.example`** and docs
 8. **Migration guide** in release notes
 
 ---
 
-## 8. Rejected Alternatives
+## 9. Rejected Alternatives
 
 ### Per-adapter `InboundGate` trait
 
@@ -282,17 +327,15 @@ Each adapter implements `is_trusted_sender()`. Rejected because:
 ### Trust check at gateway layer
 
 Gateway adapters filter untrusted senders before forwarding. Rejected because:
-- Gateway is transport — mixing business logic violates separation of concerns
+- Gateway is transport (L1) — mixing L3 policy violates layer separation
 - Trust config lives in core's `config.toml`, not gateway env vars
-- Would split config into two places (env vars + toml)
-- Reply capability is already wired in core via `ChatAdapter::send_message()`
+- Would split config into two places
+- Reply capability already wired in core via `ChatAdapter::send_message()`
 
 ### Keep `[gateway]` with per-platform sub-sections
 
 ```toml
 [gateway.telegram]
-allowed_users = [...]
-[gateway.line]
 allowed_users = [...]
 ```
 
