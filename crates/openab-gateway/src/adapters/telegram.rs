@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Base URL for Telegram Bot API. Extracted as constant for consistency
 /// with LINE's `LINE_API_BASE` and to enable future mock testing.
@@ -536,16 +536,29 @@ pub async fn handle_reply(
                 .unwrap_or_default()
         };
         let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/setMessageReaction");
-        let _ = client
-            .post(&url)
-            .json(&serde_json::json!({
-                "chat_id": reply.channel.id,
-                "message_id": reply.reply_to,
-                "reaction": current,
-            }))
-            .send()
-            .await
-            .map_err(|e| error!("telegram reaction error: {e}"));
+        let msg_id: i64 = reply.reply_to.parse().unwrap_or(0);
+        let body = serde_json::json!({
+            "chat_id": reply.channel.id,
+            "message_id": msg_id,
+            "reaction": current,
+        });
+        debug!(
+            chat_id = %reply.channel.id,
+            message_id = msg_id,
+            emoji = %tg_emoji,
+            is_add,
+            "telegram reaction"
+        );
+        match client.post(&url).json(&body).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if !status.is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    warn!(status = %status, body = %text, "setMessageReaction failed");
+                }
+            }
+            Err(e) => error!("telegram reaction error: {e}"),
+        }
         return;
     }
 
