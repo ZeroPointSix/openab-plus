@@ -441,13 +441,8 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         #[cfg(feature = "acp")]
         acp: adapters::acp_server::AcpConfig::from_env(),
         #[cfg(feature = "acp")]
-        acp_reply_registry: {
-            if std::env::var("OPENAB_ACP_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false) {
-                Some(adapters::acp_server::new_reply_registry())
-            } else {
-                None
-            }
-        },
+        acp_reply_registry: adapters::acp_server::AcpConfig::from_env()
+            .map(|_| adapters::acp_server::new_reply_registry()),
         ws_token,
         event_tx,
         reply_token_cache,

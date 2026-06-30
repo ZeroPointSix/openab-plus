@@ -58,8 +58,6 @@ impl AcpConfig {
 struct AcpSession {
     /// Channel ID used in GatewayEvent (maps replies back to this session)
     channel_id: String,
-    /// Sender for streaming reply chunks back to the WebSocket handler
-    reply_tx: mpsc::UnboundedSender<ReplyChunk>,
 }
 
 pub enum ReplyChunk {
@@ -155,7 +153,15 @@ pub async fn ws_upgrade(
 
     let expected = state.acp.as_ref().and_then(|c| c.auth_key.as_ref());
     if let Some(expected) = expected {
-        if token != Some(expected.as_str()) {
+        let valid = match token {
+            Some(t) => {
+                // Constant-time comparison to prevent timing attacks
+                use subtle::ConstantTimeEq;
+                t.as_bytes().ct_eq(expected.as_bytes()).into()
+            }
+            None => false,
+        };
+        if !valid {
             warn!("ACP WebSocket rejected: invalid or missing token");
             return StatusCode::UNAUTHORIZED.into_response();
         }
@@ -208,6 +214,17 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 continue;
             }
         };
+
+        // Validate JSON-RPC version (spec requires "2.0")
+        if req.jsonrpc != "2.0" {
+            let err_resp = JsonRpcResponse::error(
+                req.id.clone().unwrap_or(Value::Null),
+                -32600,
+                "Invalid Request: jsonrpc must be \"2.0\"",
+            );
+            let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap());
+            continue;
+        }
 
         let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -310,7 +327,7 @@ fn handle_initialize(connection_id: &str, _req: &JsonRpcRequest) -> JsonRpcRespo
 }
 
 async fn handle_session_new(
-    state: &Arc<crate::AppState>,
+    _state: &Arc<crate::AppState>,
     sessions: &Arc<Mutex<HashMap<String, AcpSession>>>,
     id: Value,
     _params: Option<&Value>,
@@ -318,20 +335,11 @@ async fn handle_session_new(
     let session_id = format!("sess_{}", Uuid::new_v4());
     let channel_id = format!("acp_{}", Uuid::new_v4());
 
-    // Create reply channel for this session
-    let (reply_tx, _reply_rx) = mpsc::unbounded_channel::<ReplyChunk>();
-
-    // Register in the global reply registry so handle_reply can find it
-    if let Some(ref registry) = state.acp_reply_registry {
-        registry.lock().await.insert(channel_id.clone(), reply_tx.clone());
-    }
-
-    // Store session locally
+    // Store session locally (reply channel is created lazily in session/prompt)
     sessions.lock().await.insert(
         session_id.clone(),
         AcpSession {
             channel_id,
-            reply_tx,
         },
     );
 
@@ -369,10 +377,10 @@ async fn handle_session_prompt(
     };
 
     // Look up session
-    let (channel_id, reply_tx) = {
+    let channel_id = {
         let guard = sessions.lock().await;
         match guard.get(&session_id) {
-            Some(s) => (s.channel_id.clone(), s.reply_tx.clone()),
+            Some(s) => s.channel_id.clone(),
             None => {
                 let resp = JsonRpcResponse::error(
                     id,
@@ -385,17 +393,10 @@ async fn handle_session_prompt(
         }
     };
 
-    // Create a new reply receiver (re-register to get fresh channel)
-    let (new_tx, mut reply_rx) = mpsc::unbounded_channel::<ReplyChunk>();
+    // Create reply channel for this prompt
+    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<ReplyChunk>();
     if let Some(ref registry) = state.acp_reply_registry {
-        registry.lock().await.insert(channel_id.clone(), new_tx.clone());
-    }
-    // Update session's reply_tx
-    {
-        let mut guard = sessions.lock().await;
-        if let Some(s) = guard.get_mut(&session_id) {
-            s.reply_tx = new_tx;
-        }
+        registry.lock().await.insert(channel_id.clone(), reply_tx);
     }
 
     // Convert to GatewayEvent and dispatch
@@ -544,6 +545,7 @@ pub async fn handle_reply(reply: &GatewayReply, registry: &AcpReplyRegistry) {
         Some("edit_message") => {
             // Streaming update — send as text snapshot
             if tx.send(ReplyChunk::Text(full_text)).is_err() {
+                tracing::debug!(channel = key, "ACP reply send failed (client likely disconnected)");
                 map.remove(key);
             }
         }
