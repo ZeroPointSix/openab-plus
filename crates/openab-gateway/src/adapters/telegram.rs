@@ -506,28 +506,6 @@ pub async fn handle_reply(
     if reply.command.as_deref() == Some("add_reaction")
         || reply.command.as_deref() == Some("remove_reaction")
     {
-        // Show native "Thinking..." indicator via sendMessageDraft on first thinking emoji.
-        // Uses plain-text draft (not rich) — Telegram auto-clears it when the final
-        // sendMessage/sendRichMessage arrives in the same chat. No explicit dismiss needed.
-        // See: https://core.telegram.org/bots/api#sendmessagedraft
-        if rich_messages && reply.command.as_deref() == Some("add_reaction") {
-            let is_thinking = matches!(reply.content.text.as_str(), "👀" | "🤔" | "👨\u{200d}💻" | "🔥" | "⚡");
-            if is_thinking {
-                let draft_id = compute_draft_id(&reply.channel.id, &reply.channel.thread_id);
-                let url = format!("{TELEGRAM_API_BASE}/bot{bot_token}/sendMessageDraft");
-                let mut body = serde_json::json!({
-                    "chat_id": reply.channel.id,
-                    "draft_id": draft_id,
-                    "text": "",
-                });
-                if let Some(ref tid) = reply.channel.thread_id {
-                    body["message_thread_id"] = serde_json::json!(tid.parse::<i64>().unwrap_or(0));
-                }
-                let _ = client.post(&url).json(&body).send().await;
-            }
-        }
-        // No explicit dismiss on remove_reaction — the final reply auto-clears the draft.
-
         let msg_key = format!("{}:{}", reply.channel.id, reply.reply_to);
         let emoji = &reply.content.text;
         let tg_emoji = match emoji.as_str() {
