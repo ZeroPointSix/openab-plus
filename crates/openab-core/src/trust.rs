@@ -111,7 +111,16 @@ impl TrustConfig {
         self.allow_all_users || self.allowed_users.contains(sender_id)
     }
 
-    /// Evaluate L2 then L3 and return the [`Decision`].
+    /// Evaluate L2 (scope) then L3 (identity) and return the [`Decision`]:
+    ///
+    /// ```text
+    ///   surface_allowed?  ──no──▶ DenyScope     (silent)
+    ///        │ yes
+    ///   identity_allowed? ──no──▶ DenyIdentity  (echo UID)
+    ///        │ yes
+    ///        ▼
+    ///      Allow
+    /// ```
     pub fn decide(&self, channel_id: &str, is_dm: bool, sender_id: &str) -> Decision {
         if !self.surface_allowed(channel_id, is_dm) {
             return Decision::DenyScope;
