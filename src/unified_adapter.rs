@@ -178,7 +178,9 @@ impl ChatAdapter for UnifiedGatewayAdapter {
     }
 
     async fn edit_message(&self, msg: &MessageRef, content: &str) -> Result<()> {
-        let reply = self.build_reply(&msg.channel, content, Some("edit_message"), None);
+        let mut reply = self.build_reply(&msg.channel, content, Some("edit_message"), None);
+        // Use the actual platform message_id (e.g. "draft" for streaming, or numeric for edits)
+        reply.reply_to = msg.message_id.clone();
         self.dispatch_reply(&reply).await;
         Ok(())
     }
@@ -199,12 +201,15 @@ impl ChatAdapter for UnifiedGatewayAdapter {
     }
 
     fn use_streaming(&self, _other_bot_present: bool) -> bool {
-        // Behavior change: previously always returned `false` because webhook platforms
-        // couldn't do streaming edits. Now that Telegram supports sendRichMessageDraft,
-        // streaming is enabled by default. Operators can disable with TELEGRAM_STREAMING=false.
-        std::env::var("TELEGRAM_STREAMING")
-            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-            .unwrap_or(true)
+        // TELEGRAM_STREAMING env var is the explicit override (true/false).
+        // If not set, default to `true` when Telegram Rich Messages are enabled
+        // (implies sendRichMessageDraft support), `false` otherwise.
+        // This ensures Telegram-only deployments get streaming out of the box,
+        // while multi-platform deployments stay safe by default.
+        if let Ok(v) = std::env::var("TELEGRAM_STREAMING") {
+            return v == "1" || v.eq_ignore_ascii_case("true");
+        }
+        self.gw_state.telegram_rich_messages
     }
 
     fn show_streaming_placeholder(&self) -> bool {

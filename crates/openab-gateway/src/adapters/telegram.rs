@@ -540,7 +540,7 @@ pub async fn handle_reply(
         let msg_id: i64 = match reply.reply_to.parse() {
             Ok(id) => id,
             Err(e) => {
-                warn!(reply_to = %reply.reply_to, error = %e, "invalid message_id for reaction, skipping");
+                warn!(reply_to = %reply.reply_to, chat_id = %reply.channel.id, error = %e, "invalid message_id for reaction, skipping");
                 return;
             }
         };
