@@ -199,10 +199,11 @@ impl ChatAdapter for UnifiedGatewayAdapter {
     }
 
     fn use_streaming(&self, _other_bot_present: bool) -> bool {
-        // Enable streaming (rich message draft) for Telegram when TELEGRAM_STREAMING=true
+        // Telegram rich streaming is enabled by default.
+        // Set TELEGRAM_STREAMING=false to disable.
         std::env::var("TELEGRAM_STREAMING")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
     }
 
     fn show_streaming_placeholder(&self) -> bool {
