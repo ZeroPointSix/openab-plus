@@ -33,6 +33,7 @@ Set environment variables:
 | `TELEGRAM_SECRET_TOKEN` | No | Webhook signature validation |
 | `TELEGRAM_BOT_USERNAME` | No | Bot username for @mention gating |
 | `TELEGRAM_RICH_MESSAGES` | No | `true` (default) for rich formatting |
+| `TELEGRAM_STREAMING` | No | `true` (default) — stream replies via rich message drafts. Set `false` for send-once mode |
 | `GATEWAY_LISTEN` | No | Listen address (default: `0.0.0.0:8080`) |
 
 OAB config (`config.toml`):
@@ -60,6 +61,8 @@ tool_display = "compact"
 [markdown]
 tables = "off"
 ```
+
+Streaming is enabled by default — replies are streamed live via `sendRichMessageDraft` with rich formatting, then finalized with `sendRichMessage`. To disable streaming (send-once mode), set `TELEGRAM_STREAMING=false` in the container environment.
 
 No `[gateway]` section needed — the unified adapter activates automatically when `TELEGRAM_BOT_TOKEN` is set.
 
@@ -295,6 +298,7 @@ Set `TELEGRAM_RICH_MESSAGES=false` to disable rich messages and use legacy `send
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Bot API token from @BotFather |
 | `TELEGRAM_SECRET_TOKEN` | No | — | Webhook signature validation |
 | `TELEGRAM_RICH_MESSAGES` | No | `true` | Use `sendRichMessage` for tables/headings/long content (Bot API 10.1+). Set `false` to opt out. |
+| `TELEGRAM_STREAMING` | No | `true` | Stream replies live via `sendRichMessageDraft`. Set `false` for send-once mode (single final message). |
 | `GATEWAY_WS_TOKEN` | No | — | WebSocket auth token |
 | `GATEWAY_LISTEN` | No | `0.0.0.0:8080` | Listen address |
 | `TELEGRAM_WEBHOOK_PATH` | No | `/webhook/telegram` | Webhook endpoint path |
