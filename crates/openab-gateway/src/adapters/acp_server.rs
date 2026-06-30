@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -54,10 +54,12 @@ impl AcpConfig {
 // ACP Session tracking
 // ---------------------------------------------------------------------------
 
-/// Tracks an active ACP session and its reply channel.
+/// Tracks an active ACP session.
 struct AcpSession {
     /// Channel ID used in GatewayEvent (maps replies back to this session)
     channel_id: String,
+    /// Whether a prompt is currently in-flight for this session
+    busy: bool,
 }
 
 pub enum ReplyChunk {
@@ -67,11 +69,13 @@ pub enum ReplyChunk {
     Done,
 }
 
-/// Registry of active ACP sessions: channel_id → reply sender
-pub type AcpReplyRegistry = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ReplyChunk>>>>;
+/// Registry of active ACP sessions: channel_id → reply sender.
+/// Uses std::sync::Mutex because all operations are fast CPU-bound
+/// (insert/remove/get) and never hold the lock across .await.
+pub type AcpReplyRegistry = Arc<std::sync::Mutex<HashMap<String, mpsc::UnboundedSender<ReplyChunk>>>>;
 
 pub fn new_reply_registry() -> AcpReplyRegistry {
-    Arc::new(Mutex::new(HashMap::new()))
+    Arc::new(std::sync::Mutex::new(HashMap::new()))
 }
 
 // ---------------------------------------------------------------------------
@@ -181,8 +185,12 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
     info!(connection = %connection_id, "ACP client connected");
 
     // Session state for this connection
-    let sessions: Arc<Mutex<HashMap<String, AcpSession>>> = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut initialized = false;
+
+    // Track spawned prompt tasks so we can abort on disconnect
+    let mut prompt_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     // Channel for sending messages back to the client
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
@@ -240,13 +248,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
                     continue;
                 }
-                let resp = handle_session_new(
-                    &state,
-                    &sessions,
-                    id.clone(),
-                    req.params.as_ref(),
-                )
-                .await;
+                let resp = handle_session_new(&sessions, id.clone()).await;
                 let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
             }
             "session/prompt" => {
@@ -259,7 +261,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 let state_clone = state.clone();
                 let sessions_clone = sessions.clone();
                 let out_tx_clone = out_tx.clone();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     handle_session_prompt(
                         &state_clone,
                         &sessions_clone,
@@ -269,6 +271,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     )
                     .await;
                 });
+                prompt_tasks.push(handle);
             }
             "session/cancel" => {
                 // TODO: implement cancellation in Phase 2
@@ -284,15 +287,35 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
             }
         }
+
+        // Clean up finished tasks
+        prompt_tasks.retain(|h| !h.is_finished());
     }
 
-    // Cleanup: remove all sessions for this connection from the reply registry
+    // --- Disconnect cleanup ---
+    // Abort any in-flight prompt tasks to prevent registry leaks
+    for handle in prompt_tasks {
+        handle.abort();
+    }
+
+    // Remove all sessions for this connection from the reply registry
     if let Some(ref registry) = state.acp_reply_registry {
         let sessions_guard = sessions.lock().await;
-        let mut reg = registry.lock().await;
-        for (_, session) in sessions_guard.iter() {
-            reg.remove(&session.channel_id);
+        let channel_ids: Vec<String> = sessions_guard
+            .values()
+            .map(|s| s.channel_id.clone())
+            .collect();
+        drop(sessions_guard);
+
+        let mut reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+        for cid in &channel_ids {
+            reg.remove(cid);
         }
+        debug!(
+            connection = %connection_id,
+            sessions_cleaned = channel_ids.len(),
+            "ACP connection cleanup complete"
+        );
     }
 
     send_task.abort();
@@ -327,10 +350,8 @@ fn handle_initialize(connection_id: &str, _req: &JsonRpcRequest) -> JsonRpcRespo
 }
 
 async fn handle_session_new(
-    _state: &Arc<crate::AppState>,
-    sessions: &Arc<Mutex<HashMap<String, AcpSession>>>,
+    sessions: &Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
     id: Value,
-    _params: Option<&Value>,
 ) -> JsonRpcResponse {
     let session_id = format!("sess_{}", Uuid::new_v4());
     let channel_id = format!("acp_{}", Uuid::new_v4());
@@ -340,6 +361,7 @@ async fn handle_session_new(
         session_id.clone(),
         AcpSession {
             channel_id,
+            busy: false,
         },
     );
 
@@ -361,7 +383,7 @@ async fn handle_session_new(
 
 async fn handle_session_prompt(
     state: &Arc<crate::AppState>,
-    sessions: &Arc<Mutex<HashMap<String, AcpSession>>>,
+    sessions: &Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
     id: Value,
     params: Option<&Value>,
     out_tx: &mpsc::UnboundedSender<String>,
@@ -376,11 +398,24 @@ async fn handle_session_prompt(
         }
     };
 
-    // Look up session
+    // Look up session and acquire busy lock
     let channel_id = {
-        let guard = sessions.lock().await;
-        match guard.get(&session_id) {
-            Some(s) => s.channel_id.clone(),
+        let mut guard = sessions.lock().await;
+        match guard.get_mut(&session_id) {
+            Some(s) => {
+                if s.busy {
+                    // Reject concurrent prompts on the same session
+                    let resp = JsonRpcResponse::error(
+                        id,
+                        -32001,
+                        "Session busy: a prompt is already in progress",
+                    );
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    return;
+                }
+                s.busy = true;
+                s.channel_id.clone()
+            }
             None => {
                 let resp = JsonRpcResponse::error(
                     id,
@@ -393,10 +428,13 @@ async fn handle_session_prompt(
         }
     };
 
-    // Create reply channel for this prompt
+    // Create reply channel for this prompt and register it
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<ReplyChunk>();
     if let Some(ref registry) = state.acp_reply_registry {
-        registry.lock().await.insert(channel_id.clone(), reply_tx);
+        registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(channel_id.clone(), reply_tx);
     }
 
     // Convert to GatewayEvent and dispatch
@@ -421,12 +459,33 @@ async fn handle_session_prompt(
     // Send event through the broadcast channel
     match serde_json::to_string(&event) {
         Ok(json) => {
-            let _ = state.event_tx.send(json);
+            if state.event_tx.send(json).is_err() {
+                // No receivers — agent/core not connected
+                warn!("ACP: event_tx send failed — no agent connected");
+                let resp = JsonRpcResponse::error(
+                    id,
+                    -32603,
+                    "No agent backend connected",
+                );
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                // Release busy flag
+                if let Some(s) = sessions.lock().await.get_mut(&session_id) {
+                    s.busy = false;
+                }
+                // Cleanup registry
+                if let Some(ref registry) = state.acp_reply_registry {
+                    registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&channel_id);
+                }
+                return;
+            }
         }
         Err(e) => {
             warn!("ACP: failed to serialize event: {e}");
             let resp = JsonRpcResponse::error(id, -32603, "Internal error");
             let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+            if let Some(s) = sessions.lock().await.get_mut(&session_id) {
+                s.busy = false;
+            }
             return;
         }
     }
@@ -471,6 +530,14 @@ async fn handle_session_prompt(
                 break;
             }
         }
+    }
+
+    // Cleanup: remove from registry and release busy flag
+    if let Some(ref registry) = state.acp_reply_registry {
+        registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&channel_id);
+    }
+    if let Some(s) = sessions.lock().await.get_mut(&session_id) {
+        s.busy = false;
     }
 
     // Send the final response
@@ -536,24 +603,27 @@ pub async fn handle_reply(reply: &GatewayReply, registry: &AcpReplyRegistry) {
         return;
     }
 
-    let mut map = registry.lock().await;
-    let Some(tx) = map.get(key) else {
-        return;
+    let tx = {
+        let map = registry.lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(key) {
+            Some(tx) => tx.clone(),
+            None => return,
+        }
     };
 
     match reply.command.as_deref() {
         Some("edit_message") => {
             // Streaming update — send as text snapshot
             if tx.send(ReplyChunk::Text(full_text)).is_err() {
-                tracing::debug!(channel = key, "ACP reply send failed (client likely disconnected)");
-                map.remove(key);
+                debug!(channel = key, "ACP reply send failed (client likely disconnected)");
+                registry.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
             }
         }
         None | Some("send_message") => {
             // Final message
             let _ = tx.send(ReplyChunk::Text(full_text));
             let _ = tx.send(ReplyChunk::Done);
-            map.remove(key);
+            registry.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
         }
         Some("add_reaction") | Some("remove_reaction") => {
             // Reactions are agent state indicators — could map to notifications later

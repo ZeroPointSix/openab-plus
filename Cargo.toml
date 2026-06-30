@@ -28,7 +28,7 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 default = ["discord", "slack", "secrets-aws", "agentcore", "config-s3", "pre-seed"]
 
 # Opt-in: compile all gateway adapters into a single unified binary
-unified = ["telegram", "line", "feishu", "googlechat", "wecom", "teams"]
+unified = ["telegram", "line", "feishu", "googlechat", "wecom", "teams", "acp"]
 
 # Core adapters
 discord = ["dep:serenity", "openab-core/discord"]
