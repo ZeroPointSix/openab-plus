@@ -1,4 +1,4 @@
-# ADR: First-Class Per-Platform Configuration & Trust-None Default
+# ADR: First-Class Per-Platform Configuration & Identity Trust-None Default
 
 - **Status:** Proposed
 - **Date:** 2026-06-30
