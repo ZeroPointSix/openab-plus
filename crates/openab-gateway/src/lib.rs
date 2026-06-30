@@ -40,6 +40,10 @@ pub struct AppState {
     pub google_chat: Option<adapters::googlechat::GoogleChatAdapter>,
     #[cfg(feature = "wecom")]
     pub wecom: Option<adapters::wecom::WecomAdapter>,
+    #[cfg(feature = "acp")]
+    pub acp: Option<adapters::acp_server::AcpConfig>,
+    #[cfg(feature = "acp")]
+    pub acp_reply_registry: Option<adapters::acp_server::AcpReplyRegistry>,
     pub ws_token: Option<String>,
     pub event_tx: broadcast::Sender<String>,
     pub reply_token_cache: ReplyTokenCache,
@@ -75,6 +79,10 @@ impl AppState {
             google_chat: None,
             #[cfg(feature = "wecom")]
             wecom: None,
+            #[cfg(feature = "acp")]
+            acp: None,
+            #[cfg(feature = "acp")]
+            acp_reply_registry: None,
             ws_token: None,
             event_tx,
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -156,6 +164,12 @@ impl AppState {
         let wecom = adapters::wecom::WecomConfig::from_env()
             .map(adapters::wecom::WecomAdapter::new);
 
+        // ACP Server
+        #[cfg(feature = "acp")]
+        let acp = adapters::acp_server::AcpConfig::from_env();
+        #[cfg(feature = "acp")]
+        let acp_reply_registry = acp.as_ref().map(|_| adapters::acp_server::new_reply_registry());
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -177,6 +191,10 @@ impl AppState {
             google_chat,
             #[cfg(feature = "wecom")]
             wecom,
+            #[cfg(feature = "acp")]
+            acp,
+            #[cfg(feature = "acp")]
+            acp_reply_registry,
             ws_token,
             event_tx,
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -221,6 +239,13 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     let mut app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health));
+
+    // ACP Server adapter
+    #[cfg(feature = "acp")]
+    if std::env::var("OPENAB_ACP_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false) {
+        info!("ACP server endpoint enabled at /acp");
+        app = app.route("/acp", get(adapters::acp_server::ws_upgrade));
+    }
 
     // Telegram adapter
     #[cfg(feature = "telegram")]
@@ -413,6 +438,16 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         google_chat,
         #[cfg(feature = "wecom")]
         wecom,
+        #[cfg(feature = "acp")]
+        acp: adapters::acp_server::AcpConfig::from_env(),
+        #[cfg(feature = "acp")]
+        acp_reply_registry: {
+            if std::env::var("OPENAB_ACP_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false) {
+                Some(adapters::acp_server::new_reply_registry())
+            } else {
+                None
+            }
+        },
         ws_token,
         event_tx,
         reply_token_cache,
@@ -618,6 +653,12 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
                                     wecom.handle_reply(&reply, &state_for_recv.event_tx).await;
                                 } else {
                                     warn!("reply for wecom but adapter not configured");
+                                }
+                            }
+                            #[cfg(feature = "acp")]
+                            "acp" => {
+                                if let Some(ref registry) = state_for_recv.acp_reply_registry {
+                                    adapters::acp_server::handle_reply(&reply, registry).await;
                                 }
                             }
                             other => warn!(platform = other, "unknown reply platform"),
