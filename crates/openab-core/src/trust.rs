@@ -21,13 +21,17 @@
 use std::collections::HashSet;
 
 /// Outcome of evaluating the trust gate for a single inbound message.
+///
+/// `#[non_exhaustive]` because later phases may add variants (e.g. a
+/// rate-limited/throttled echo state); callers must include a `_` arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Decision {
     /// Allowed — dispatch to the agent.
     Allow,
-    /// Denied at L2 (scope): the conversation surface is out of scope.
-    /// No echo — the sender did not pass an authorization check, the surface
-    /// simply isn't enabled.
+    /// Denied at L2 (scope): the bot is not configured to operate on this
+    /// conversation surface. This is **scope control, not an authorization
+    /// failure** (L2 is not a security boundary) — so it is silent (no echo).
     DenyScope,
     /// Denied at L3 (identity): the surface is in scope but the sender is not
     /// trusted. The caller should echo the sender their ID (request-access UX).
@@ -49,7 +53,11 @@ impl Decision {
 /// Per-platform trust configuration (L2 scope + L3 identity).
 ///
 /// Construct via [`TrustConfig::new`], which applies the ADR defaults:
-/// **L2 open, L3 deny-all**.
+/// **L2 open, L3 deny-all**. Fields are public for cross-crate construction
+/// (the binary builds the registry from config), but `new()` is the canonical
+/// constructor. "Inconsistent" combinations are benign by precedence: an
+/// `allow_all_*` flag always wins, so e.g. `allow_all_channels = true` with a
+/// non-empty `allowed_channels` simply ignores the list.
 #[derive(Debug, Clone)]
 pub struct TrustConfig {
     // --- L2: scope control (NOT security). Default open. ---
@@ -107,7 +115,14 @@ impl TrustConfig {
     }
 
     /// L3: is this (human) identity trusted?
+    ///
+    /// An empty `sender_id` (e.g. a system/webhook message with no human author)
+    /// is **never** identity-allowed — fail-closed, even under `allow_all_users`,
+    /// since an absent identity cannot be a trusted user.
     pub fn identity_allowed(&self, sender_id: &str) -> bool {
+        if sender_id.is_empty() {
+            return false;
+        }
         self.allow_all_users || self.allowed_users.contains(sender_id)
     }
 
@@ -146,15 +161,19 @@ impl PlatformTrustConfigs {
         Self::default()
     }
 
-    /// Register a platform's trust config.
+    /// Register a platform's trust config. The platform key is normalized to
+    /// lowercase so a case mismatch with `adapter.platform()` can't silently
+    /// fall back to the deny-all default.
     pub fn insert(&mut self, platform: impl Into<String>, cfg: TrustConfig) {
-        self.map.insert(platform.into(), cfg);
+        self.map.insert(platform.into().to_lowercase(), cfg);
     }
 
     /// Get the trust config for a platform, or the default (L2 open / L3 deny-all)
-    /// when the platform has no explicit configuration.
+    /// when the platform has no explicit configuration. Lookup is case-insensitive.
     pub fn get(&self, platform: &str) -> &TrustConfig {
-        self.map.get(platform).unwrap_or(&self.default)
+        self.map
+            .get(&platform.to_lowercase())
+            .unwrap_or(&self.default)
     }
 
     /// Convenience: evaluate the gate for a platform in one call.
@@ -275,5 +294,27 @@ mod tests {
         assert_eq!(reg.decide("telegram", "c", false, "999"), Decision::DenyIdentity);
         // unregistered platform still gets deny-all default.
         assert_eq!(reg.decide("discord", "c", false, "123"), Decision::DenyIdentity);
+    }
+
+    #[test]
+    fn empty_sender_is_never_identity_allowed() {
+        // Even with allow_all_users = true, an empty sender_id fails closed.
+        let open = TrustConfig::new(None, std::iter::empty(), None, Some(true), std::iter::empty());
+        assert!(!open.identity_allowed(""));
+        assert_eq!(open.decide("c", false, ""), Decision::DenyIdentity);
+        // non-empty still allowed under allow_all_users.
+        assert_eq!(open.decide("c", false, "anyone"), Decision::Allow);
+    }
+
+    #[test]
+    fn registry_lookup_is_case_insensitive() {
+        let mut reg = PlatformTrustConfigs::new();
+        reg.insert(
+            "Telegram",
+            TrustConfig::new(None, std::iter::empty(), None, None, ["123".to_string()]),
+        );
+        // mixed-case platform() value resolves to the same config.
+        assert_eq!(reg.decide("telegram", "c", false, "123"), Decision::Allow);
+        assert_eq!(reg.decide("TELEGRAM", "c", false, "123"), Decision::Allow);
     }
 }
