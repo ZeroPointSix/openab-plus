@@ -517,9 +517,10 @@ pub async fn handle_reply(
             let mut reactions = reaction_state.lock().await;
             let set = reactions.entry(msg_key.clone()).or_default();
             if is_add {
-                if !set.contains(&tg_emoji.to_string()) {
-                    set.push(tg_emoji.to_string());
-                }
+                // Telegram private chats only allow 1 reaction per message (non-premium).
+                // Replace all existing reactions with the new one instead of accumulating.
+                set.clear();
+                set.push(tg_emoji.to_string());
             } else {
                 set.retain(|e| e != tg_emoji);
             }
