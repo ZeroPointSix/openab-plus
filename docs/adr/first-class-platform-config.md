@@ -40,30 +40,33 @@ All adapters auto-detect: empty `allowed_users` → `allow_all_users = true`. A 
 
 ## 3. Trust Pyramid (Defense in Depth)
 
-Three layers of security, from broadest (platform) to narrowest (user):
+Three layers with **clearly separated responsibilities** — only L1 and L3 are
+security boundaries. L2 is operator scoping, not authorization.
 
 ```
                           ▲
                          ╱ ╲
                         ╱   ╲
-                       ╱ L3  ╲         🔒 Layer 3: User Trust
-                      ╱       ╲        allowed_users per platform
-                     ╱ sender  ╲       "Is THIS PERSON allowed?"
+                       ╱ L3  ╲         🔒 Layer 3: Identity Trust Control  (SECURITY)
+                      ╱       ╲        allowed_users per platform — default DENY-ALL
+                     ╱ sender  ╲       "Is THIS IDENTITY allowed?"  covers every path incl. DMs
                     ╱  allowed? ╲
                    ╱─────────────╲
                   ╱               ╲
-                 ╱      L2         ╲    🔒 Layer 2: Channel/Group Trust
-                ╱                   ╲   allowed_channels, allowed_groups
-               ╱  channel/group      ╲  "Is this CONVERSATION allowed?"
-              ╱    allowed?           ╲
+                 ╱      L2         ╲    🔓 Layer 2: Channel/Group Scope Control  (NOT security)
+                ╱                   ╲   allowed_channels, allowed_groups, allow_dm — default OPEN
+               ╱  surface open?      ╲  "Which CONVERSATION SURFACES does the bot engage in?"
+              ╱  (channel/group/DM)   ╲  optional operator scoping (noise/cost), not authorization
              ╱─────────────────────────╲
             ╱                           ╲
-           ╱           L1                ╲   🔒 Layer 1: Platform Authentication
+           ╱           L1                ╲   🔒 Layer 1: Platform Authentication  (SECURITY)
           ╱                               ╲  "Is this request REALLY from the platform?"
          ╱   webhook signature / JWT /     ╲
         ╱    secret token / IP range        ╲
        ╱─────────────────────────────────────╲
 ```
+
+**Default posture:** L1 always on (edge) · **L2 open** unless explicitly disabled · **L3 deny-all** unless explicitly allowed.
 
 ### Layer 1: Platform Authentication (gateway layer — transport)
 
@@ -80,13 +83,52 @@ Verifies the webhook request is genuinely from the platform, not spoofed. This i
 | **Slack** | Socket Mode WebSocket | App-Level Token (xapp-...) authenticates WS connection |
 | **Discord** | Gateway WebSocket | Bot Token authenticates WS connection |
 
-### Layer 2: Channel/Group Trust (core layer)
+### Layer 2: Channel/Group Scope Control (core layer) — NOT a security boundary
 
-Controls which conversations the bot participates in. Already implemented.
+Controls **which conversation surfaces** the bot engages in — channels, groups,
+and DMs (`allow_dm`). Already implemented.
 
-### Layer 3: User Trust (core layer) ← This ADR
+This is **operator scoping, not authorization**. The platform itself already
+guarantees the bot only receives events from channels/groups it is a member of
+with read permission — you cannot receive a message from a channel you were never
+added to. So `allowed_channels` does not defend against "unauthorized channels"
+(L1/the platform already does); it only narrows an over-permissioned bot to the
+surfaces an operator wants it active in. Its value is noise/cost control.
 
-Controls which individual senders can trigger agent actions. Currently defaults to allow-all. This ADR proposes flipping to deny-all.
+**Default: OPEN** (`allow_all_channels = true`, `allow_dm = true`). Operators
+*disable* surfaces only for hard scoping (e.g. a group-only bot sets
+`allow_dm = false`).
+
+**DMs are an L2 surface with a critical asymmetry:** unlike groups, a DM has **no
+platform membership gate** — anyone can open a DM with a public bot. So when
+`allow_dm = true`, the **only** protection on that path is L3. Enabling the DM
+surface is an L2 decision; guarding who may use it is L3.
+
+### Layer 3: Identity Trust Control (core layer) ← This ADR — the SECURITY gate
+
+Controls which individual senders can trigger agent actions. Currently defaults
+to allow-all; this ADR flips it to **deny-all**. This is the one authorization
+boundary at the policy layer, and it covers **every** ingress path — including
+DMs, where it is the sole protection.
+
+**Why L2 must stay open for the deny UX to work:** the "echo your UID so you can
+request access" reply only fires if an untrusted sender's message actually
+*reaches* L3. If L2 defaulted closed (e.g. `allow_dm = false`), a new user would
+be silently dropped at the scope layer with no path to onboard. L2-open + L3-deny
+gives the intended self-service flow:
+
+```
+stranger messages the bot
+  → L1 ✅ authentic platform request
+  → L2 ✅ surface open by default (channel / DM)
+  → L3 ❌ identity not in allowed_users
+  → echo "⚠️ You're not trusted. Your ID: 123456789. Ask the admin to add you."
+  → drop — no agent action
+```
+
+This flips **only L3** from today's allow-all to deny-all; L2 stays open. Minimal
+breaking surface, maximal safety: nothing acts for an untrusted identity, yet
+strangers still get a way to request access.
 
 ---
 
