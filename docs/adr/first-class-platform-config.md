@@ -230,8 +230,8 @@ Trust enforcement happens in **one place only**: `AdapterRouter::handle_message(
 │  ┌───────────────────────────────────────────────────────────────┐  │
 │  │ 🔒 AdapterRouter::handle_message()                            │  │
 │  │                                                               │  │
-│  │   L2: channel/group check (existing)                          │  │
-│  │   L3: TrustConfig::is_allowed(platform, sender_id)            │  │
+│  │   L2: scope check (optional, default-open; channel/group/DM)  │  │
+│  │   L3: TrustConfig::is_allowed(platform, sender_id) — DENY dflt │  │
 │  │                                                               │  │
 │  │   if denied → log + echo sender ID → RETURN                   │  │
 │  │   if allowed → dispatch to ACP ✅                              │  │
@@ -248,11 +248,26 @@ Trust enforcement happens in **one place only**: `AdapterRouter::handle_message(
 
 ```rust
 pub struct TrustConfig {
-    pub allow_all_users: bool,       // explicit opt-in, defaults to false
+    // L2 — scope control (NOT security). Defaults OPEN.
+    pub allow_all_channels: bool,           // default true
+    pub allowed_channels: HashSet<String>,
+    pub allow_dm: bool,                      // default true (DM surface open)
+
+    // L3 — identity trust (THE security gate). Defaults DENY-ALL.
+    pub allow_all_users: bool,               // explicit opt-in, default false
     pub allowed_users: HashSet<String>,
 }
 
 impl TrustConfig {
+    /// L2: is this conversation surface in scope? (default-open)
+    pub fn surface_allowed(&self, channel_id: &str, is_dm: bool) -> bool {
+        if is_dm {
+            return self.allow_dm;
+        }
+        self.allow_all_channels || self.allowed_channels.contains(channel_id)
+    }
+
+    /// L3: is this identity trusted? (default-deny)
     pub fn is_allowed(&self, sender_id: &str) -> bool {
         self.allow_all_users || self.allowed_users.contains(sender_id)
     }
@@ -265,15 +280,68 @@ pub struct PlatformTrustConfigs {
 
 impl PlatformTrustConfigs {
     pub fn get(&self, platform: &str) -> &TrustConfig {
-        self.configs.get(platform).unwrap_or(&DEFAULT_DENY)
+        self.configs.get(platform).unwrap_or(&DEFAULT)
     }
 }
 
-static DEFAULT_DENY: TrustConfig = TrustConfig {
-    allow_all_users: false,
-    allowed_users: HashSet::new(),  // empty = deny all
+/// Default: L2 open (act anywhere the platform allows), L3 deny-all.
+static DEFAULT: TrustConfig = TrustConfig {
+    allow_all_channels: true,
+    allowed_channels: HashSet::new(),
+    allow_dm: true,
+    allow_all_users: false,                  // trust-none on identity
+    allowed_users: HashSet::new(),
 };
 ```
+
+### Trait & Type Changes (no new trait)
+
+The trust gate is **uniform logic**, not per-platform behavior, so it is a plain
+`TrustConfig` + a router method — **not** a `ChatAdapter` method and **not** a new
+trait (see Rejected Alternatives). The `ChatAdapter` trait is unchanged:
+`platform()` already keys the `TrustConfig` and `send_message()` already performs
+the echo. What changes are the **shared data carriers** that feed the router:
+
+**1. `MessageContext` — carry structured sender identity (not opaque JSON).**
+Today the router only receives `sender_json` (a serialized blob); it would have to
+parse JSON to read `sender_id`. Pass the `SenderContext` struct so L3 can read
+`sender_id` / `is_bot` directly (the router can still serialize it for the agent):
+
+```rust
+pub struct MessageContext {
+    pub thread_channel: ChannelRef,
+    pub sender: SenderContext,        // ← was: sender_json: String
+    pub prompt: String,
+    pub extra_blocks: Vec<ContentBlock>,
+    pub trigger_msg: MessageRef,
+    pub other_bot_present: bool,
+}
+```
+
+**2. `ChannelRef` — add an `is_dm` flag.**
+DM detection is platform-specific *structural* knowledge the adapter already has at
+construction time (Discord DM channel vs Telegram private chat vs Slack IM), so it
+is a **field the adapter populates**, not a trait method. This lets the router
+evaluate `allow_dm` (L2) uniformly:
+
+```rust
+pub struct ChannelRef {
+    pub platform: String,
+    pub channel_id: String,
+    pub is_dm: bool,                  // ← new; excluded from Hash/Eq like origin_event_id
+    pub thread_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub origin_event_id: Option<String>,
+}
+```
+
+**3. Remove scattered trust checks from adapters.**
+The real refactor is deleting the `allowed_channels` / `allowed_users` checks
+currently in `discord.rs`, `slack.rs`, and `gateway.rs`, and letting the data flow
+into `MessageContext` / `ChannelRef` so the single router gate is the only place
+trust is enforced — this is what makes L3 un-bypassable. Structural concerns
+(thread detection, @mention gating, multibot detection, bot-ownership) **stay in
+the adapters** — they are not trust.
 
 ### Echo reply on deny
 
