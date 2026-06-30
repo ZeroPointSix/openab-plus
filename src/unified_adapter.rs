@@ -199,6 +199,14 @@ impl ChatAdapter for UnifiedGatewayAdapter {
     }
 
     fn use_streaming(&self, _other_bot_present: bool) -> bool {
-        false // Webhook platforms don't support streaming edits
+        // Enable streaming (rich message draft) for Telegram when TELEGRAM_STREAMING=true
+        std::env::var("TELEGRAM_STREAMING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    fn show_streaming_placeholder(&self) -> bool {
+        // No placeholder needed — Telegram uses sendRichMessageDraft for streaming preview
+        false
     }
 }
