@@ -49,9 +49,14 @@ Implement an ACP-compliant server endpoint in the OpenAB unified binary, using W
 ### Architecture
 
 ```
-ACP Client (Zed, JetBrains, AniCompanion, CLI, …)
+ACP Clients
+  ├── IDE plugins (Zed, JetBrains)
+  ├── Desktop apps (AniCompanion, VTuber skins)
+  ├── Web apps (browser-based agent UI, web VTuber)
+  ├── CLI tools
+  └── Mobile apps
   │
-  │── GET /acp (Upgrade: websocket)
+  │── GET /acp (Upgrade: websocket) — WSS from any environment
   │── JSON-RPC over WebSocket (bidirectional)
   │
 OpenAB Unified Binary
@@ -60,12 +65,29 @@ OpenAB Unified Binary
   │
   ├── initialize → capability negotiation
   ├── session/new → create OAB session, select agent
-  ├── session/prompt → dispatch to coding agent
+  ├── session/prompt → dispatch to coding agent (or fan-out to multiple)
   ├── session/notification → stream AgentMessageChunk, ToolCall, etc.
   ├── requestPermission → tool approval flow
   │
   └── Internal: GatewayEvent / GatewayReply (existing OAB machinery)
+        ├── agent container: Claude
+        ├── agent container: Codex
+        └── agent container: Kiro
 ```
+
+### Client Scenarios
+
+ACP is transport-agnostic at the application layer — any environment that supports WebSocket can be a client:
+
+| Client Type | Example | Use Case |
+|---|---|---|
+| IDE plugin | Zed, JetBrains | Code editing with agent assist |
+| Desktop app | AniCompanion | VTuber avatar driven by agent |
+| Web app | Browser SPA (React/Vue) | Web-based agent UI, web VTuber with three-vrm |
+| CLI | Custom shell tool | Headless automation, CI/CD |
+| Mobile | iOS/Android app | On-the-go agent access |
+
+Web apps are particularly interesting — browsers natively support WebSocket, so a web-based frontend can connect directly to OAB's ACP endpoint without any bridge or adapter. This enables building rich agent UIs (including browser-rendered 3D VRM characters via three.js) that talk to the full OAB multi-agent platform.
 
 ### Transport
 
@@ -95,6 +117,27 @@ The `model` field in `session/new` or `session/prompt` maps to OAB's agent pool:
 - `kiro::*` → Kiro agent container
 
 This reuses OAB's existing multi-agent dispatch and session routing.
+
+### Multi-Agent Fan-Out (Future)
+
+One unique capability of OAB as an ACP server is fan-out to multiple agents with result aggregation. A single `session/prompt` can be dispatched to multiple agents in parallel:
+
+```
+ACP Client → session/prompt "review this code"
+                │
+OAB dispatcher ─┼── Claude → findings A
+                ├── Codex  → findings B
+                └── Kiro   → findings C
+                │
+         aggregate → merged result → AgentMessageChunk stream back to client
+```
+
+This is analogous to how OAB's 法師 team currently reviews PRs (multiple agents review in parallel, results are synthesized). With ACP, this multi-agent orchestration becomes accessible to any client — not just Discord.
+
+Modes:
+- **Single agent** (default): one session, one agent — same as today
+- **Multi-session**: client opens N sessions to N agents concurrently (ACP spec supports multiple sessions per connection)
+- **Fan-out aggregate**: OAB internally dispatches to multiple agents, returns a unified response (requires OAB-level orchestration logic)
 
 ### Feature Flag
 
@@ -184,7 +227,13 @@ Continue building bespoke adapters (VTuber, future desktop app, future CLI).
 - `session/load` with conversation history replay
 - Session persistence in OAB's existing session store
 
-### Phase 4: Streamable HTTP (optional)
+### Phase 4: Multi-Agent Fan-Out
+
+- Fan-out a single prompt to multiple agents
+- Aggregate results into a unified response
+- Expose as a special `model: "openab::ensemble"` or similar
+
+### Phase 5: Streamable HTTP (optional)
 
 - Add HTTP transport (POST + SSE) on the same `/acp` endpoint
 - For environments where WebSocket is not viable (serverless, aggressive proxies)
