@@ -256,21 +256,64 @@ async fn main() -> anyhow::Result<()> {
         info!(model = %cfg.stt.model, base_url = %cfg.stt.base_url, "STT enabled");
     }
 
-    let router = Arc::new(AdapterRouter::new(
-        pool.clone(),
-        cfg.reactions,
-        cfg.markdown.tables,
-        cfg.pool.prompt_hard_timeout_secs,
-        cfg.pool.liveness_check_secs,
-        cfg.workspace.aliases,
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| {
-            tracing::warn!(
-                "HOME environment variable is not set — falling back to /tmp as bot_home. \
-                 This weakens the workspace security boundary."
+    // Build the per-platform trust registry for the gateway platforms from the
+    // same GATEWAY_* env the unified bridge uses (behavior-preserving: defaults
+    // allow-all, matching today's should_skip_event). L2/L3 enforcement moves to
+    // the router's ingress gate; should_skip_event keeps only bot + @mention
+    // gating for the unified path. Discord/Slack are wired in a later PR.
+    let gateway_trust = {
+        use openab_core::trust::{PlatformTrustConfigs, TrustConfig};
+        let env_bool = |k: &str, default: bool| {
+            std::env::var(k)
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(default)
+        };
+        let env_set = |k: &str| -> Vec<String> {
+            std::env::var(k)
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        let allow_all_channels = env_bool("GATEWAY_ALLOW_ALL_CHANNELS", true);
+        let allowed_channels = env_set("GATEWAY_ALLOWED_CHANNELS");
+        let allow_all_users = env_bool("GATEWAY_ALLOW_ALL_USERS", true);
+        let allowed_users = env_set("GATEWAY_ALLOWED_USERS");
+        let mut reg = PlatformTrustConfigs::new();
+        for platform in ["telegram", "line", "feishu", "wecom", "googlechat", "teams"] {
+            reg.insert(
+                platform,
+                TrustConfig::new(
+                    Some(allow_all_channels),
+                    allowed_channels.clone(),
+                    None, // allow_dm unused in Phase 1 (is_dm passed as false)
+                    Some(allow_all_users),
+                    allowed_users.clone(),
+                ),
             );
-            "/tmp".into()
-        })),
-    ));
+        }
+        reg
+    };
+
+    let router = Arc::new(
+        AdapterRouter::new(
+            pool.clone(),
+            cfg.reactions,
+            cfg.markdown.tables,
+            cfg.pool.prompt_hard_timeout_secs,
+            cfg.pool.liveness_check_secs,
+            cfg.workspace.aliases,
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| {
+                tracing::warn!(
+                    "HOME environment variable is not set — falling back to /tmp as bot_home. \
+                     This weakens the workspace security boundary."
+                );
+                "/tmp".into()
+            })),
+        )
+        .with_trust(gateway_trust),
+    );
 
     // Shutdown signal for Slack adapter
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
