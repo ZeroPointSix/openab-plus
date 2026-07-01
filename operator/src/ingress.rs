@@ -86,7 +86,7 @@ pub async fn ensure_gateway(
     let (api_id, api_endpoint) = ensure_api(&api).await?;
 
     // ── Integration: VPC Link → Cloud Map DNS name on the container port ────
-    let integration_uri = format!("http://{}:{}", dns_name, ingress.container_port);
+    let integration_uri = integration_uri(dns_name, ingress.container_port);
     let integration_id = ensure_integration(&api, &api_id, &vpc_link_id, &integration_uri).await?;
 
     // ── One route per webhook path, all → the same integration ─────────────
@@ -97,13 +97,27 @@ pub async fn ensure_gateway(
     // ── Stage (auto-deploy) ────────────────────────────────────────────────
     ensure_stage(&api, &api_id).await?;
 
+    Ok(webhook_urls(&api_endpoint, &ingress.paths))
+}
+
+/// Integration URI for the VPC Link → Cloud Map target on the container port.
+fn integration_uri(dns_name: &str, port: u16) -> String {
+    format!("http://{dns_name}:{port}")
+}
+
+/// API Gateway route key for a webhook path (POST only).
+fn route_key(path: &str) -> String {
+    format!("POST {path}")
+}
+
+/// Build the public webhook URL(s) from the API endpoint and paths.
+/// Each URL is `<endpoint>/<stage><path>`.
+fn webhook_urls(api_endpoint: &str, paths: &[String]) -> Vec<String> {
     let base = api_endpoint.trim_end_matches('/');
-    let urls = ingress
-        .paths
+    paths
         .iter()
         .map(|p| format!("{base}/{STAGE_NAME}{p}"))
-        .collect();
-    Ok(urls)
+        .collect()
 }
 
 // ─── VPC resolution ─────────────────────────────────────────────────────────
@@ -328,6 +342,13 @@ async fn ensure_vpc_link(
 
     let link_id = if let Some((id, _status)) = found {
         eprintln!("  ✓ VPC Link exists: {VPC_LINK_NAME} ({id})");
+        // A VPC Link's subnets/SGs are fixed at creation and cannot be updated.
+        // All ingress-enabled bots in a VPC share this one link, so they must use
+        // the same subnet/SG set as whichever bot created it first — otherwise the
+        // link's ENIs won't cover this task's subnets and integrations may 503.
+        eprintln!(
+            "    ↳ reusing shared link's subnets/SGs (fixed at creation); ensure all\n      ingress bots in this VPC use the same subnets/securityGroups"
+        );
         id
     } else {
         eprintln!("  ⊕ Creating VPC Link: {VPC_LINK_NAME}");
@@ -437,7 +458,7 @@ async fn ensure_route(
     path: &str,
     integration_id: &str,
 ) -> Result<()> {
-    let route_key = format!("POST {path}");
+    let route_key = route_key(path);
     let target = format!("integrations/{integration_id}");
     let existing = api
         .get_routes()
@@ -484,4 +505,50 @@ async fn ensure_stage(api: &aws_sdk_apigatewayv2::Client, api_id: &str) -> Resul
         .context("failed to create stage")?;
     eprintln!("  ⊕ Created stage: {STAGE_NAME} (auto-deploy)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integration_uri_uses_dns_and_port() {
+        assert_eq!(
+            integration_uri("oab-prod-mybot.oab", 8080),
+            "http://oab-prod-mybot.oab:8080"
+        );
+        assert_eq!(
+            integration_uri("svc.ns", 3000),
+            "http://svc.ns:3000"
+        );
+    }
+
+    #[test]
+    fn route_key_is_post_prefixed() {
+        assert_eq!(route_key("/webhook/telegram"), "POST /webhook/telegram");
+        assert_eq!(route_key("/webhook/line"), "POST /webhook/line");
+    }
+
+    #[test]
+    fn webhook_urls_join_endpoint_stage_and_path() {
+        let paths = vec![
+            "/webhook/telegram".to_string(),
+            "/webhook/line".to_string(),
+        ];
+        let urls = webhook_urls("https://abc123.execute-api.us-east-1.amazonaws.com", &paths);
+        assert_eq!(
+            urls,
+            vec![
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod/webhook/telegram",
+                "https://abc123.execute-api.us-east-1.amazonaws.com/prod/webhook/line",
+            ]
+        );
+    }
+
+    #[test]
+    fn webhook_urls_trim_trailing_slash_on_endpoint() {
+        let paths = vec!["/webhook/telegram".to_string()];
+        let urls = webhook_urls("https://abc123.example.com/", &paths);
+        assert_eq!(urls, vec!["https://abc123.example.com/prod/webhook/telegram"]);
+    }
 }

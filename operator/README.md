@@ -264,6 +264,12 @@ LINE console:
 > **Recreate caveat:** ECS service registries can only be set at *creation* time.
 > If the service already exists without service discovery, `apply` provisions the
 > ingress resources and prints how to recreate the service so traffic can reach it.
+>
+> **Shared VPC Link:** all ingress-enabled bots in a VPC share one `oab-vpc-link`.
+> A VPC Link's subnets/security groups are fixed at creation and cannot be changed,
+> so every ingress bot in the VPC must use the same `networking.subnets` /
+> `securityGroups` as whichever bot created the link first. `apply` prints a
+> reminder when it reuses an existing link.
 
 ### OABFleet — batch deploy
 
