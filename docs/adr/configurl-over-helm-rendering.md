@@ -34,7 +34,7 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
    - ServiceAccount assignment (for IRSA)
    - Recreate strategy (RWO PVC constraint)
 3. **Introduce `configFile` as a zero-logic alternative** — users place a raw `config.toml` alongside their Helm values. Helm copies it verbatim into a ConfigMap via `{{ .Files.Get }}` — no template rendering, no conditionals, no enum validation. This gives the "full config visibility" benefit without requiring S3/IRSA setup.
-4. **Freeze legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is no longer the recommended path. New config features do NOT require chart PRs.
+4. **Deprecate legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is **no longer maintained**. No bug fixes, no new config features, no chart PRs for this path. Users on legacy rendering are encouraged to migrate to `configUrl` or `configFile`.
 5. **Config lives externally or inline** — users maintain `config.toml` either in S3 (`s3://`), HTTPS, or as a local file next to their Helm values. Changes take effect on pod restart (configUrl) or on `helm upgrade` (configFile).
 6. **Secrets live in AWS Secrets Manager** — referenced via `aws-sm://` in config.toml. No Kubernetes Secret objects required.
 
@@ -63,7 +63,7 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
 |------|--------|-------------|-----------------|
 | **`configUrl`** | S3, HTTPS, R2 | Production — full GitOps, IAM audit | `helm install` once; config changes need only pod restart |
 | **`configFile`** | Local `config.toml` next to values.yaml | Dev / simple deployments — no external deps | `helm upgrade` picks up file changes |
-| **Legacy rendering** | `values.yaml` → template → ConfigMap | Existing users (frozen, not recommended) | Every config change = chart PR |
+| **Legacy rendering** ⚠️ | `values.yaml` → template → ConfigMap | **Deprecated — not maintained** | Every config change = chart PR |
 
 ### configUrl mode (recommended for production)
 
@@ -101,9 +101,11 @@ data:
 
 The user maintains a **real `config.toml`** — what they write is exactly what the agent reads. No values-to-template translation layer.
 
-### Legacy rendering (frozen)
+### Legacy rendering (⚠️ deprecated — unmaintained)
 
-Existing `values.yaml` → `templates/configmap.yaml` rendering continues to work for backward compatibility. No new config features will be added to this path.
+Existing `values.yaml` → `templates/configmap.yaml` rendering continues to work for backward compatibility but is **no longer maintained**. It will not receive bug fixes, new config features, or support for new platforms.
+
+> **Community notice:** We recommend all users migrate to `configUrl` (production) or `configFile` (dev/simple). The legacy `values.yaml` ConfigMap rendering path will not be updated going forward. Both new paths give you full visibility into your actual config.toml — no more guessing what Helm templates produce.
 
 ## 5. Minimal Helm Values (configUrl mode)
 
