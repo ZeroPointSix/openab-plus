@@ -274,7 +274,7 @@ async fn apply_ecs(
             eprintln!("    resources were provisioned but traffic won't reach the task until you");
             eprintln!("    recreate the service (safe once desiredCount is drained):");
             eprintln!(
-                "      oabctl delete service {} --namespace {} && oabctl apply -f <manifest>",
+                "      oabctl delete oabservice {} --cluster oab --namespace {} && oabctl apply -f <manifest>",
                 m.metadata.name, m.metadata.namespace
             );
         }

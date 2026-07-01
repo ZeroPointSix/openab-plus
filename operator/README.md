@@ -270,6 +270,13 @@ LINE console:
 > so every ingress bot in the VPC must use the same `networking.subnets` /
 > `securityGroups` as whichever bot created the link first. `apply` prints a
 > reminder when it reuses an existing link.
+>
+> **Teardown:** `oabctl delete oabservice <name>` removes the bot's per-bot ingress
+> resources — its Cloud Map service and its API Gateway routes + integration — on a
+> best-effort basis (it never blocks service deletion). The **shared** `oab-vpc-link`,
+> `oab-webhook` HTTP API, and the security-group inbound rule are intentionally left
+> in place for other bots. If the Cloud Map service still has registered instances
+> (tasks not yet drained), delete prints a note to retry.
 
 ### OABFleet — batch deploy
 

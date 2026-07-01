@@ -38,6 +38,13 @@ pub async fn run(
         .context("failed to delete ECS service")?;
     println!("  ✓ ECS service deleted");
 
+    // 2b. Best-effort ingress teardown (per-bot Cloud Map service + API Gateway
+    // routes/integration). No-op for bots that never had ingress. Never blocks
+    // deletion — failures are logged only.
+    if let Err(e) = crate::ingress::teardown(aws_config, namespace, name).await {
+        eprintln!("  ⚠ ingress teardown skipped: {e}");
+    }
+
     // 3. Clean up S3 manifest
     let manifest_key = format!("manifests/{}/{}.yaml", namespace, name);
     let _ = s3

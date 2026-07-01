@@ -120,6 +120,107 @@ fn webhook_urls(api_endpoint: &str, paths: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Best-effort teardown of the *per-bot* ingress resources for `namespace/name`:
+/// the API Gateway routes + integration for this bot and its Cloud Map service.
+///
+/// The shared resources (VPC Link `oab-vpc-link`, HTTP API `oab-webhook`, and the
+/// security-group inbound rule) are intentionally left in place since other bots
+/// may still use them. Safe to call for bots that never had ingress — it simply
+/// finds nothing and returns. Errors are logged, not propagated, so teardown
+/// never blocks service deletion.
+pub async fn teardown(
+    config: &aws_config::SdkConfig,
+    namespace: &str,
+    name: &str,
+) -> Result<()> {
+    let service_name = format!("oab-{namespace}-{name}");
+    let api = aws_sdk_apigatewayv2::Client::new(config);
+
+    // ── API Gateway: routes + integration for this bot (matched by DNS host) ─
+    if let Some((api_id, _)) = find_api(&api).await? {
+        let mut integration_id: Option<String> = None;
+        let mut next: Option<String> = None;
+        'find: loop {
+            let mut req = api.get_integrations().api_id(&api_id);
+            if let Some(t) = &next {
+                req = req.next_token(t);
+            }
+            let resp = req.send().await.context("failed to list integrations")?;
+            for i in resp.items() {
+                if i
+                    .integration_uri()
+                    .is_some_and(|u| u.contains(&format!("//{service_name}.")))
+                {
+                    integration_id = i.integration_id().map(|s| s.to_string());
+                    break 'find;
+                }
+            }
+            match resp.next_token() {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+        }
+
+        if let Some(integration_id) = integration_id {
+            let target = format!("integrations/{integration_id}");
+            let mut route_ids = Vec::new();
+            let mut next: Option<String> = None;
+            loop {
+                let mut req = api.get_routes().api_id(&api_id);
+                if let Some(t) = &next {
+                    req = req.next_token(t);
+                }
+                let resp = req.send().await.context("failed to list routes")?;
+                for r in resp.items() {
+                    if r.target() == Some(target.as_str()) {
+                        if let Some(rid) = r.route_id() {
+                            route_ids.push(rid.to_string());
+                        }
+                    }
+                }
+                match resp.next_token() {
+                    Some(t) => next = Some(t.to_string()),
+                    None => break,
+                }
+            }
+            for rid in route_ids {
+                api.delete_route().api_id(&api_id).route_id(&rid).send().await.ok();
+            }
+            api.delete_integration()
+                .api_id(&api_id)
+                .integration_id(&integration_id)
+                .send()
+                .await
+                .ok();
+            eprintln!("  ✓ Removed API Gateway routes + integration for {name}");
+        }
+    }
+
+    // ── Cloud Map: delete the per-bot service (needs no live instances) ──────
+    let sd = aws_sdk_servicediscovery::Client::new(config);
+    let mut service_id: Option<String> = None;
+    let mut pages = sd.list_services().into_paginator().send();
+    'svc: while let Some(page) = pages.next().await {
+        let page = page.context("failed to list Cloud Map services")?;
+        for s in page.services() {
+            if s.name() == Some(service_name.as_str()) {
+                service_id = s.id().map(|x| x.to_string());
+                break 'svc;
+            }
+        }
+    }
+    if let Some(service_id) = service_id {
+        match sd.delete_service().id(&service_id).send().await {
+            Ok(_) => eprintln!("  ✓ Deleted Cloud Map service: {service_name}"),
+            Err(e) => eprintln!(
+                "  ⚠ Cloud Map service '{service_name}' not deleted — it may still have\n    registered instances; retry once the ECS tasks have fully drained ({e})"
+            ),
+        }
+    }
+
+    Ok(())
+}
+
 // ─── VPC resolution ─────────────────────────────────────────────────────────
 
 async fn resolve_vpc_id(ec2: &aws_sdk_ec2::Client, m: &OABServiceManifest) -> Result<String> {
@@ -318,25 +419,33 @@ async fn ensure_vpc_link(
     use aws_sdk_apigatewayv2::types::VpcLinkStatus;
 
     // Reuse an existing, non-failed VPC Link with our name.
-    let existing = api
-        .get_vpc_links()
-        .send()
-        .await
-        .context("failed to list VPC Links")?;
+    // Reuse an existing, non-failed VPC Link with our name.
     let mut found: Option<(String, Option<VpcLinkStatus>)> = None;
-    for link in existing.items() {
-        if link.name() == Some(VPC_LINK_NAME) {
-            if matches!(
-                link.vpc_link_status(),
-                Some(VpcLinkStatus::Failed) | Some(VpcLinkStatus::Deleting)
-            ) {
-                continue;
+    let mut next: Option<String> = None;
+    'outer: loop {
+        let mut req = api.get_vpc_links();
+        if let Some(t) = &next {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("failed to list VPC Links")?;
+        for link in resp.items() {
+            if link.name() == Some(VPC_LINK_NAME) {
+                if matches!(
+                    link.vpc_link_status(),
+                    Some(VpcLinkStatus::Failed) | Some(VpcLinkStatus::Deleting)
+                ) {
+                    continue;
+                }
+                found = Some((
+                    link.vpc_link_id().unwrap_or_default().to_string(),
+                    link.vpc_link_status().cloned(),
+                ));
+                break 'outer;
             }
-            found = Some((
-                link.vpc_link_id().unwrap_or_default().to_string(),
-                link.vpc_link_status().cloned(),
-            ));
-            break;
+        }
+        match resp.next_token() {
+            Some(t) => next = Some(t.to_string()),
+            None => break,
         }
     }
 
@@ -389,14 +498,9 @@ async fn ensure_vpc_link(
 // ─── HTTP API ───────────────────────────────────────────────────────────────
 
 async fn ensure_api(api: &aws_sdk_apigatewayv2::Client) -> Result<(String, String)> {
-    let existing = api.get_apis().send().await.context("failed to list APIs")?;
-    for a in existing.items() {
-        if a.name() == Some(API_NAME) {
-            let id = a.api_id().context("api missing id")?.to_string();
-            let endpoint = a.api_endpoint().unwrap_or_default().to_string();
-            eprintln!("  ✓ HTTP API exists: {API_NAME} ({id})");
-            return Ok((id, endpoint));
-        }
+    if let Some((id, endpoint)) = find_api(api).await? {
+        eprintln!("  ✓ HTTP API exists: {API_NAME} ({id})");
+        return Ok((id, endpoint));
     }
     eprintln!("  ⊕ Creating HTTP API: {API_NAME}");
     let out = api
@@ -411,26 +515,57 @@ async fn ensure_api(api: &aws_sdk_apigatewayv2::Client) -> Result<(String, Strin
     Ok((id, endpoint))
 }
 
+/// Find the shared `oab-webhook` HTTP API, returning `(api_id, api_endpoint)`.
+async fn find_api(api: &aws_sdk_apigatewayv2::Client) -> Result<Option<(String, String)>> {
+    // apigatewayv2 has no smithy paginator for GetApis; page manually.
+    let mut next: Option<String> = None;
+    loop {
+        let mut req = api.get_apis();
+        if let Some(t) = &next {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("failed to list APIs")?;
+        for a in resp.items() {
+            if a.name() == Some(API_NAME) {
+                let id = a.api_id().context("api missing id")?.to_string();
+                let endpoint = a.api_endpoint().unwrap_or_default().to_string();
+                return Ok(Some((id, endpoint)));
+            }
+        }
+        match resp.next_token() {
+            Some(t) => next = Some(t.to_string()),
+            None => return Ok(None),
+        }
+    }
+}
+
 async fn ensure_integration(
     api: &aws_sdk_apigatewayv2::Client,
     api_id: &str,
     vpc_link_id: &str,
     integration_uri: &str,
 ) -> Result<String> {
-    let existing = api
-        .get_integrations()
-        .api_id(api_id)
-        .send()
-        .await
-        .context("failed to list integrations")?;
-    for i in existing.items() {
-        if i.integration_uri() == Some(integration_uri) && i.connection_id() == Some(vpc_link_id) {
-            let id = i
-                .integration_id()
-                .context("integration missing id")?
-                .to_string();
-            eprintln!("  ✓ Integration exists → {integration_uri}");
-            return Ok(id);
+    let mut next: Option<String> = None;
+    loop {
+        let mut req = api.get_integrations().api_id(api_id);
+        if let Some(t) = &next {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("failed to list integrations")?;
+        for i in resp.items() {
+            if i.integration_uri() == Some(integration_uri) && i.connection_id() == Some(vpc_link_id)
+            {
+                let id = i
+                    .integration_id()
+                    .context("integration missing id")?
+                    .to_string();
+                eprintln!("  ✓ Integration exists → {integration_uri}");
+                return Ok(id);
+            }
+        }
+        match resp.next_token() {
+            Some(t) => next = Some(t.to_string()),
+            None => break,
         }
     }
     eprintln!("  ⊕ Creating integration → {integration_uri}");
@@ -460,16 +595,22 @@ async fn ensure_route(
 ) -> Result<()> {
     let route_key = route_key(path);
     let target = format!("integrations/{integration_id}");
-    let existing = api
-        .get_routes()
-        .api_id(api_id)
-        .send()
-        .await
-        .context("failed to list routes")?;
-    for r in existing.items() {
-        if r.route_key() == Some(route_key.as_str()) {
-            eprintln!("  ✓ Route exists: {route_key}");
-            return Ok(());
+    let mut next: Option<String> = None;
+    loop {
+        let mut req = api.get_routes().api_id(api_id);
+        if let Some(t) = &next {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("failed to list routes")?;
+        for r in resp.items() {
+            if r.route_key() == Some(route_key.as_str()) {
+                eprintln!("  ✓ Route exists: {route_key}");
+                return Ok(());
+            }
+        }
+        match resp.next_token() {
+            Some(t) => next = Some(t.to_string()),
+            None => break,
         }
     }
     api.create_route()
@@ -484,16 +625,22 @@ async fn ensure_route(
 }
 
 async fn ensure_stage(api: &aws_sdk_apigatewayv2::Client, api_id: &str) -> Result<()> {
-    let existing = api
-        .get_stages()
-        .api_id(api_id)
-        .send()
-        .await
-        .context("failed to list stages")?;
-    for s in existing.items() {
-        if s.stage_name() == Some(STAGE_NAME) {
-            eprintln!("  ✓ Stage exists: {STAGE_NAME}");
-            return Ok(());
+    let mut next: Option<String> = None;
+    loop {
+        let mut req = api.get_stages().api_id(api_id);
+        if let Some(t) = &next {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("failed to list stages")?;
+        for s in resp.items() {
+            if s.stage_name() == Some(STAGE_NAME) {
+                eprintln!("  ✓ Stage exists: {STAGE_NAME}");
+                return Ok(());
+            }
+        }
+        match resp.next_token() {
+            Some(t) => next = Some(t.to_string()),
+            None => break,
         }
     }
     api.create_stage()
