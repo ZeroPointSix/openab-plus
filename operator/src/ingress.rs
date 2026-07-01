@@ -4,7 +4,10 @@
 //! API Gateway HTTP API → VPC Link → Cloud Map → ECS Fargate task on `:port`.
 //!
 //! All operations are idempotent — resources are looked up by name and reused,
-//! so repeated `oabctl apply` runs converge instead of duplicating.
+//! so repeated `oabctl apply` runs converge instead of duplicating. The shared
+//! VPC Link and Cloud Map namespace are scoped per-VPC (their names include the
+//! VPC ID) since a VPC Link's ENIs and a namespace's private DNS are only valid
+//! within the VPC they were created in — two VPCs never share either resource.
 //!
 //! The reconciliation is split in two because ECS service discovery
 //! (`--service-registries`) can only be set at service *creation* time:
@@ -18,8 +21,22 @@ use anyhow::{Context, Result};
 use aws_sdk_apigatewayv2::types::{ConnectionType, IntegrationType, ProtocolType};
 use aws_sdk_servicediscovery::types::{DnsConfig, DnsRecord, RecordType};
 
-const VPC_LINK_NAME: &str = "oab-vpc-link";
 const STAGE_NAME: &str = "prod";
+
+/// VPC Link name, scoped per-VPC. A VPC Link's ENIs live in one VPC and cannot
+/// route to another, so each VPC gets its own link — sharing a name across VPCs
+/// would silently misroute traffic through the wrong VPC's link.
+fn vpc_link_name(vpc_id: &str) -> String {
+    format!("oab-vpc-link-{vpc_id}")
+}
+
+/// Cloud Map private DNS namespace name, scoped per-VPC. A namespace's private
+/// DNS only resolves within the VPC it's associated with, so two VPCs both
+/// using the configured `cloudMapNamespace` (default `oab`) must not resolve to
+/// the same lookup — scope the actual namespace by VPC ID.
+fn vpc_scoped_namespace(configured_namespace: &str, vpc_id: &str) -> String {
+    format!("{configured_namespace}-{vpc_id}")
+}
 
 /// Per-bot HTTP API name. Each ingress bot gets its own API so webhook paths
 /// (e.g. `/webhook/telegram`) can never collide between bots on a shared API.
@@ -48,14 +65,17 @@ pub async fn ensure_cloud_map(
 
     let vpc_id = resolve_vpc_id(&ec2, m).await?;
 
-    // ── Namespace (reused across all bots in the VPC) ──────────────────────
-    let namespace_id = ensure_namespace(&sd, &ingress.cloud_map_namespace, &vpc_id).await?;
+    // ── Namespace (shared per-VPC; scoped by VPC so two VPCs using the same
+    //    configured cloudMapNamespace name never collide — a namespace's DNS
+    //    is only resolvable within the VPC it's associated with) ────────────
+    let namespace_name = vpc_scoped_namespace(&ingress.cloud_map_namespace, &vpc_id);
+    let namespace_id = ensure_namespace(&sd, &namespace_name, &vpc_id).await?;
 
     // ── Service (one per bot) ──────────────────────────────────────────────
     let service_name = m.cloud_map_service_name();
     let (registry_arn, existed) = ensure_service(&sd, &namespace_id, &service_name).await?;
 
-    let dns_name = format!("{}.{}", service_name, ingress.cloud_map_namespace);
+    let dns_name = format!("{service_name}.{namespace_name}");
     if existed {
         eprintln!("  ✓ Cloud Map service exists: {dns_name}");
     } else {
@@ -83,8 +103,10 @@ pub async fn ensure_gateway(
     // ── Security group inbound rule (self-referencing on the container port) ─
     ensure_sg_ingress(&ec2, security_groups, ingress.container_port).await?;
 
-    // ── VPC Link (shared across all bots, waits for AVAILABLE) ─────────────
-    let vpc_link_id = ensure_vpc_link(&api, subnets, security_groups).await?;
+    // ── VPC Link (shared per-VPC, waits for AVAILABLE) ──────────────────────
+    let subnet = subnets.first().context("ingress requires at least one subnet")?;
+    let vpc_id = resolve_vpc_id_from_subnet(&ec2, subnet).await?;
+    let vpc_link_id = ensure_vpc_link(&api, &vpc_id, subnets, security_groups).await?;
 
     // ── HTTP API (one per bot — avoids cross-bot path collisions) ──────────
     let (api_id, api_endpoint) = ensure_api(&api, &api_name).await?;
@@ -98,6 +120,9 @@ pub async fn ensure_gateway(
     for path in &ingress.paths {
         ensure_route(&api, &api_id, path, &integration_id).await?;
     }
+
+    // ── Prune routes for paths no longer in the manifest (rename/removal) ───
+    prune_stale_routes(&api, &api_id, &ingress.paths).await?;
 
     // ── Stage (auto-deploy) ────────────────────────────────────────────────
     ensure_stage(&api, &api_id).await?;
@@ -177,6 +202,11 @@ async fn resolve_vpc_id(ec2: &aws_sdk_ec2::Client, m: &OABServiceManifest) -> Re
             .context("ingress requires at least one subnet")?,
         _ => anyhow::bail!("ingress is only supported for ECS runtime"),
     };
+    resolve_vpc_id_from_subnet(ec2, subnet).await
+}
+
+/// Resolve the VPC ID that a given subnet belongs to.
+async fn resolve_vpc_id_from_subnet(ec2: &aws_sdk_ec2::Client, subnet: &str) -> Result<String> {
     let resp = ec2
         .describe_subnets()
         .subnet_ids(subnet)
@@ -362,12 +392,14 @@ async fn ensure_sg_ingress(
 
 async fn ensure_vpc_link(
     api: &aws_sdk_apigatewayv2::Client,
+    vpc_id: &str,
     subnets: &[String],
     security_groups: &[String],
 ) -> Result<String> {
     use aws_sdk_apigatewayv2::types::VpcLinkStatus;
+    let link_name = vpc_link_name(vpc_id);
 
-    // Reuse an existing, non-failed VPC Link with our name.
+    // Reuse an existing, non-failed VPC Link with our per-VPC name.
     let mut found: Option<(String, Option<VpcLinkStatus>)> = None;
     let mut next: Option<String> = None;
     'outer: loop {
@@ -377,7 +409,7 @@ async fn ensure_vpc_link(
         }
         let resp = req.send().await.context("failed to list VPC Links")?;
         for link in resp.items() {
-            if link.name() == Some(VPC_LINK_NAME) {
+            if link.name() == Some(link_name.as_str()) {
                 if matches!(
                     link.vpc_link_status(),
                     Some(VpcLinkStatus::Failed) | Some(VpcLinkStatus::Deleting)
@@ -398,20 +430,21 @@ async fn ensure_vpc_link(
     }
 
     let link_id = if let Some((id, _status)) = found {
-        eprintln!("  ✓ VPC Link exists: {VPC_LINK_NAME} ({id})");
+        eprintln!("  ✓ VPC Link exists: {link_name} ({id})");
         // A VPC Link's subnets/SGs are fixed at creation and cannot be updated.
-        // All ingress-enabled bots in a VPC share this one link, so they must use
-        // the same subnet/SG set as whichever bot created it first — otherwise the
-        // link's ENIs won't cover this task's subnets and integrations may 503.
+        // All ingress-enabled bots in this VPC share this one link, so they must
+        // use the same subnet/SG set as whichever bot created it first —
+        // otherwise the link's ENIs won't cover this task's subnets and
+        // integrations may 503.
         eprintln!(
-            "    ↳ reusing shared link's subnets/SGs (fixed at creation); ensure all\n      ingress bots in this VPC use the same subnets/securityGroups"
+            "    ↳ reusing this VPC's shared link subnets/SGs (fixed at creation);\n      ensure all ingress bots in vpc {vpc_id} use the same subnets/securityGroups"
         );
         id
     } else {
-        eprintln!("  ⊕ Creating VPC Link: {VPC_LINK_NAME}");
+        eprintln!("  ⊕ Creating VPC Link: {link_name}");
         let out = api
             .create_vpc_link()
-            .name(VPC_LINK_NAME)
+            .name(&link_name)
             .set_subnet_ids(Some(subnets.to_vec()))
             .set_security_group_ids(Some(security_groups.to_vec()))
             .send()
@@ -578,6 +611,50 @@ async fn ensure_route(
     Ok(())
 }
 
+/// Delete any route on the bot's API whose path isn't in `current_paths`.
+///
+/// `ensure_route` only ever adds routes; without this, renaming or removing a
+/// webhook path in the manifest leaves a dead route on the API permanently.
+async fn prune_stale_routes(
+    api: &aws_sdk_apigatewayv2::Client,
+    api_id: &str,
+    current_paths: &[String],
+) -> Result<()> {
+    let current_keys: std::collections::HashSet<String> =
+        current_paths.iter().map(|p| route_key(p)).collect();
+
+    let mut stale: Vec<(String, String)> = Vec::new(); // (route_id, route_key)
+    let mut next: Option<String> = None;
+    loop {
+        let mut req = api.get_routes().api_id(api_id);
+        if let Some(t) = &next {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.context("failed to list routes")?;
+        for r in resp.items() {
+            if let Some(key) = r.route_key() {
+                if !current_keys.contains(key) {
+                    if let Some(id) = r.route_id() {
+                        stale.push((id.to_string(), key.to_string()));
+                    }
+                }
+            }
+        }
+        match resp.next_token() {
+            Some(t) => next = Some(t.to_string()),
+            None => break,
+        }
+    }
+
+    for (route_id, key) in stale {
+        match api.delete_route().api_id(api_id).route_id(&route_id).send().await {
+            Ok(_) => eprintln!("  ⊖ Removed stale route (no longer in manifest): {key}"),
+            Err(e) => eprintln!("  ⚠ Failed to remove stale route {key}: {e}"),
+        }
+    }
+    Ok(())
+}
+
 async fn ensure_stage(api: &aws_sdk_apigatewayv2::Client, api_id: &str) -> Result<()> {
     let mut next: Option<String> = None;
     loop {
@@ -622,6 +699,26 @@ mod tests {
     fn api_name_is_per_bot() {
         assert_eq!(api_name("prod", "mybot"), "oab-webhook-prod-mybot");
         assert_ne!(api_name("prod", "a"), api_name("prod", "b"));
+    }
+
+    #[test]
+    fn vpc_link_name_is_per_vpc() {
+        assert_eq!(vpc_link_name("vpc-abc123"), "oab-vpc-link-vpc-abc123");
+        assert_ne!(vpc_link_name("vpc-aaa"), vpc_link_name("vpc-bbb"));
+    }
+
+    #[test]
+    fn vpc_scoped_namespace_differs_per_vpc() {
+        assert_eq!(vpc_scoped_namespace("oab", "vpc-aaa"), "oab-vpc-aaa");
+        assert_ne!(
+            vpc_scoped_namespace("oab", "vpc-aaa"),
+            vpc_scoped_namespace("oab", "vpc-bbb")
+        );
+        // Same VPC, different configured namespace names still differ.
+        assert_ne!(
+            vpc_scoped_namespace("oab", "vpc-aaa"),
+            vpc_scoped_namespace("custom", "vpc-aaa")
+        );
     }
 
     #[test]

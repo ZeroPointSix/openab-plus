@@ -241,9 +241,9 @@ spec:
 
 On `apply` this reconciles (idempotently, reused by name):
 
-1. **Cloud Map** private DNS namespace + a per-service **SRV** record (carries the container port; a plain A record does not work as a VPC-Link integration target)
+1. **Cloud Map** private DNS namespace (`<cloudMapNamespace>-<vpc-id>`, shared per-VPC) + a per-service **SRV** record (carries the container port; a plain A record does not work as a VPC-Link integration target)
 2. **ECS service registry** wiring (attached at service creation)
-3. **VPC Link** (shared `oab-vpc-link`), waits until `AVAILABLE`
+3. **VPC Link** (`oab-vpc-link-<vpc-id>`, shared per-VPC), waits until `AVAILABLE`
 4. **API Gateway HTTP API** (`oab-webhook-<ns>-<name>`, one per bot) + `HTTP_PROXY` integration over the VPC Link
 5. One **route** per path + a `prod` auto-deploy **stage**
 6. A self-referencing **security-group** inbound rule on `containerPort`
@@ -265,19 +265,27 @@ LINE console:
 > If the service already exists without service discovery, `apply` provisions the
 > ingress resources and prints how to recreate the service so traffic can reach it.
 >
-> **Shared VPC Link:** all ingress-enabled bots in a VPC share one `oab-vpc-link`.
-> A VPC Link's subnets/security groups are fixed at creation and cannot be changed,
-> so every ingress bot in the VPC must use the same `networking.subnets` /
-> `securityGroups` as whichever bot created the link first. `apply` prints a
-> reminder when it reuses an existing link.
+> **Shared per-VPC (not per-account):** all ingress-enabled bots in the *same VPC*
+> share one VPC Link (`oab-vpc-link-<vpc-id>`) and one Cloud Map namespace
+> (`<cloudMapNamespace>-<vpc-id>`) — both are named by VPC ID so bots in different
+> VPCs never collide or reuse each other's link/namespace. A VPC Link's
+> subnets/security groups are fixed at creation and cannot be changed, so every
+> ingress bot in a given VPC must use the same `networking.subnets` /
+> `securityGroups` as whichever bot created that VPC's link first. `apply` prints
+> a reminder when it reuses an existing link.
 >
 > **Teardown:** `oabctl delete oabservice <name>` removes the bot's per-bot ingress
 > resources — its Cloud Map service and its own HTTP API (`oab-webhook-<ns>-<name>`,
 > which cascades its routes/integration/stage) — on a best-effort basis (it never
-> blocks service deletion). The **shared** `oab-vpc-link` and the security-group
-> inbound rule are intentionally left in place for other bots. If the Cloud Map
-> service still has registered instances (tasks not yet drained), delete prints a
-> note to retry.
+> blocks service deletion). The same teardown also runs automatically from `apply`
+> if you edit a manifest to remove `spec.ingress` entirely. The **shared** VPC Link
+> and the security-group inbound rule are intentionally left in place for other
+> bots. If the Cloud Map service still has registered instances (tasks not yet
+> drained), delete prints a note to retry.
+>
+> **Changing `paths`:** `apply` prunes routes on the bot's API that are no longer
+> in the manifest's `ingress.paths`, so renaming or removing a webhook path never
+> leaves a dangling route.
 >
 > **Per-bot API, no path collisions:** each ingress bot gets its own HTTP API, so
 > two bots can both use `/webhook/telegram` without clashing — each has a distinct

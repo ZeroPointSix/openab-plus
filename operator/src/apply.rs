@@ -153,17 +153,34 @@ async fn apply_ecs(
         format!("oab-control-plane-{account}")
     };
 
-    // Read current generation from S3 manifest (if exists), increment
+    // Read current generation from S3 manifest (if exists), increment.
+    // Also capture whether the *previous* apply had ingress configured, so we
+    // can detect "ingress was removed from the manifest" and tear it down
+    // below — apply only ever provisioned ingress resources before this, so a
+    // manifest edit that drops `spec.ingress` used to orphan the per-bot HTTP
+    // API and Cloud Map service.
     let manifest_key = format!("manifests/{}/{}.yaml", m.metadata.namespace, m.metadata.name);
-    let current_gen = match s3.get_object().bucket(&bucket).key(&manifest_key).send().await {
-        Ok(resp) => {
-            let bytes = resp.body.collect().await?.into_bytes();
-            let existing: OABServiceManifest = serde_yaml::from_slice(&bytes)?;
-            existing.metadata.generation
-        }
-        Err(_) => 0,
-    };
+    let (current_gen, previously_had_ingress) =
+        match s3.get_object().bucket(&bucket).key(&manifest_key).send().await {
+            Ok(resp) => {
+                let bytes = resp.body.collect().await?.into_bytes();
+                let existing: OABServiceManifest = serde_yaml::from_slice(&bytes)?;
+                (existing.metadata.generation, existing.spec.ingress.is_some())
+            }
+            Err(_) => (0, false),
+        };
     let generation = current_gen + 1;
+
+    // If ingress was configured before but is absent now, tear down the
+    // orphaned per-bot ingress resources (best-effort, mirrors `oabctl delete`).
+    if previously_had_ingress && m.spec.ingress.is_none() {
+        eprintln!("  🌐 ingress removed from manifest — tearing down orphaned resources...");
+        if let Err(e) =
+            crate::ingress::teardown(config, &m.metadata.namespace, &m.metadata.name).await
+        {
+            eprintln!("  ⚠ ingress teardown skipped: {e}");
+        }
+    }
 
     // 1. Upload manifest to S3 (record of desired state)
     let mut manifest_to_store = serde_yaml::to_value(m)?;
