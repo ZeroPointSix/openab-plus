@@ -26,9 +26,10 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
 ## 2. Decision
 
 1. **Recommend `configUrl` as the primary configuration path** for all new deployments.
-2. **Helm chart retains responsibility only for runtime posture:**
-   - Pod security context (`runAsNonRoot`, `readOnlyRootFilesystem`, `drop: ALL`)
-   - PVC lifecycle and persistence
+2. **Helm chart retains responsibility only for runtime posture** — this is where Helm continues to deliver real value that raw config cannot:
+   - **Non-root execution** — enforce `runAsUser`/`runAsGroup` so the container never runs as root, reducing blast radius of container escapes.
+   - **Read-only root filesystem** — `readOnlyRootFilesystem: true` with `drop: ALL` capabilities ensures the container cannot be tampered with at runtime; only the HOME PVC is writable.
+   - **HOME PVC persistence** — dedicated PersistentVolumeClaim mounted at the agent's `$HOME`, providing durable workspace (git repos, session state, caches) that survives pod restarts.
    - Image version pinning and pull policy
    - ServiceAccount assignment (for IRSA)
    - Recreate strategy (RWO PVC constraint)
@@ -69,7 +70,24 @@ agents:
     persistence:
       enabled: true
       size: 1Gi
+    # ── This is what Helm enforces (you don't touch config for this) ──
+    securityContext:
+      runAsUser: 1000
+      runAsGroup: 1000
+      runAsNonRoot: true
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: ["ALL"]
 ```
+
+**Why these three matter:**
+
+| Helm-managed concern | What it prevents |
+|---------------------|-----------------|
+| `runAsUser: 1000` (non-root) | Container escape → host root access |
+| `readOnlyRootFilesystem` | Runtime binary tampering, malware persistence outside HOME |
+| HOME PVC (`persistence.enabled`) | Agent state loss on restart; provides durable workspace isolated from the immutable image |
 
 ## 5. Boot Behavior
 
