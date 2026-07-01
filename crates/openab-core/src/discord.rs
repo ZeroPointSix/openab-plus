@@ -1038,21 +1038,29 @@ impl EventHandler for Handler {
             // Discord's own user check that already ran pre-dispatch, so it cannot
             // deny anything already admitted (non-regressive). L2 (channel/thread/DM)
             // stays in the adapter for Discord — its registry entry is L2-open.
+            //
+            // Bots are skipped here: Discord's `is_denied_user` has a `!is_bot`
+            // bypass (bot admission is handled separately by allow_bot_messages +
+            // trusted_bot_ids), and the shared L3 gate is human-identity only.
+            // Running it on bots would wrongly drop trusted bot-to-bot messages
+            // when allow_all_users=false (multi-agent). See PR #1270 review F1.
             // Phase 1c makes this authoritative and removes the scattered check.
-            let decision = gate_router.gate_incoming(
-                "discord",
-                &thread_channel.channel_id,
-                false,
-                &sender_id,
-            );
-            if !decision.is_allowed() {
-                tracing::info!(
-                    sender = %sender_id,
-                    channel = %thread_channel.channel_id,
-                    ?decision,
-                    "discord message denied by trust gate"
+            if !sender.is_bot {
+                let decision = gate_router.gate_incoming(
+                    "discord",
+                    &thread_channel.channel_id,
+                    is_dm,
+                    &sender_id,
                 );
-                return;
+                if !decision.is_allowed() {
+                    tracing::info!(
+                        sender = %sender_id,
+                        channel = %thread_channel.channel_id,
+                        ?decision,
+                        "discord message denied by trust gate"
+                    );
+                    return;
+                }
             }
             let sender_json = serde_json::to_string(&sender).unwrap();
             let thread_key = dispatcher.key("discord", &thread_channel.channel_id, &sender_id);
