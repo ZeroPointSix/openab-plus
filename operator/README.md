@@ -209,6 +209,62 @@ spec:
       securityGroups: [sg-xxx]
 ```
 
+### Ingress — inbound webhooks (Telegram / LINE)
+
+Discord bots are outbound-only and need no ingress. Webhook platforms (Telegram,
+LINE, ...) POST *into* the task, so they need a public HTTPS endpoint. Adding an
+optional `spec.ingress` block makes `oabctl apply` provision the cheapest
+AWS-native path in one shot — API Gateway HTTP API → VPC Link → Cloud Map → the
+task — instead of running ~7 manual `aws` commands. See
+[`docs/refarch/running-telegram-line-on-aws.md`](../docs/refarch/running-telegram-line-on-aws.md)
+(Option 1) for the architecture and cost breakdown.
+
+```yaml
+spec:
+  image: public.ecr.aws/oablab/kiro:beta
+  resources: { cpu: "256", memory: "512" }
+  configFrom: s3://.../config.toml
+  runtime:
+    type: ecs
+    capacityProvider: FARGATE_SPOT
+    networking:
+      subnets: [subnet-aaa, subnet-bbb]
+      securityGroups: [sg-xxx]
+  ingress:
+    type: apigateway          # only supported type (default)
+    cloudMapNamespace: oab    # reused across bots in the VPC (default: oab)
+    containerPort: 8080       # OpenAB listen port (default: 8080)
+    paths:
+      - /webhook/telegram
+      - /webhook/line
+```
+
+On `apply` this reconciles (idempotently, reused by name):
+
+1. **Cloud Map** private DNS namespace + a per-service A record
+2. **ECS service registry** wiring (attached at service creation)
+3. **VPC Link** (shared `oab-vpc-link`), waits until `AVAILABLE`
+4. **API Gateway HTTP API** (`oab-webhook`) + `HTTP_PROXY` integration over the VPC Link
+5. One **route** per path + a `prod` auto-deploy **stage**
+6. A self-referencing **security-group** inbound rule on `containerPort`
+
+`apply` then prints the stable webhook URL(s) to register with BotFather / the
+LINE console:
+
+```
+🔗 Webhook URL(s) for my-bot:
+   https://{api-id}.execute-api.{region}.amazonaws.com/prod/webhook/telegram
+   https://{api-id}.execute-api.{region}.amazonaws.com/prod/webhook/line
+```
+
+> **Security note:** the API Gateway endpoint is public and unauthenticated at the
+> transport layer — requests are authenticated at the app layer by OpenAB (LINE
+> signature via `LINE_CHANNEL_SECRET`, Telegram bot token in the path).
+>
+> **Recreate caveat:** ECS service registries can only be set at *creation* time.
+> If the service already exists without service discovery, `apply` provisions the
+> ingress resources and prints how to recreate the service so traffic can reach it.
+
 ### OABFleet — batch deploy
 
 ```yaml
@@ -234,7 +290,7 @@ spec:
 ```
 
 **Fleet features:**
-- Template inheritance with per-agent overrides (`image`, `resources`, `bootstrapFrom`, `secrets`)
+- Template inheritance with per-agent overrides (`image`, `resources`, `bootstrapFrom`, `secrets`, `ingress`)
 - `${name}` interpolation in `configFrom`, `bootstrapFrom`
 - Runtime shared across fleet (not overridable per-agent)
 - Validate-all-before-apply (no partial deploys)

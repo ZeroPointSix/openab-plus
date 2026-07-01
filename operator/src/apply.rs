@@ -225,6 +225,15 @@ async fn apply_ecs(
         .awsvpc_configuration(vpc_config)
         .build();
 
+    // Ingress: ensure Cloud Map BEFORE the service exists-check, because ECS
+    // service registries can only be attached at service *creation* time.
+    let cloud_map = if let Some(ingress) = &m.spec.ingress {
+        eprintln!("  🌐 Reconciling ingress (Cloud Map)...");
+        Some(crate::ingress::ensure_cloud_map(config, m, ingress).await?)
+    } else {
+        None
+    };
+
     // Check if service exists
     let existing = ecs
         .describe_services()
@@ -239,6 +248,12 @@ async fn apply_ecs(
         .and_then(|r| r.services().first())
         .is_some_and(|s| s.status() == Some("ACTIVE"));
 
+    let has_registries = existing
+        .as_ref()
+        .ok()
+        .and_then(|r| r.services().first())
+        .is_some_and(|s| !s.service_registries().is_empty());
+
     if service_active {
         ecs.update_service()
             .cluster("oab")
@@ -249,26 +264,76 @@ async fn apply_ecs(
             .await
             .context("failed to update ECS service")?;
         println!("  ✓ {} updated", m.metadata.name);
+
+        if cloud_map.is_some() && !has_registries {
+            eprintln!(
+                "  ⚠ Service '{}' already exists WITHOUT service discovery.",
+                m.metadata.name
+            );
+            eprintln!("    ECS service registries can only be set at creation time, so ingress");
+            eprintln!("    resources were provisioned but traffic won't reach the task until you");
+            eprintln!("    recreate the service (safe once desiredCount is drained):");
+            eprintln!(
+                "      oabctl delete service {} --namespace {} && oabctl apply -f <manifest>",
+                m.metadata.name, m.metadata.namespace
+            );
+        }
     } else {
         let cap_strategy = CapacityProviderStrategyItem::builder()
             .capacity_provider(&ecs_rt.capacity_provider)
             .weight(1)
             .build()?;
 
-        ecs.create_service()
+        let mut create_req = ecs
+            .create_service()
             .cluster("oab")
             .service_name(&service_name)
             .task_definition(&task_def_arn)
             .desired_count(1)
             .capacity_provider_strategy(cap_strategy)
-            .network_configuration(network_config)
+            .network_configuration(network_config);
+
+        if let Some(cm) = &cloud_map {
+            create_req = create_req.service_registries(
+                aws_sdk_ecs::types::ServiceRegistry::builder()
+                    .registry_arn(&cm.registry_arn)
+                    .build(),
+            );
+        }
+
+        create_req
             .send()
             .await
             .context("failed to create ECS service")?;
         println!(
-            "  ✓ {} created ({}, {}cpu/{}mem)",
-            m.metadata.name, ecs_rt.capacity_provider, m.spec.resources.cpu, m.spec.resources.memory
+            "  ✓ {} created ({}, {}cpu/{}mem{})",
+            m.metadata.name,
+            ecs_rt.capacity_provider,
+            m.spec.resources.cpu,
+            m.spec.resources.memory,
+            if cloud_map.is_some() {
+                ", service discovery"
+            } else {
+                ""
+            }
         );
+    }
+
+    // Ingress step 2: VPC Link + API Gateway + routes + SG rule.
+    if let (Some(ingress), Some(cm)) = (&m.spec.ingress, &cloud_map) {
+        eprintln!("  🌐 Reconciling ingress (VPC Link + API Gateway)...");
+        let urls = crate::ingress::ensure_gateway(
+            config,
+            ingress,
+            &ecs_rt.networking.subnets,
+            &ecs_rt.networking.security_groups,
+            &cm.dns_name,
+        )
+        .await?;
+        println!("  🔗 Webhook URL(s) for {}:", m.metadata.name);
+        for u in &urls {
+            println!("     {u}");
+        }
     }
 
     if wait {
