@@ -60,12 +60,30 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
         }
     }
 
+    let mut needs_recreate: Vec<String> = Vec::new();
     for m in &manifests {
         println!("  Applying {} (ECS)...", m.metadata.name);
-        apply_ecs(&ecs, &s3, aws_config, m, wait).await?;
+        if apply_ecs(&ecs, &s3, aws_config, m, wait).await? {
+            needs_recreate.push(format!("{}/{}", m.metadata.namespace, m.metadata.name));
+        }
     }
 
     println!("\n{} service(s) applied.", manifests.len());
+
+    // Surface the create-only service-discovery limitation as a consolidated
+    // summary so it isn't lost in mid-run output (e.g. in non-interactive CI).
+    if !needs_recreate.is_empty() {
+        eprintln!(
+            "\n⚠ {} service(s) have ingress configured but were created WITHOUT service\n  discovery, so webhook traffic will NOT reach them until recreated:",
+            needs_recreate.len()
+        );
+        for id in &needs_recreate {
+            eprintln!("    - {id}");
+        }
+        eprintln!(
+            "  ECS service registries can only be set at creation time. For each, run:\n    oabctl delete oabservice <name> --cluster oab --namespace <ns> && oabctl apply -f <manifest>"
+        );
+    }
     Ok(())
 }
 
@@ -117,7 +135,7 @@ async fn apply_ecs(
     config: &aws_config::SdkConfig,
     m: &OABServiceManifest,
     wait: bool,
-) -> Result<()> {
+) -> Result<bool> {
     let ecs_rt = match &m.spec.runtime {
         Runtime::Ecs(rt) => rt,
         _ => unreachable!(),
@@ -266,6 +284,7 @@ async fn apply_ecs(
         .and_then(|r| r.services().first())
         .is_some_and(|s| !s.service_registries().is_empty());
 
+    let mut needs_recreate = false;
     if service_active {
         ecs.update_service()
             .cluster("oab")
@@ -278,6 +297,7 @@ async fn apply_ecs(
         println!("  ✓ {} updated", m.metadata.name);
 
         if cloud_map.is_some() && !has_registries {
+            needs_recreate = true;
             eprintln!(
                 "  ⚠ Service '{}' already exists WITHOUT service discovery.",
                 m.metadata.name
@@ -361,7 +381,7 @@ async fn apply_ecs(
         eprintln!("  ✓ {} is stable", m.metadata.name);
     }
 
-    Ok(())
+    Ok(needs_recreate)
 }
 
 async fn wait_for_stable(ecs: &aws_sdk_ecs::Client, cluster: &str, service: &str) -> Result<()> {
