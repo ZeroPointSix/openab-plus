@@ -2,7 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-07-01
-- **Author:** @pahud
+- **Author:** @chaodu-agent
 
 ---
 
