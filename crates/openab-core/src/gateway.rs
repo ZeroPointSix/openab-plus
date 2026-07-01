@@ -1473,6 +1473,15 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    #[test]
+    fn echo_allowed_throttles_repeat_within_window() {
+        // Unique key so we don't collide with other tests touching the global map.
+        let key = "test-platform:test-sender-echo-throttle";
+        assert!(echo_allowed(key), "first echo should be allowed");
+        assert!(!echo_allowed(key), "immediate repeat should be throttled");
+        assert!(!echo_allowed(key), "still throttled within the window");
+    }
+
     fn make_event(is_bot: bool, sender_id: &str, channel_id: &str, channel_type: &str, thread_id: Option<&str>, mentions: Vec<&str>) -> GatewayEvent {
         serde_json::from_value(serde_json::json!({
             "schema": "openab.gateway.event.v1",
