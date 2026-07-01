@@ -1,7 +1,11 @@
 //! Ingress reconciliation for webhook-based platforms (Telegram, LINE, ...).
 //!
-//! Implements Option 1 of `docs/refarch/running-telegram-line-on-aws.md`:
-//! API Gateway HTTP API → VPC Link → Cloud Map → ECS Fargate task on `:port`.
+//! Implements the API Gateway HTTP API → VPC Link → Cloud Map → ECS Fargate
+//! path for inbound webhook ingress (Telegram, LINE, ...), replacing ~7 manual
+//! `aws apigatewayv2`/`servicediscovery`/`ecs` CLI steps. See
+//! `operator/README.md` ("Ingress — inbound webhooks") for the manifest schema
+//! and operational notes; a dedicated AWS reference architecture doc for this
+//! path is tracked in openabdev/openab#1274.
 //!
 //! All operations are idempotent — resources are looked up by name and reused,
 //! so repeated `oabctl apply` runs converge instead of duplicating. The shared
@@ -180,11 +184,31 @@ pub async fn teardown(config: &aws_config::SdkConfig, namespace: &str, name: &st
         }
     }
     if let Some(service_id) = service_id {
-        match sd.delete_service().id(&service_id).send().await {
-            Ok(_) => eprintln!("  ✓ Deleted Cloud Map service: {service_name}"),
-            Err(e) => eprintln!(
-                "  ⚠ Cloud Map service '{service_name}' not deleted — it may still have\n    registered instances; retry once the ECS tasks have fully drained ({e})"
-            ),
+        // ECS deregisters the task's Cloud Map instance asynchronously when a
+        // service scales to 0 / is deleted, so `delete_service` can fail with
+        // "still has registered instances" for a short window even though the
+        // task is already gone. Retry briefly instead of giving up on the
+        // first attempt — this is the common case, not an edge case.
+        let mut last_err = None;
+        let mut deleted = false;
+        for attempt in 0..6 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+            match sd.delete_service().id(&service_id).send().await {
+                Ok(_) => {
+                    eprintln!("  ✓ Deleted Cloud Map service: {service_name}");
+                    deleted = true;
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if !deleted {
+            eprintln!(
+                "  ⚠ Cloud Map service '{service_name}' not deleted after retrying — it still\n    has registered instances. It will be orphaned until manually removed:\n      aws servicediscovery delete-service --id {service_id}\n    ({})",
+                last_err.map(|e| e.to_string()).unwrap_or_default()
+            );
         }
     }
 
@@ -399,28 +423,34 @@ async fn ensure_vpc_link(
     use aws_sdk_apigatewayv2::types::VpcLinkStatus;
     let link_name = vpc_link_name(vpc_id);
 
-    // Reuse an existing, non-failed VPC Link with our per-VPC name.
-    let mut found: Option<(String, Option<VpcLinkStatus>)> = None;
+    // Reuse an existing, non-failed VPC Link with our per-VPC name. VPC Link
+    // names are NOT unique to the API — if two `oabctl apply` invocations race
+    // to create the same-named link in a brand-new VPC (e.g. a fleet's agents
+    // applied via separate concurrent processes), AWS will happily create two.
+    // We can't prevent that race across processes, but we can make reuse
+    // deterministic afterward: collect all matches and always pick the one
+    // with the lexicographically smallest ID (stable across repeated calls,
+    // regardless of list ordering), warning if more than one exists so an
+    // operator can clean up the duplicate.
+    let mut candidates: Vec<(String, Option<VpcLinkStatus>)> = Vec::new();
     let mut next: Option<String> = None;
-    'outer: loop {
+    loop {
         let mut req = api.get_vpc_links();
         if let Some(t) = &next {
             req = req.next_token(t);
         }
         let resp = req.send().await.context("failed to list VPC Links")?;
         for link in resp.items() {
-            if link.name() == Some(link_name.as_str()) {
-                if matches!(
+            if link.name() == Some(link_name.as_str())
+                && !matches!(
                     link.vpc_link_status(),
                     Some(VpcLinkStatus::Failed) | Some(VpcLinkStatus::Deleting)
-                ) {
-                    continue;
-                }
-                found = Some((
+                )
+            {
+                candidates.push((
                     link.vpc_link_id().unwrap_or_default().to_string(),
                     link.vpc_link_status().cloned(),
                 ));
-                break 'outer;
             }
         }
         match resp.next_token() {
@@ -428,6 +458,17 @@ async fn ensure_vpc_link(
             None => break,
         }
     }
+    candidates.sort_by(|(a, _), (b, _)| a.cmp(b));
+    if candidates.len() > 1 {
+        eprintln!(
+            "  ⚠ Found {} VPC Links named '{link_name}' (a race between concurrent\n    `apply` runs can create duplicates — AWS does not enforce name\n    uniqueness). Using the lexicographically first; consider deleting the extras:",
+            candidates.len()
+        );
+        for (id, _) in &candidates[1..] {
+            eprintln!("      aws apigatewayv2 delete-vpc-link --vpc-link-id {id}");
+        }
+    }
+    let found = candidates.into_iter().next();
 
     let link_id = if let Some((id, _status)) = found {
         eprintln!("  ✓ VPC Link exists: {link_name} ({id})");

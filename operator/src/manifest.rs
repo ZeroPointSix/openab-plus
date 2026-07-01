@@ -167,8 +167,9 @@ pub struct Spec {
 /// Inbound HTTPS ingress for webhook-based platforms (Telegram, LINE, ...).
 ///
 /// Provisions the cheapest AWS-native path: API Gateway HTTP API → VPC Link →
-/// Cloud Map → the ECS task on `containerPort`. See
-/// `docs/refarch/running-telegram-line-on-aws.md` (Option 1).
+/// Cloud Map → the ECS task on `containerPort`. See `operator/README.md`
+/// ("Ingress — inbound webhooks") for the manifest schema and operational
+/// notes.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Ingress {

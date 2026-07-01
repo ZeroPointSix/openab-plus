@@ -215,9 +215,12 @@ Discord bots are outbound-only and need no ingress. Webhook platforms (Telegram,
 LINE, ...) POST *into* the task, so they need a public HTTPS endpoint. Adding an
 optional `spec.ingress` block makes `oabctl apply` provision the cheapest
 AWS-native path in one shot — API Gateway HTTP API → VPC Link → Cloud Map → the
-task — instead of running ~7 manual `aws` commands. See
-[`docs/refarch/running-telegram-line-on-aws.md`](../docs/refarch/running-telegram-line-on-aws.md)
-(Option 1) for the architecture and cost breakdown.
+task — instead of running ~7 manual `aws` commands, replacing the manual steps
+implemented here. For a Kubernetes/Cloudflare-Tunnel alternative, see
+[`docs/refarch/telegram-cloudflare-tunnel.md`](../docs/refarch/telegram-cloudflare-tunnel.md).
+A dedicated AWS-native refarch doc covering this path in depth is tracked in
+[#1274](https://github.com/openabdev/openab/pull/1274); once merged it will be
+linked here.
 
 ```yaml
 spec:
