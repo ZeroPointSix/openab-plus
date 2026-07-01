@@ -265,8 +265,15 @@ LINE console:
 > signature via `LINE_CHANNEL_SECRET`, Telegram bot token in the path).
 >
 > **Recreate caveat:** ECS service registries can only be set at *creation* time.
-> If the service already exists without service discovery, `apply` provisions the
-> ingress resources and prints how to recreate the service so traffic can reach it.
+> If the service already exists without service discovery — or its registry
+> points at a different Cloud Map service than the one currently resolved for
+> `ingress.cloudMapNamespace` (e.g. the namespace was changed after the service
+> was created) — `apply` provisions the ingress resources and prints how to
+> recreate the service so traffic can reach it. Recreating via
+> `oabctl delete oabservice ... && oabctl apply` **keeps the same webhook URL**:
+> deleting a service only strips its routes/integration/stage from its HTTP API,
+> it never deletes the API resource itself, so the `api-id` (and thus the URL
+> hostname) survives.
 >
 > **Shared per-VPC (not per-account):** all ingress-enabled bots in the *same VPC*
 > share one VPC Link (`oab-vpc-link-<vpc-id>`) and one Cloud Map namespace
@@ -274,17 +281,23 @@ LINE console:
 > VPCs never collide or reuse each other's link/namespace. A VPC Link's
 > subnets/security groups are fixed at creation and cannot be changed, so every
 > ingress bot in a given VPC must use the same `networking.subnets` /
-> `securityGroups` as whichever bot created that VPC's link first. `apply` prints
-> a reminder when it reuses an existing link.
+> `securityGroups` as whichever bot created that VPC's link first. `apply`
+> verifies the reused link's actual security groups match the manifest and warns
+> loudly on a mismatch (subnets aren't exposed by the API, so those can only be
+> reminded, not verified).
 >
-> **Teardown:** `oabctl delete oabservice <name>` removes the bot's per-bot ingress
-> resources — its Cloud Map service and its own HTTP API (`oab-webhook-<ns>-<name>`,
-> which cascades its routes/integration/stage) — on a best-effort basis (it never
-> blocks service deletion). The same teardown also runs automatically from `apply`
-> if you edit a manifest to remove `spec.ingress` entirely. The **shared** VPC Link
-> and the security-group inbound rule are intentionally left in place for other
-> bots. If the Cloud Map service still has registered instances (tasks not yet
-> drained), delete prints a note to retry.
+> **Teardown:** `oabctl delete oabservice <name>` permanently removes the bot's
+> per-bot ingress resources — its exact Cloud Map service (resolved by the ECS
+> service's own registry ARN, not a name search, so same-named bots in different
+> VPCs/environments can't collide) and its HTTP API (`oab-webhook-<ns>-<name>`,
+> including the API resource itself this time, since the bot is gone for good) —
+> on a best-effort basis (it never blocks service deletion). If you instead edit
+> a manifest to remove `spec.ingress` while keeping the bot, `apply` runs the same
+> Cloud Map + routes/integration/stage cleanup automatically, but **keeps the HTTP
+> API** in case ingress is re-added later. The **shared** VPC Link and the
+> security-group inbound rule are always left in place for other bots. If the
+> Cloud Map service still has registered instances, teardown retries for ~25s
+> before falling back to a warning with the manual cleanup command.
 >
 > **Changing `paths`:** `apply` prunes routes on the bot's API that are no longer
 > in the manifest's `ingress.paths`, so renaming or removing a webhook path never
@@ -292,7 +305,7 @@ LINE console:
 >
 > **Per-bot API, no path collisions:** each ingress bot gets its own HTTP API, so
 > two bots can both use `/webhook/telegram` without clashing — each has a distinct
-> `{api-id}` endpoint URL.
+> `{api-id}` endpoint URL that stays stable across recreates.
 
 ### OABFleet — batch deploy
 

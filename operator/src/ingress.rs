@@ -139,6 +139,12 @@ fn route_key(path: &str) -> String {
     format!("POST {path}")
 }
 
+/// Extract the Cloud Map service ID from its ARN
+/// (`arn:aws:servicediscovery:<region>:<account>:service/<id>`).
+fn cloud_map_service_id_from_arn(arn: &str) -> Option<String> {
+    arn.rsplit('/').next().filter(|s| !s.is_empty()).map(|s| s.to_string())
+}
+
 /// Build the public webhook URL(s) from the API endpoint and paths.
 /// Each URL is `<endpoint>/<stage><path>`.
 fn webhook_urls(api_endpoint: &str, paths: &[String]) -> Vec<String> {
@@ -149,40 +155,113 @@ fn webhook_urls(api_endpoint: &str, paths: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Best-effort teardown of the *per-bot* ingress resources for `namespace/name`:
-/// the bot's own HTTP API (`oab-webhook-<ns>-<name>`, which cascades its routes,
-/// integration and stage) and its Cloud Map service.
+/// Best-effort teardown of the *per-bot ingress wiring* for `namespace/name`:
+/// its routes, integration, and stage on the per-bot HTTP API, plus its Cloud
+/// Map service. Deliberately does NOT delete the HTTP API resource itself —
+/// only what points at the now-gone task — so the API's `api-id` (and thus the
+/// public webhook URL's hostname) survives an ECS-service recreate cycle. Use
+/// [`delete_api`] separately when the bot is being permanently removed.
 ///
-/// The shared resources (the `oab-vpc-link` VPC Link and the security-group
-/// inbound rule) are intentionally left in place since other bots may still use
-/// them. Safe to call for bots that never had ingress — it simply finds nothing
-/// and returns. Errors are logged, not propagated, so teardown never blocks
-/// service deletion.
-pub async fn teardown(config: &aws_config::SdkConfig, namespace: &str, name: &str) -> Result<()> {
+/// The shared resources (the VPC Link and the security-group inbound rule) are
+/// intentionally left in place since other bots may still use them. Safe to
+/// call for bots that never had ingress — it simply finds nothing and returns.
+/// Errors are logged, not propagated, so teardown never blocks service deletion.
+pub async fn teardown(
+    config: &aws_config::SdkConfig,
+    namespace: &str,
+    name: &str,
+    known_registry_arn: Option<&str>,
+) -> Result<()> {
     let service_name = format!("oab-{namespace}-{name}");
     let api = aws_sdk_apigatewayv2::Client::new(config);
 
-    // ── API Gateway: delete the whole per-bot API (cascades routes/integration/stage) ─
+    // ── API Gateway: strip routes + integration + stage, keep the API itself ─
     if let Some((api_id, _)) = find_api(&api, &api_name(namespace, name)).await? {
-        match api.delete_api().api_id(&api_id).send().await {
-            Ok(_) => eprintln!("  ✓ Deleted HTTP API: {}", api_name(namespace, name)),
-            Err(e) => eprintln!("  ⚠ Failed to delete HTTP API {api_id}: {e}"),
+        // Delete all routes on this API first (integrations can't be deleted
+        // while a route still targets them).
+        let mut route_ids = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let mut req = api.get_routes().api_id(&api_id);
+            if let Some(t) = &next {
+                req = req.next_token(t);
+            }
+            let resp = req.send().await.context("failed to list routes")?;
+            for r in resp.items() {
+                if let Some(id) = r.route_id() {
+                    route_ids.push(id.to_string());
+                }
+            }
+            match resp.next_token() {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
         }
+        for route_id in &route_ids {
+            api.delete_route().api_id(&api_id).route_id(route_id).send().await.ok();
+        }
+
+        // Delete integrations (there's normally just one, but clean up all).
+        let mut integration_ids = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let mut req = api.get_integrations().api_id(&api_id);
+            if let Some(t) = &next {
+                req = req.next_token(t);
+            }
+            let resp = req.send().await.context("failed to list integrations")?;
+            for i in resp.items() {
+                if let Some(id) = i.integration_id() {
+                    integration_ids.push(id.to_string());
+                }
+            }
+            match resp.next_token() {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+        }
+        for integration_id in &integration_ids {
+            api.delete_integration()
+                .api_id(&api_id)
+                .integration_id(integration_id)
+                .send()
+                .await
+                .ok();
+        }
+
+        api.delete_stage().api_id(&api_id).stage_name(STAGE_NAME).send().await.ok();
+
+        eprintln!(
+            "  ✓ Cleared ingress wiring on HTTP API {} ({} route(s), {} integration(s)) — API itself kept so its URL survives a recreate",
+            api_name(namespace, name),
+            route_ids.len(),
+            integration_ids.len()
+        );
     }
 
     // ── Cloud Map: delete the per-bot service (needs no live instances) ──────
+    // Prefer resolving the exact service from the ECS service's own registry
+    // ARN (passed by the caller when known) over a name-only account-wide
+    // scan — two bots with the same namespace/name in different VPCs (e.g.
+    // staging vs. prod sharing an account) would otherwise collide and the
+    // wrong one could be deleted.
     let sd = aws_sdk_servicediscovery::Client::new(config);
-    let mut service_id: Option<String> = None;
-    let mut pages = sd.list_services().into_paginator().send();
-    'svc: while let Some(page) = pages.next().await {
-        let page = page.context("failed to list Cloud Map services")?;
-        for s in page.services() {
-            if s.name() == Some(service_name.as_str()) {
-                service_id = s.id().map(|x| x.to_string());
-                break 'svc;
+    let service_id: Option<String> = if let Some(arn) = known_registry_arn {
+        cloud_map_service_id_from_arn(arn)
+    } else {
+        let mut found: Option<String> = None;
+        let mut pages = sd.list_services().into_paginator().send();
+        'svc: while let Some(page) = pages.next().await {
+            let page = page.context("failed to list Cloud Map services")?;
+            for s in page.services() {
+                if s.name() == Some(service_name.as_str()) {
+                    found = s.id().map(|x| x.to_string());
+                    break 'svc;
+                }
             }
         }
-    }
+        found
+    };
     if let Some(service_id) = service_id {
         // ECS deregisters the task's Cloud Map instance asynchronously when a
         // service scales to 0 / is deleted, so `delete_service` can fail with
@@ -212,6 +291,24 @@ pub async fn teardown(config: &aws_config::SdkConfig, namespace: &str, name: &st
         }
     }
 
+    Ok(())
+}
+
+/// Permanently delete the bot's per-bot HTTP API (`oab-webhook-<ns>-<name>`),
+/// cascading its routes/integration/stage with it. This DESTROYS the `api-id`
+/// and therefore the public webhook URL's hostname — only call this when the
+/// bot itself is being permanently removed (`oabctl delete`), never from the
+/// `apply` recreate path, which relies on the API surviving so its URL stays
+/// stable across an ECS-service recreate.
+pub async fn delete_api(config: &aws_config::SdkConfig, namespace: &str, name: &str) -> Result<()> {
+    let api = aws_sdk_apigatewayv2::Client::new(config);
+    let name_str = api_name(namespace, name);
+    if let Some((api_id, _)) = find_api(&api, &name_str).await? {
+        match api.delete_api().api_id(&api_id).send().await {
+            Ok(_) => eprintln!("  ✓ Deleted HTTP API: {name_str}"),
+            Err(e) => eprintln!("  ⚠ Failed to delete HTTP API {api_id}: {e}"),
+        }
+    }
     Ok(())
 }
 
@@ -458,10 +555,19 @@ async fn ensure_vpc_link(
             None => break,
         }
     }
-    candidates.sort_by(|(a, _), (b, _)| a.cmp(b));
+    // Prefer an already-AVAILABLE link over a PENDING one (avoids waiting on a
+    // duplicate that hasn't finished provisioning when a ready one exists),
+    // then break remaining ties by ID for determinism.
+    candidates.sort_by(|(a_id, a_status), (b_id, b_status)| {
+        let rank = |s: &Option<VpcLinkStatus>| match s {
+            Some(VpcLinkStatus::Available) => 0,
+            _ => 1,
+        };
+        rank(a_status).cmp(&rank(b_status)).then_with(|| a_id.cmp(b_id))
+    });
     if candidates.len() > 1 {
         eprintln!(
-            "  ⚠ Found {} VPC Links named '{link_name}' (a race between concurrent\n    `apply` runs can create duplicates — AWS does not enforce name\n    uniqueness). Using the lexicographically first; consider deleting the extras:",
+            "  ⚠ Found {} VPC Links named '{link_name}' (a race between concurrent\n    `apply` runs can create duplicates — AWS does not enforce name\n    uniqueness). Using the first AVAILABLE one (or lexicographically first\n    if none are ready yet); consider deleting the extras:",
             candidates.len()
         );
         for (id, _) in &candidates[1..] {
@@ -473,13 +579,11 @@ async fn ensure_vpc_link(
     let link_id = if let Some((id, _status)) = found {
         eprintln!("  ✓ VPC Link exists: {link_name} ({id})");
         // A VPC Link's subnets/SGs are fixed at creation and cannot be updated.
-        // All ingress-enabled bots in this VPC share this one link, so they must
-        // use the same subnet/SG set as whichever bot created it first —
-        // otherwise the link's ENIs won't cover this task's subnets and
-        // integrations may 503.
-        eprintln!(
-            "    ↳ reusing this VPC's shared link subnets/SGs (fixed at creation);\n      ensure all ingress bots in vpc {vpc_id} use the same subnets/securityGroups"
-        );
+        // All ingress-enabled bots in this VPC share this one link, so verify
+        // (not just remind) that this manifest's subnets/SGs actually match
+        // what the link was created with — otherwise its ENIs won't cover
+        // this task's subnets and integrations may 503.
+        validate_vpc_link_config(api, &id, subnets, security_groups).await?;
         id
     } else {
         eprintln!("  ⊕ Creating VPC Link: {link_name}");
@@ -515,6 +619,44 @@ async fn ensure_vpc_link(
         }
     }
     anyhow::bail!("timed out waiting for VPC Link {link_id} to become AVAILABLE")
+}
+
+/// Verify a reused VPC Link's actual security groups match the manifest's.
+/// (API Gateway's `GetVpcLink` does not expose the link's subnet IDs, only
+/// security groups, so subnet mismatches can't be directly verified here —
+/// they still surface indirectly as unreachable integrations, which is the
+/// pre-existing behavior this doesn't regress.) Warns loudly rather than
+/// failing outright, since a legitimate SG rotation could trigger this too
+/// and we don't want to block `apply` on a false positive.
+async fn validate_vpc_link_config(
+    api: &aws_sdk_apigatewayv2::Client,
+    link_id: &str,
+    subnets: &[String],
+    security_groups: &[String],
+) -> Result<()> {
+    let resp = api
+        .get_vpc_link()
+        .vpc_link_id(link_id)
+        .send()
+        .await
+        .context("failed to describe VPC Link for validation")?;
+    let actual_sgs: std::collections::HashSet<&str> =
+        resp.security_group_ids().iter().map(|s| s.as_str()).collect();
+    let wanted_sgs: std::collections::HashSet<&str> =
+        security_groups.iter().map(|s| s.as_str()).collect();
+    if actual_sgs != wanted_sgs {
+        eprintln!(
+            "  ⚠ VPC Link {link_id}'s actual security groups {:?} do NOT match this\n    manifest's {:?}. The link's SGs are fixed at creation — integrations may\n    fail to reach this task. All ingress bots in this VPC must share the\n    same securityGroups as whichever bot created the link.",
+            actual_sgs, wanted_sgs
+        );
+    }
+    // Subnets aren't exposed by GetVpcLink; remind the operator this is the
+    // one part of the config we can't directly verify.
+    eprintln!(
+        "    ↳ reusing this VPC's shared link (subnets fixed at creation, not verifiable via\n      the API); ensure this manifest's subnets {:?} match whichever bot created it",
+        subnets
+    );
+    Ok(())
 }
 
 // ─── HTTP API ───────────────────────────────────────────────────────────────
@@ -734,6 +876,22 @@ mod tests {
     fn route_key_is_post_prefixed() {
         assert_eq!(route_key("/webhook/telegram"), "POST /webhook/telegram");
         assert_eq!(route_key("/webhook/line"), "POST /webhook/line");
+    }
+
+    #[test]
+    fn cloud_map_service_id_parses_from_arn() {
+        assert_eq!(
+            cloud_map_service_id_from_arn(
+                "arn:aws:servicediscovery:us-east-1:903779448426:service/srv-abc123"
+            ),
+            Some("srv-abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn cloud_map_service_id_from_arn_rejects_empty() {
+        assert_eq!(cloud_map_service_id_from_arn(""), None);
+        assert_eq!(cloud_map_service_id_from_arn("trailing/"), None);
     }
 
     #[test]

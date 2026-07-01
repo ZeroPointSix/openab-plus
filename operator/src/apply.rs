@@ -175,8 +175,13 @@ async fn apply_ecs(
     // orphaned per-bot ingress resources (best-effort, mirrors `oabctl delete`).
     if previously_had_ingress && m.spec.ingress.is_none() {
         eprintln!("  🌐 ingress removed from manifest — tearing down orphaned resources...");
-        if let Err(e) =
-            crate::ingress::teardown(config, &m.metadata.namespace, &m.metadata.name).await
+        if let Err(e) = crate::ingress::teardown(
+            config,
+            &m.metadata.namespace,
+            &m.metadata.name,
+            None,
+        )
+        .await
         {
             eprintln!("  ⚠ ingress teardown skipped: {e}");
         }
@@ -295,11 +300,19 @@ async fn apply_ecs(
         .and_then(|r| r.services().first())
         .is_some_and(|s| s.status() == Some("ACTIVE"));
 
-    let has_registries = existing
+    let existing_registry_arns: Vec<String> = existing
         .as_ref()
         .ok()
         .and_then(|r| r.services().first())
-        .is_some_and(|s| !s.service_registries().is_empty());
+        .map(|s| {
+            s.service_registries()
+                .iter()
+                .filter_map(|r| r.registry_arn())
+                .map(|a| a.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_registries = !existing_registry_arns.is_empty();
 
     let mut needs_recreate = false;
     if service_active {
@@ -313,12 +326,28 @@ async fn apply_ecs(
             .context("failed to update ECS service")?;
         println!("  ✓ {} updated", m.metadata.name);
 
-        if cloud_map.is_some() && !has_registries {
+        // Recreate is needed either when the service has no registry at all,
+        // or when it has one but it doesn't match the registry we just
+        // resolved for the manifest's current `ingress.cloudMapNamespace` —
+        // e.g. the namespace was changed after the service was created. The
+        // service's registry is fixed at creation time either way, so a
+        // mismatch means traffic is routed at the old namespace and 503s.
+        let registry_mismatch = cloud_map.as_ref().is_some_and(|cm| {
+            has_registries && !existing_registry_arns.contains(&cm.registry_arn)
+        });
+        if cloud_map.is_some() && (!has_registries || registry_mismatch) {
             needs_recreate = true;
-            eprintln!(
-                "  ⚠ Service '{}' already exists WITHOUT service discovery.",
-                m.metadata.name
-            );
+            if registry_mismatch {
+                eprintln!(
+                    "  ⚠ Service '{}' is registered under a DIFFERENT Cloud Map service than\n    the one resolved for its current ingress.cloudMapNamespace (likely changed\n    since the service was created).",
+                    m.metadata.name
+                );
+            } else {
+                eprintln!(
+                    "  ⚠ Service '{}' already exists WITHOUT service discovery.",
+                    m.metadata.name
+                );
+            }
             eprintln!("    ECS service registries can only be set at creation time, so ingress");
             eprintln!("    resources were provisioned but traffic won't reach the task until you");
             eprintln!("    recreate the service (safe once desiredCount is drained):");
