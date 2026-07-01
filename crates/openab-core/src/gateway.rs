@@ -1169,6 +1169,8 @@ pub async fn process_gateway_event(
     // Phase 1: `is_dm = false` preserves today's behavior where gateway DMs are
     // evaluated against the channel allowlist like any other channel (the
     // `allow_dm` surface semantics arrive with the per-platform trust flip).
+    // TODO(phase-2): derive is_dm from the event/ChannelRef carrier so the
+    // `allow_dm` L2 surface can be enforced and tested for gateway platforms.
     let decision =
         ctx.router
             .gate_incoming(&event.platform, &event.channel.id, false, &event.sender.id);
