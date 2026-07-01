@@ -33,9 +33,10 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
    - Image version pinning and pull policy
    - ServiceAccount assignment (for IRSA)
    - Recreate strategy (RWO PVC constraint)
-3. **Freeze ConfigMap rendering** — existing template logic remains for backward compatibility but is no longer the recommended path. New config features do NOT require chart PRs.
-4. **Config lives externally** — users maintain `config.toml` in S3 (`s3://`), Cloudflare R2, GitHub Gist, or any HTTPS endpoint. Changes take effect on pod restart with zero Helm interaction.
-5. **Secrets live in AWS Secrets Manager** — referenced via `aws-sm://` in config.toml. No Kubernetes Secret objects required.
+3. **Introduce `configFile` as a zero-logic alternative** — users place a raw `config.toml` alongside their Helm values. Helm copies it verbatim into a ConfigMap via `{{ .Files.Get }}` — no template rendering, no conditionals, no enum validation. This gives the "full config visibility" benefit without requiring S3/IRSA setup.
+4. **Freeze legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is no longer the recommended path. New config features do NOT require chart PRs.
+5. **Config lives externally or inline** — users maintain `config.toml` either in S3 (`s3://`), HTTPS, or as a local file next to their Helm values. Changes take effect on pod restart (configUrl) or on `helm upgrade` (configFile).
+6. **Secrets live in AWS Secrets Manager** — referenced via `aws-sm://` in config.toml. No Kubernetes Secret objects required.
 
 ## 3. Target Architecture
 
@@ -56,7 +57,55 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
 └─────────────────────────────────────────────────────┘
 ```
 
-## 4. Minimal Helm Values (configUrl mode)
+## 4. Configuration Modes
+
+| Mode | Source | When to use | Helm interaction |
+|------|--------|-------------|-----------------|
+| **`configUrl`** | S3, HTTPS, R2 | Production — full GitOps, IAM audit | `helm install` once; config changes need only pod restart |
+| **`configFile`** | Local `config.toml` next to values.yaml | Dev / simple deployments — no external deps | `helm upgrade` picks up file changes |
+| **Legacy rendering** | `values.yaml` → template → ConfigMap | Existing users (frozen, not recommended) | Every config change = chart PR |
+
+### configUrl mode (recommended for production)
+
+```yaml
+agents:
+  kiro:
+    configUrl: "s3://my-bucket/openab/kiro/config.toml"
+    serviceAccountName: "openab"
+```
+
+Pod starts with `openab run -c s3://...` — config fetched at boot.
+
+### configFile mode (recommended for dev / simple deployments)
+
+```yaml
+agents:
+  kiro:
+    configFile: "configs/kiro/config.toml"  # relative to chart root
+    serviceAccountName: "openab"
+```
+
+Helm template logic is trivial — just a file copy, zero conditionals:
+
+```yaml
+{{- if .Values.agents.kiro.configFile }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-kiro-config
+data:
+  config.toml: |
+{{ .Files.Get .Values.agents.kiro.configFile | indent 4 }}
+{{- end }}
+```
+
+The user maintains a **real `config.toml`** — what they write is exactly what the agent reads. No values-to-template translation layer.
+
+### Legacy rendering (frozen)
+
+Existing `values.yaml` → `templates/configmap.yaml` rendering continues to work for backward compatibility. No new config features will be added to this path.
+
+## 5. Minimal Helm Values (configUrl mode)
 
 ```yaml
 image:
@@ -89,7 +138,7 @@ agents:
 | `readOnlyRootFilesystem` | Runtime binary tampering, malware persistence outside HOME |
 | HOME PVC (`persistence.enabled`) | Agent state loss on restart; provides durable workspace isolated from the immutable image |
 
-## 5. Boot Behavior
+## 6. Boot Behavior
 
 OpenAB uses **fail-closed** boot semantics when `configUrl` is set:
 
@@ -102,7 +151,7 @@ This design choice is acceptable because:
 - HTTPS endpoints (CDN-backed) have comparable availability.
 - Pod restart loops are visible via standard Kubernetes monitoring (CrashLoopBackOff alerts).
 
-## 6. Config Change Workflow
+## 7. Config Change Workflow
 
 The recommended workflow is **edit-and-restart**:
 
@@ -112,7 +161,7 @@ The recommended workflow is **edit-and-restart**:
 
 **Hot-reload is explicitly out of scope for v1.** A future ADR may propose watch/poll mode, but the current design prioritizes simplicity and predictability.
 
-## 7. Migration Path
+## 8. Migration Path
 
 For existing users on full Helm ConfigMap rendering:
 
@@ -180,7 +229,7 @@ kubectl logs -f deployment/kiro | head -20
 # Look for: "Config loaded from s3://..."
 ```
 
-## 8. Pre-deploy Validation
+## 9. Pre-deploy Validation
 
 Since Helm template-time checks (e.g. Discord ID precision, enum validation) no longer apply in `configUrl` mode, validation shifts to:
 
@@ -188,7 +237,7 @@ Since Helm template-time checks (e.g. Discord ID precision, enum validation) no 
 2. **`openab config validate`** (planned) — CLI command to validate a config.toml before uploading, suitable for CI pipelines.
 3. **S3 versioning** — enables instant rollback to last-known-good config if a bad config is deployed.
 
-## 9. Consequences
+## 10. Consequences
 
 ### Positive
 
@@ -210,7 +259,7 @@ Since Helm template-time checks (e.g. Discord ID precision, enum validation) no 
 - Helm is not deprecated — it remains the recommended way to enforce runtime security posture on Kubernetes. Its scope simply narrows.
 - Multi-agent deployments still benefit from Helm's `agents.<name>` loop for generating multiple Deployments/PVCs from a single release.
 
-## 10. References
+## 11. References
 
 - `docs/config-reference.md` — s3:// config source documentation
 - `docs/secrets-management.md` — aws-sm:// provider
