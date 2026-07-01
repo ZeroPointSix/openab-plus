@@ -182,13 +182,25 @@ async fn apply_ecs(
         .collect();
 
     // 4. Register task definition
-    let container = ContainerDefinition::builder()
+    let mut container = ContainerDefinition::builder()
         .name("openab")
         .image(&m.spec.image)
         .essential(true)
         .set_environment(Some(env_vars))
-        .set_secrets(if secrets.is_empty() { None } else { Some(secrets) })
-        .build();
+        .set_secrets(if secrets.is_empty() { None } else { Some(secrets) });
+
+    // Ingress needs the container port exposed so ECS can register an SRV record
+    // (Cloud Map + API Gateway learn the target port from it).
+    if let Some(ingress) = &m.spec.ingress {
+        container = container.port_mappings(
+            aws_sdk_ecs::types::PortMapping::builder()
+                .container_port(ingress.container_port as i32)
+                .protocol(aws_sdk_ecs::types::TransportProtocol::Tcp)
+                .build(),
+        );
+    }
+
+    let container = container.build();
 
     let task_def = ecs
         .register_task_definition()
@@ -294,11 +306,16 @@ async fn apply_ecs(
             .network_configuration(network_config);
 
         if let Some(cm) = &cloud_map {
-            create_req = create_req.service_registries(
-                aws_sdk_ecs::types::ServiceRegistry::builder()
-                    .registry_arn(&cm.registry_arn)
-                    .build(),
-            );
+            let mut registry = aws_sdk_ecs::types::ServiceRegistry::builder()
+                .registry_arn(&cm.registry_arn);
+            // SRV records require the container name + port so ECS registers the
+            // task's port alongside its IP.
+            if let Some(ingress) = &m.spec.ingress {
+                registry = registry
+                    .container_name("openab")
+                    .container_port(ingress.container_port as i32);
+            }
+            create_req = create_req.service_registries(registry.build());
         }
 
         create_req
@@ -329,7 +346,7 @@ async fn apply_ecs(
             ingress,
             &ecs_rt.networking.subnets,
             &ecs_rt.networking.security_groups,
-            &cm.dns_name,
+            &cm.registry_arn,
         )
         .await?;
         println!("  🔗 Webhook URL(s) for {}:", m.metadata.name);

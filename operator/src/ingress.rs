@@ -29,10 +29,9 @@ fn api_name(namespace: &str, name: &str) -> String {
 
 /// Result of Cloud Map reconciliation, consumed when creating the ECS service.
 pub struct CloudMapResult {
-    /// Cloud Map service ARN — used as the ECS service registry ARN.
+    /// Cloud Map service ARN — used both as the ECS service registry ARN and as
+    /// the API Gateway integration URI.
     pub registry_arn: String,
-    /// Private DNS name the task registers under, e.g. `oab-prod-mybot.oab`.
-    pub dns_name: String,
 }
 
 /// Step 1: ensure the Cloud Map private DNS namespace and service exist.
@@ -63,10 +62,7 @@ pub async fn ensure_cloud_map(
         eprintln!("  ✓ Created Cloud Map service: {dns_name}");
     }
 
-    Ok(CloudMapResult {
-        registry_arn,
-        dns_name,
-    })
+    Ok(CloudMapResult { registry_arn })
 }
 
 /// Step 2: ensure VPC Link, HTTP API, integration, routes, stage, and the
@@ -78,7 +74,7 @@ pub async fn ensure_gateway(
     ingress: &Ingress,
     subnets: &[String],
     security_groups: &[String],
-    dns_name: &str,
+    cloud_map_service_arn: &str,
 ) -> Result<Vec<String>> {
     let api = aws_sdk_apigatewayv2::Client::new(config);
     let ec2 = aws_sdk_ec2::Client::new(config);
@@ -93,9 +89,10 @@ pub async fn ensure_gateway(
     // ── HTTP API (one per bot — avoids cross-bot path collisions) ──────────
     let (api_id, api_endpoint) = ensure_api(&api, &api_name).await?;
 
-    // ── Integration: VPC Link → Cloud Map DNS name on the container port ────
-    let integration_uri = integration_uri(dns_name, ingress.container_port);
-    let integration_id = ensure_integration(&api, &api_id, &vpc_link_id, &integration_uri).await?;
+    // ── Integration: VPC Link → Cloud Map service (URI is the service ARN;
+    //    the port is resolved from the service's SRV record) ───────────────
+    let integration_id =
+        ensure_integration(&api, &api_id, &vpc_link_id, cloud_map_service_arn).await?;
 
     // ── One route per webhook path, all → the same integration ─────────────
     for path in &ingress.paths {
@@ -106,11 +103,6 @@ pub async fn ensure_gateway(
     ensure_stage(&api, &api_id).await?;
 
     Ok(webhook_urls(&api_endpoint, &ingress.paths))
-}
-
-/// Integration URI for the VPC Link → Cloud Map target on the container port.
-fn integration_uri(dns_name: &str, port: u16) -> String {
-    format!("http://{dns_name}:{port}")
 }
 
 /// API Gateway route key for a webhook path (POST only).
@@ -258,9 +250,12 @@ async fn ensure_service(
         }
     }
 
-    // Create with a single A record (TTL 60). SRV does NOT work for VPC Link.
+    // Create with an SRV record. For an HTTP API private integration whose URI
+    // is the Cloud Map service ARN, API Gateway learns the target port from the
+    // SRV record — a plain A record carries no port and does NOT work. ECS
+    // registers the task's IP + container port into this SRV record.
     let dns_record = DnsRecord::builder()
-        .r#type(RecordType::A)
+        .r#type(RecordType::Srv)
         .ttl(60)
         .build()
         .context("failed to build DNS record")?;
@@ -532,7 +527,7 @@ async fn ensure_integration(
         .create_integration()
         .api_id(api_id)
         .integration_type(IntegrationType::HttpProxy)
-        .integration_method("POST")
+        .integration_method("ANY")
         .integration_uri(integration_uri)
         .connection_type(ConnectionType::VpcLink)
         .connection_id(vpc_link_id)
@@ -616,18 +611,6 @@ async fn ensure_stage(api: &aws_sdk_apigatewayv2::Client, api_id: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn integration_uri_uses_dns_and_port() {
-        assert_eq!(
-            integration_uri("oab-prod-mybot.oab", 8080),
-            "http://oab-prod-mybot.oab:8080"
-        );
-        assert_eq!(
-            integration_uri("svc.ns", 3000),
-            "http://svc.ns:3000"
-        );
-    }
 
     #[test]
     fn route_key_is_post_prefixed() {

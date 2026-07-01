@@ -241,7 +241,7 @@ spec:
 
 On `apply` this reconciles (idempotently, reused by name):
 
-1. **Cloud Map** private DNS namespace + a per-service A record
+1. **Cloud Map** private DNS namespace + a per-service **SRV** record (carries the container port; a plain A record does not work as a VPC-Link integration target)
 2. **ECS service registry** wiring (attached at service creation)
 3. **VPC Link** (shared `oab-vpc-link`), waits until `AVAILABLE`
 4. **API Gateway HTTP API** (`oab-webhook-<ns>-<name>`, one per bot) + `HTTP_PROXY` integration over the VPC Link
