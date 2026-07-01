@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "CLI provisioner for OAB agents on ECS"
 
+# Standalone crate — not part of the repo-root [workspace]. Declaring an empty
+# workspace table stops cargo from attaching this crate to the root workspace
+# (which lists only crates/openab-core and crates/openab-gateway).
+[workspace]
+
 [[bin]]
 name = "oabctl"
 path = "src/main.rs"
