@@ -244,7 +244,7 @@ On `apply` this reconciles (idempotently, reused by name):
 1. **Cloud Map** private DNS namespace + a per-service A record
 2. **ECS service registry** wiring (attached at service creation)
 3. **VPC Link** (shared `oab-vpc-link`), waits until `AVAILABLE`
-4. **API Gateway HTTP API** (`oab-webhook`) + `HTTP_PROXY` integration over the VPC Link
+4. **API Gateway HTTP API** (`oab-webhook-<ns>-<name>`, one per bot) + `HTTP_PROXY` integration over the VPC Link
 5. One **route** per path + a `prod` auto-deploy **stage**
 6. A self-referencing **security-group** inbound rule on `containerPort`
 
@@ -272,11 +272,16 @@ LINE console:
 > reminder when it reuses an existing link.
 >
 > **Teardown:** `oabctl delete oabservice <name>` removes the bot's per-bot ingress
-> resources — its Cloud Map service and its API Gateway routes + integration — on a
-> best-effort basis (it never blocks service deletion). The **shared** `oab-vpc-link`,
-> `oab-webhook` HTTP API, and the security-group inbound rule are intentionally left
-> in place for other bots. If the Cloud Map service still has registered instances
-> (tasks not yet drained), delete prints a note to retry.
+> resources — its Cloud Map service and its own HTTP API (`oab-webhook-<ns>-<name>`,
+> which cascades its routes/integration/stage) — on a best-effort basis (it never
+> blocks service deletion). The **shared** `oab-vpc-link` and the security-group
+> inbound rule are intentionally left in place for other bots. If the Cloud Map
+> service still has registered instances (tasks not yet drained), delete prints a
+> note to retry.
+>
+> **Per-bot API, no path collisions:** each ingress bot gets its own HTTP API, so
+> two bots can both use `/webhook/telegram` without clashing — each has a distinct
+> `{api-id}` endpoint URL.
 
 ### OABFleet — batch deploy
 

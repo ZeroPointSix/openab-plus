@@ -19,8 +19,13 @@ use aws_sdk_apigatewayv2::types::{ConnectionType, IntegrationType, ProtocolType}
 use aws_sdk_servicediscovery::types::{DnsConfig, DnsRecord, RecordType};
 
 const VPC_LINK_NAME: &str = "oab-vpc-link";
-const API_NAME: &str = "oab-webhook";
 const STAGE_NAME: &str = "prod";
+
+/// Per-bot HTTP API name. Each ingress bot gets its own API so webhook paths
+/// (e.g. `/webhook/telegram`) can never collide between bots on a shared API.
+fn api_name(namespace: &str, name: &str) -> String {
+    format!("oab-webhook-{namespace}-{name}")
+}
 
 /// Result of Cloud Map reconciliation, consumed when creating the ECS service.
 pub struct CloudMapResult {
@@ -68,6 +73,8 @@ pub async fn ensure_cloud_map(
 /// security-group inbound rule. Returns the public webhook URLs (one per path).
 pub async fn ensure_gateway(
     config: &aws_config::SdkConfig,
+    namespace: &str,
+    name: &str,
     ingress: &Ingress,
     subnets: &[String],
     security_groups: &[String],
@@ -75,15 +82,16 @@ pub async fn ensure_gateway(
 ) -> Result<Vec<String>> {
     let api = aws_sdk_apigatewayv2::Client::new(config);
     let ec2 = aws_sdk_ec2::Client::new(config);
+    let api_name = api_name(namespace, name);
 
     // ── Security group inbound rule (self-referencing on the container port) ─
     ensure_sg_ingress(&ec2, security_groups, ingress.container_port).await?;
 
-    // ── VPC Link (shared, waits for AVAILABLE) ─────────────────────────────
+    // ── VPC Link (shared across all bots, waits for AVAILABLE) ─────────────
     let vpc_link_id = ensure_vpc_link(&api, subnets, security_groups).await?;
 
-    // ── HTTP API (shared) ──────────────────────────────────────────────────
-    let (api_id, api_endpoint) = ensure_api(&api).await?;
+    // ── HTTP API (one per bot — avoids cross-bot path collisions) ──────────
+    let (api_id, api_endpoint) = ensure_api(&api, &api_name).await?;
 
     // ── Integration: VPC Link → Cloud Map DNS name on the container port ────
     let integration_uri = integration_uri(dns_name, ingress.container_port);
@@ -121,78 +129,23 @@ fn webhook_urls(api_endpoint: &str, paths: &[String]) -> Vec<String> {
 }
 
 /// Best-effort teardown of the *per-bot* ingress resources for `namespace/name`:
-/// the API Gateway routes + integration for this bot and its Cloud Map service.
+/// the bot's own HTTP API (`oab-webhook-<ns>-<name>`, which cascades its routes,
+/// integration and stage) and its Cloud Map service.
 ///
-/// The shared resources (VPC Link `oab-vpc-link`, HTTP API `oab-webhook`, and the
-/// security-group inbound rule) are intentionally left in place since other bots
-/// may still use them. Safe to call for bots that never had ingress — it simply
-/// finds nothing and returns. Errors are logged, not propagated, so teardown
-/// never blocks service deletion.
-pub async fn teardown(
-    config: &aws_config::SdkConfig,
-    namespace: &str,
-    name: &str,
-) -> Result<()> {
+/// The shared resources (the `oab-vpc-link` VPC Link and the security-group
+/// inbound rule) are intentionally left in place since other bots may still use
+/// them. Safe to call for bots that never had ingress — it simply finds nothing
+/// and returns. Errors are logged, not propagated, so teardown never blocks
+/// service deletion.
+pub async fn teardown(config: &aws_config::SdkConfig, namespace: &str, name: &str) -> Result<()> {
     let service_name = format!("oab-{namespace}-{name}");
     let api = aws_sdk_apigatewayv2::Client::new(config);
 
-    // ── API Gateway: routes + integration for this bot (matched by DNS host) ─
-    if let Some((api_id, _)) = find_api(&api).await? {
-        let mut integration_id: Option<String> = None;
-        let mut next: Option<String> = None;
-        'find: loop {
-            let mut req = api.get_integrations().api_id(&api_id);
-            if let Some(t) = &next {
-                req = req.next_token(t);
-            }
-            let resp = req.send().await.context("failed to list integrations")?;
-            for i in resp.items() {
-                if i
-                    .integration_uri()
-                    .is_some_and(|u| u.contains(&format!("//{service_name}.")))
-                {
-                    integration_id = i.integration_id().map(|s| s.to_string());
-                    break 'find;
-                }
-            }
-            match resp.next_token() {
-                Some(t) => next = Some(t.to_string()),
-                None => break,
-            }
-        }
-
-        if let Some(integration_id) = integration_id {
-            let target = format!("integrations/{integration_id}");
-            let mut route_ids = Vec::new();
-            let mut next: Option<String> = None;
-            loop {
-                let mut req = api.get_routes().api_id(&api_id);
-                if let Some(t) = &next {
-                    req = req.next_token(t);
-                }
-                let resp = req.send().await.context("failed to list routes")?;
-                for r in resp.items() {
-                    if r.target() == Some(target.as_str()) {
-                        if let Some(rid) = r.route_id() {
-                            route_ids.push(rid.to_string());
-                        }
-                    }
-                }
-                match resp.next_token() {
-                    Some(t) => next = Some(t.to_string()),
-                    None => break,
-                }
-            }
-            for rid in route_ids {
-                api.delete_route().api_id(&api_id).route_id(&rid).send().await.ok();
-            }
-            api.delete_integration()
-                .api_id(&api_id)
-                .integration_id(&integration_id)
-                .send()
-                .await
-                .ok();
-            eprintln!("  ✓ Removed API Gateway routes + integration for {name}");
+    // ── API Gateway: delete the whole per-bot API (cascades routes/integration/stage) ─
+    if let Some((api_id, _)) = find_api(&api, &api_name(namespace, name)).await? {
+        match api.delete_api().api_id(&api_id).send().await {
+            Ok(_) => eprintln!("  ✓ Deleted HTTP API: {}", api_name(namespace, name)),
+            Err(e) => eprintln!("  ⚠ Failed to delete HTTP API {api_id}: {e}"),
         }
     }
 
@@ -419,7 +372,6 @@ async fn ensure_vpc_link(
     use aws_sdk_apigatewayv2::types::VpcLinkStatus;
 
     // Reuse an existing, non-failed VPC Link with our name.
-    // Reuse an existing, non-failed VPC Link with our name.
     let mut found: Option<(String, Option<VpcLinkStatus>)> = None;
     let mut next: Option<String> = None;
     'outer: loop {
@@ -497,15 +449,18 @@ async fn ensure_vpc_link(
 
 // ─── HTTP API ───────────────────────────────────────────────────────────────
 
-async fn ensure_api(api: &aws_sdk_apigatewayv2::Client) -> Result<(String, String)> {
-    if let Some((id, endpoint)) = find_api(api).await? {
-        eprintln!("  ✓ HTTP API exists: {API_NAME} ({id})");
+async fn ensure_api(
+    api: &aws_sdk_apigatewayv2::Client,
+    api_name: &str,
+) -> Result<(String, String)> {
+    if let Some((id, endpoint)) = find_api(api, api_name).await? {
+        eprintln!("  ✓ HTTP API exists: {api_name} ({id})");
         return Ok((id, endpoint));
     }
-    eprintln!("  ⊕ Creating HTTP API: {API_NAME}");
+    eprintln!("  ⊕ Creating HTTP API: {api_name}");
     let out = api
         .create_api()
-        .name(API_NAME)
+        .name(api_name)
         .protocol_type(ProtocolType::Http)
         .send()
         .await
@@ -515,8 +470,11 @@ async fn ensure_api(api: &aws_sdk_apigatewayv2::Client) -> Result<(String, Strin
     Ok((id, endpoint))
 }
 
-/// Find the shared `oab-webhook` HTTP API, returning `(api_id, api_endpoint)`.
-async fn find_api(api: &aws_sdk_apigatewayv2::Client) -> Result<Option<(String, String)>> {
+/// Find an HTTP API by name, returning `(api_id, api_endpoint)`.
+async fn find_api(
+    api: &aws_sdk_apigatewayv2::Client,
+    api_name: &str,
+) -> Result<Option<(String, String)>> {
     // apigatewayv2 has no smithy paginator for GetApis; page manually.
     let mut next: Option<String> = None;
     loop {
@@ -526,7 +484,7 @@ async fn find_api(api: &aws_sdk_apigatewayv2::Client) -> Result<Option<(String, 
         }
         let resp = req.send().await.context("failed to list APIs")?;
         for a in resp.items() {
-            if a.name() == Some(API_NAME) {
+            if a.name() == Some(api_name) {
                 let id = a.api_id().context("api missing id")?.to_string();
                 let endpoint = a.api_endpoint().unwrap_or_default().to_string();
                 return Ok(Some((id, endpoint)));
@@ -674,6 +632,12 @@ mod tests {
     fn route_key_is_post_prefixed() {
         assert_eq!(route_key("/webhook/telegram"), "POST /webhook/telegram");
         assert_eq!(route_key("/webhook/line"), "POST /webhook/line");
+    }
+
+    #[test]
+    fn api_name_is_per_bot() {
+        assert_eq!(api_name("prod", "mybot"), "oab-webhook-prod-mybot");
+        assert_ne!(api_name("prod", "a"), api_name("prod", "b"));
     }
 
     #[test]

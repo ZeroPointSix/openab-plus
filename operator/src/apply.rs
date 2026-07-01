@@ -324,6 +324,8 @@ async fn apply_ecs(
         eprintln!("  🌐 Reconciling ingress (VPC Link + API Gateway)...");
         let urls = crate::ingress::ensure_gateway(
             config,
+            &m.metadata.namespace,
+            &m.metadata.name,
             ingress,
             &ecs_rt.networking.subnets,
             &ecs_rt.networking.security_groups,
