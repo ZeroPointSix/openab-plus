@@ -1018,6 +1018,7 @@ impl EventHandler for Handler {
 
         let dispatcher = self.dispatcher.clone();
         let stt_cfg = self.stt_config.clone();
+        let gate_router = self.router.clone();
 
         tokio::spawn(async move {
             // Best-effort echo before the agent reply so the user can verify STT.
@@ -1032,6 +1033,27 @@ impl EventHandler for Handler {
 
             let sender_id = sender.sender_id.clone();
             let sender_name = sender.sender_name.clone();
+
+            // Shared ingress trust gate (L3 identity). Redundant-but-matching with
+            // Discord's own user check that already ran pre-dispatch, so it cannot
+            // deny anything already admitted (non-regressive). L2 (channel/thread/DM)
+            // stays in the adapter for Discord — its registry entry is L2-open.
+            // Phase 1c makes this authoritative and removes the scattered check.
+            let decision = gate_router.gate_incoming(
+                "discord",
+                &thread_channel.channel_id,
+                false,
+                &sender_id,
+            );
+            if !decision.is_allowed() {
+                tracing::info!(
+                    sender = %sender_id,
+                    channel = %thread_channel.channel_id,
+                    ?decision,
+                    "discord message denied by trust gate"
+                );
+                return;
+            }
             let sender_json = serde_json::to_string(&sender).unwrap();
             let thread_key = dispatcher.key("discord", &thread_channel.channel_id, &sender_id);
             let estimated_tokens = crate::dispatch::estimate_tokens(&prompt, &extra_blocks);
