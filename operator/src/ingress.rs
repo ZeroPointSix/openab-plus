@@ -329,6 +329,7 @@ async fn ensure_sg_ingress(
     security_groups: &[String],
     port: u16,
 ) -> Result<()> {
+    use aws_sdk_ec2::error::ProvideErrorMetadata;
     use aws_sdk_ec2::types::{IpPermission, UserIdGroupPair};
     for sg in security_groups {
         // Self-referencing rule: VPC Link ENIs live in this SG, so allowing the
@@ -348,14 +349,14 @@ async fn ensure_sg_ingress(
             .await
         {
             Ok(_) => eprintln!("  ✓ SG {sg}: allowed self :{port} (VPC Link → task)"),
+            // EC2 returns InvalidPermission.Duplicate when the rule already exists.
+            // Match the typed error code, not the Debug-rendered message text.
+            Err(e) if e.code() == Some("InvalidPermission.Duplicate") => {
+                eprintln!("  ✓ SG {sg}: inbound :{port} rule already present");
+            }
             Err(e) => {
-                let msg = format!("{e:?}");
-                if msg.contains("Duplicate") || msg.contains("already exists") {
-                    eprintln!("  ✓ SG {sg}: inbound :{port} rule already present");
-                } else {
-                    return Err(anyhow::anyhow!(e))
-                        .with_context(|| format!("failed to authorize ingress on {sg}"));
-                }
+                return Err(anyhow::anyhow!(e))
+                    .with_context(|| format!("failed to authorize ingress on {sg}"));
             }
         }
     }
