@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-07-01
 - **Author:** @chaodu-agent
+- **Implementation:** `configToml` is implemented in the companion PR #1276 (open, not yet merged as of this writing). This ADR documents the design rationale that #1276 implements; merge order is #1276 → this ADR → #1277 (legacy path removal).
 
 ---
 
@@ -122,7 +123,7 @@ Pod starts with `openab run -c s3://...` — config fetched at boot. The exact s
 
 ### configToml mode (secondary — Kubernetes-only convenience for local iteration)
 
-`configToml` (implemented in #1276) accepts a raw TOML string and mounts it verbatim into the ConfigMap — no template rendering, no conditionals, no enum validation. It supports two equivalent usage patterns, both backed by the same field:
+`configToml` (proposed and implemented in the companion PR #1276, which this ADR's decision motivates) accepts a raw TOML string and mounts it verbatim into the ConfigMap — no template rendering, no conditionals, no enum validation. It supports two equivalent usage patterns, both backed by the same field:
 
 **Inline** — paste the TOML directly into `values.yaml`:
 
