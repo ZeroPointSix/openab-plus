@@ -35,9 +35,9 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
    - Image version pinning and pull policy
    - ServiceAccount assignment (for IRSA)
    - Recreate strategy (RWO PVC constraint)
-3. **`configFile` / `configToml` are secondary, dev-oriented, Kubernetes-only conveniences** — not a peer of `configUrl`. Users place or paste a raw `config.toml` alongside their Helm values and Helm copies it verbatim into a ConfigMap — no template rendering, no conditionals, no enum validation. This is useful for local iteration with no external dependencies, but it is chart-coupled and does not extend to ECS/Zeabur/AgentCore. It should be presented as "the low-barrier option for people not ready to stand up external config," not as an equally-weighted alternative to `configUrl`.
-4. **Deprecate legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is **no longer maintained**. No bug fixes, no new config features, no chart PRs for this path. Users on legacy rendering are encouraged to migrate to `configUrl` (preferred) or `configFile`/`configToml` (Kubernetes-only fallback).
-5. **Config lives externally by default** — users maintain `config.toml` in S3 (`s3://`) or HTTPS. This is what makes config **shared and hot-swappable across an entire fleet**: N agents/bots pointed at the same URL pick up a change on their next restart, with no chart, no CI/CD, and no Kubernetes required. Local/inline modes (`configFile`, `configToml`) exist only as a fallback for users who haven't set up external storage yet.
+3. **`configToml` is a secondary, dev-oriented, Kubernetes-only convenience** — not a peer of `configUrl`. Users paste a raw TOML string into `values.yaml`, or load an external `config.toml` file as-is via `helm --set-file agents.<name>.configToml=./config.toml`. Helm mounts the content verbatim into a ConfigMap — no template rendering, no conditionals, no enum validation. This is useful for local iteration with no external dependencies, but it is chart-coupled and does not extend to ECS/Zeabur/AgentCore. It should be presented as "the low-barrier option for people not ready to stand up external config," not as an equally-weighted alternative to `configUrl`.
+4. **Deprecate legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is **no longer maintained**. No bug fixes, no new config features, no chart PRs for this path. Users on legacy rendering are encouraged to migrate to `configUrl` (preferred) or `configToml` (Kubernetes-only fallback).
+5. **Config lives externally by default** — users maintain `config.toml` in S3 (`s3://`) or HTTPS. This is what makes config **shared and hot-swappable across an entire fleet**: N agents/bots pointed at the same URL pick up a change on their next restart, with no chart, no CI/CD, and no Kubernetes required. `configToml` (inline or `--set-file`) exists only as a fallback for users who haven't set up external storage yet.
 6. **Secrets live in AWS Secrets Manager** — referenced via `aws-sm://` in config.toml. No Kubernetes Secret objects required. This also has a second-order effect worth calling out: once credentials are fully out of `config.toml`, the file itself becomes safe to **share or publish**. A `configUrl` pointing at a public/shared config lets any user reproduce someone else's exact agent behavior instantly — the config becomes a shareable artifact, closer to a public gist than a private deployment secret.
 
 ## 3. Target Architecture
@@ -74,7 +74,7 @@ OpenAB currently ships deployment tooling for Kubernetes (Helm/Operator), ECS Fa
 | Zeabur | Same `-c` flag in service start command | No |
 | AgentCore Runtime | Same `-c` flag passed to the runtime container | No |
 
-Users who have never touched Kubernetes should be able to run OpenAB on ECS, Zeabur, or AgentCore with the exact same config workflow as a Kubernetes user. `configFile` and legacy rendering cannot make this claim — they are Helm chart features and only exist for the Kubernetes path. They should be documented as **Kubernetes-specific conveniences**, not as peers of `configUrl` in a platform-neutral comparison.
+Users who have never touched Kubernetes should be able to run OpenAB on ECS, Zeabur, or AgentCore with the exact same config workflow as a Kubernetes user. `configToml` and legacy rendering cannot make this claim — they are Helm chart features and only exist for the Kubernetes path. They should be documented as **Kubernetes-specific conveniences**, not as peers of `configUrl` in a platform-neutral comparison.
 
 ### Fleet-scale 1:N shared config with hot-reload-by-restart
 
@@ -99,14 +99,14 @@ Because secrets are resolved via `aws-sm://` (or other exec providers) rather th
 
 ### Not a Kubernetes-only concern
 
-Chart maintenance cost is a real driver for this ADR, but it is a secondary one. The primary driver is that Kubernetes should not be the platform that dictates config architecture for users who are on ECS, Zeabur, or AgentCore and have no reason to adopt Helm. `configUrl` gives every platform — K8s included — the same low-friction, fleet-shareable, hot-restartable config workflow. Kubernetes users additionally get `configFile`/`configToml` as a Helm-specific convenience, but that convenience should never be presented as equal in importance to `configUrl`.
+Chart maintenance cost is a real driver for this ADR, but it is a secondary one. The primary driver is that Kubernetes should not be the platform that dictates config architecture for users who are on ECS, Zeabur, or AgentCore and have no reason to adopt Helm. `configUrl` gives every platform — K8s included — the same low-friction, fleet-shareable, hot-restartable config workflow. Kubernetes users additionally get `configToml` (inline or `--set-file`) as a Helm-specific convenience, but that convenience should never be presented as equal in importance to `configUrl`.
 
 ## 4. Configuration Modes
 
 | Mode | Source | When to use | Platform scope | Helm interaction |
 |------|--------|-------------|-----------------|-------------------|
 | **`configUrl`** (primary) | S3, HTTPS, R2 | **Default recommendation for all deployments** — production, fleet-scale, cross-platform, shareable configs | Kubernetes, ECS, Zeabur, AgentCore — identical workflow everywhere | `helm install`/equivalent once; config changes need only a restart, no redeploy |
-| **`configFile`/`configToml`** (secondary) | Local `config.toml` or inline TOML string in values.yaml | Local iteration with no external deps yet — a stepping stone, not an end state | Kubernetes (Helm) only | `helm upgrade` picks up file/value changes |
+| **`configToml`** (secondary) | Inline TOML string in values.yaml, or an external `config.toml` loaded as-is via `--set-file` | Local iteration with no external deps yet — a stepping stone, not an end state | Kubernetes (Helm) only | `helm upgrade` picks up value/file changes |
 | **Legacy rendering** ⚠️ | `values.yaml` → template → ConfigMap | **Deprecated — not maintained** | Kubernetes (Helm) only | Every config change = chart PR |
 
 ### configUrl mode (primary — recommended for all deployments, all platforms)
@@ -120,36 +120,39 @@ agents:
 
 Pod starts with `openab run -c s3://...` — config fetched at boot. The exact same `-c s3://...` flag is what `ecsctl` puts in an ECS task definition and what a Zeabur or AgentCore service start command uses — no Kubernetes required to get this workflow.
 
-### configFile / configToml mode (secondary — Kubernetes-only convenience for local iteration)
+### configToml mode (secondary — Kubernetes-only convenience for local iteration)
+
+`configToml` (implemented in #1276) accepts a raw TOML string and mounts it verbatim into the ConfigMap — no template rendering, no conditionals, no enum validation. It supports two equivalent usage patterns, both backed by the same field:
+
+**Inline** — paste the TOML directly into `values.yaml`:
 
 ```yaml
 agents:
   kiro:
-    configFile: "configs/kiro/config.toml"  # relative to chart root
+    configToml: |
+      [discord]
+      bot_token = "${DISCORD_BOT_TOKEN}"
+      allow_all_channels = true
     serviceAccountName: "openab"
 ```
 
-Helm template logic is trivial — just a file copy, zero conditionals:
+**As-is from a standalone file** — keep `config.toml` as a real, standalone file (full IDE syntax highlighting and TOML schema validation) and load it verbatim at deploy time with Helm's built-in `--set-file`:
 
-```yaml
-{{- if .Values.agents.kiro.configFile }}
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ .Release.Name }}-kiro-config
-data:
-  config.toml: |
-{{ .Files.Get .Values.agents.kiro.configFile | indent 4 }}
-{{- end }}
+```bash
+helm upgrade kiro ./charts/openab \
+  --set-file agents.kiro.configToml=./my-config.toml \
+  -f values.yaml
 ```
 
-The user maintains a **real `config.toml`** — what they write is exactly what the agent reads. No values-to-template translation layer.
+`--set-file` reads the file's raw content and assigns it to `agents.kiro.configToml` as a string, merging the same way `--set` does. This gives WYSIWYG, standalone-file editing **without any chart changes** — a dedicated `configFile` field (with `.Files.Get`) is not needed, since `--set-file` already covers the "edit a real file, load it as-is" use case using the existing `configToml` field. The tradeoff versus `configUrl` is that this path is still Kubernetes/Helm-only and requires a `helm upgrade` (not just a restart) to pick up changes.
+
+The user maintains a **real `config.toml`** either way — what they write is exactly what the agent reads. No values-to-template translation layer.
 
 ### Legacy rendering (⚠️ deprecated — unmaintained)
 
 Existing `values.yaml` → `templates/configmap.yaml` rendering continues to work for backward compatibility but is **no longer maintained**. It will not receive bug fixes, new config features, or support for new platforms.
 
-> **Community notice:** We recommend all users migrate to `configUrl` — the platform-agnostic, fleet-shareable path that works identically on Kubernetes, ECS, Zeabur, and AgentCore. `configFile`/`configToml` remain available as a Kubernetes-only convenience for local iteration. The legacy `values.yaml` ConfigMap rendering path will not be updated going forward. All non-legacy paths give you full visibility into your actual config.toml — no more guessing what Helm templates produce.
+> **Community notice:** We recommend all users migrate to `configUrl` — the platform-agnostic, fleet-shareable path that works identically on Kubernetes, ECS, Zeabur, and AgentCore. `configToml` (inline or `--set-file`) remains available as a Kubernetes-only convenience for local iteration. The legacy `values.yaml` ConfigMap rendering path will not be updated going forward. All non-legacy paths give you full visibility into your actual config.toml — no more guessing what Helm templates produce.
 
 ## 5. Minimal Helm Values (configUrl mode)
 
