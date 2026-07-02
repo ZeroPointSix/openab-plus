@@ -23,20 +23,22 @@ This leaves the Helm chart's ConfigMap rendering as a **maintenance burden with 
 
 Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on the final config state directly, making the Helm rendering layer an outlier in the architecture.
 
+**This ADR is not only about reducing chart maintenance.** OpenAB is a multi-platform project — Kubernetes (via Helm/Operator), ECS Fargate (via `ecsctl`), Zeabur, and AgentCore Runtime are all first-class deployment targets. Kubernetes must not be treated as the "default" platform that dictates config architecture for everyone else. `configUrl` is the one config path that works identically across **all** of them, because it lives entirely in the OpenAB process (`openab run -c <url>`), not in any platform-specific rendering layer. That portability — not just chart LOC reduction — is the primary reason `configUrl` is the recommended path.
+
 ## 2. Decision
 
-1. **Recommend `configUrl` as the primary configuration path** for all new deployments.
-2. **Helm chart retains responsibility only for runtime posture** — this is where Helm continues to deliver real value that raw config cannot:
+1. **`configUrl` is the primary, platform-agnostic configuration path for all deployment targets** — Kubernetes, ECS Fargate, Zeabur, and AgentCore Runtime alike. It requires no Helm chart, no ConfigMap, no platform-specific rendering — only a URL (`s3://`, `https://`) passed to the process at boot. This is the path every other configuration mode is judged against.
+2. **Helm chart retains responsibility only for runtime posture** on Kubernetes — this is where Helm continues to deliver real value that raw config cannot:
    - **Non-root execution** — enforce `runAsUser`/`runAsGroup` so the container never runs as root, reducing blast radius of container escapes.
    - **Read-only root filesystem** — `readOnlyRootFilesystem: true` with `drop: ALL` capabilities ensures the container cannot be tampered with at runtime; only the HOME PVC is writable.
    - **HOME PVC persistence** — dedicated PersistentVolumeClaim mounted at the agent's `$HOME`, providing durable workspace (git repos, session state, caches) that survives pod restarts.
    - Image version pinning and pull policy
    - ServiceAccount assignment (for IRSA)
    - Recreate strategy (RWO PVC constraint)
-3. **Introduce `configFile` as a zero-logic alternative** — users place a raw `config.toml` alongside their Helm values. Helm copies it verbatim into a ConfigMap via `{{ .Files.Get }}` — no template rendering, no conditionals, no enum validation. This gives the "full config visibility" benefit without requiring S3/IRSA setup.
-4. **Deprecate legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is **no longer maintained**. No bug fixes, no new config features, no chart PRs for this path. Users on legacy rendering are encouraged to migrate to `configUrl` or `configFile`.
-5. **Config lives externally or inline** — users maintain `config.toml` either in S3 (`s3://`), HTTPS, or as a local file next to their Helm values. Changes take effect on pod restart (configUrl) or on `helm upgrade` (configFile).
-6. **Secrets live in AWS Secrets Manager** — referenced via `aws-sm://` in config.toml. No Kubernetes Secret objects required.
+3. **`configFile` / `configToml` are secondary, dev-oriented, Kubernetes-only conveniences** — not a peer of `configUrl`. Users place or paste a raw `config.toml` alongside their Helm values and Helm copies it verbatim into a ConfigMap — no template rendering, no conditionals, no enum validation. This is useful for local iteration with no external dependencies, but it is chart-coupled and does not extend to ECS/Zeabur/AgentCore. It should be presented as "the low-barrier option for people not ready to stand up external config," not as an equally-weighted alternative to `configUrl`.
+4. **Deprecate legacy ConfigMap rendering** — existing template logic remains for backward compatibility but is **no longer maintained**. No bug fixes, no new config features, no chart PRs for this path. Users on legacy rendering are encouraged to migrate to `configUrl` (preferred) or `configFile`/`configToml` (Kubernetes-only fallback).
+5. **Config lives externally by default** — users maintain `config.toml` in S3 (`s3://`) or HTTPS. This is what makes config **shared and hot-swappable across an entire fleet**: N agents/bots pointed at the same URL pick up a change on their next restart, with no chart, no CI/CD, and no Kubernetes required. Local/inline modes (`configFile`, `configToml`) exist only as a fallback for users who haven't set up external storage yet.
+6. **Secrets live in AWS Secrets Manager** — referenced via `aws-sm://` in config.toml. No Kubernetes Secret objects required. This also has a second-order effect worth calling out: once credentials are fully out of `config.toml`, the file itself becomes safe to **share or publish**. A `configUrl` pointing at a public/shared config lets any user reproduce someone else's exact agent behavior instantly — the config becomes a shareable artifact, closer to a public gist than a private deployment secret.
 
 ## 3. Target Architecture
 
@@ -57,15 +59,57 @@ Meanwhile, declarative tooling (`ecsctl`, `oabctl`, Operator CRDs) operates on t
 └─────────────────────────────────────────────────────┘
 ```
 
+## 3a. Why `configUrl` Is the Primary Path, Not Just "the production option"
+
+This section elevates `configUrl` beyond a Kubernetes production tier — it is the config path that makes OpenAB deployable identically on any platform, and it unlocks fleet-scale workflows the other modes cannot.
+
+### Platform parity — Kubernetes is not the default
+
+OpenAB currently ships deployment tooling for Kubernetes (Helm/Operator), ECS Fargate (`ecsctl`), Zeabur, and AgentCore Runtime. Only `configUrl` works the same way on all four:
+
+| Platform | How it consumes `configUrl` | Needs Helm/ConfigMap? |
+|----------|------------------------------|------------------------|
+| Kubernetes | `args: ["openab", "run", "-c", "s3://..."]` in pod spec | No |
+| ECS Fargate (`ecsctl`) | Same `-c` flag in task definition container command | No |
+| Zeabur | Same `-c` flag in service start command | No |
+| AgentCore Runtime | Same `-c` flag passed to the runtime container | No |
+
+Users who have never touched Kubernetes should be able to run OpenAB on ECS, Zeabur, or AgentCore with the exact same config workflow as a Kubernetes user. `configFile` and legacy rendering cannot make this claim — they are Helm chart features and only exist for the Kubernetes path. They should be documented as **Kubernetes-specific conveniences**, not as peers of `configUrl` in a platform-neutral comparison.
+
+### Fleet-scale 1:N shared config with hot-reload-by-restart
+
+Because `configUrl` is just a URL fetched at process boot, an operator running many agents/bots (N) can point **all of them at the same `s3://` or `https://` config**. Updating that one object and restarting the fleet — `kubectl rollout restart`, an ECS service force-deploy, or a Zeabur/AgentCore restart — propagates the change to every instance in seconds, with no chart change, no CI/CD pipeline, and no per-instance edit:
+
+```
+                 ┌─────────────────────────────┐
+                 │ s3://bucket/shared/config.toml │
+                 └──────────────┬──────────────┘
+        ┌────────────────┬──────┴──────┬────────────────┐
+        ▼                ▼             ▼                ▼
+   agent-1 (K8s)   agent-2 (ECS)  agent-3 (Zeabur)  agent-N (AgentCore)
+```
+
+This is the same mental model as editing a GitHub gist in place, or `gh gist edit` / `aws s3 cp` followed by a restart — no build step, no deploy pipeline, edit-and-go. For operators iterating quickly across dozens of bots, this is materially faster than a chart-per-agent model.
+
+This pattern extends beyond the top-level config: as `config.toml` becomes more modular (e.g. `pre_boot`, `pre_shutdown` hooks), those sections can themselves point to a shared external endpoint. Changing behavior for an entire fleet of bots becomes "edit one URL, restart" rather than "edit N config files" or "ship N chart upgrades."
+
+### Config as a shareable, credential-free artifact
+
+Because secrets are resolved via `aws-sm://` (or other exec providers) rather than embedded in `config.toml`, the file itself no longer needs to be treated as sensitive. A `configUrl` can be made public and shared directly — anyone pointing their own deployment at that URL reproduces the exact same agent behavior. This turns `config.toml` into a distributable "recipe," not just a private deployment artifact, and is a capability unique to the externalized-config model.
+
+### Not a Kubernetes-only concern
+
+Chart maintenance cost is a real driver for this ADR, but it is a secondary one. The primary driver is that Kubernetes should not be the platform that dictates config architecture for users who are on ECS, Zeabur, or AgentCore and have no reason to adopt Helm. `configUrl` gives every platform — K8s included — the same low-friction, fleet-shareable, hot-restartable config workflow. Kubernetes users additionally get `configFile`/`configToml` as a Helm-specific convenience, but that convenience should never be presented as equal in importance to `configUrl`.
+
 ## 4. Configuration Modes
 
-| Mode | Source | When to use | Helm interaction |
-|------|--------|-------------|-----------------|
-| **`configUrl`** | S3, HTTPS, R2 | Production — full GitOps, IAM audit | `helm install` once; config changes need only pod restart |
-| **`configFile`** | Local `config.toml` next to values.yaml | Dev / simple deployments — no external deps | `helm upgrade` picks up file changes |
-| **Legacy rendering** ⚠️ | `values.yaml` → template → ConfigMap | **Deprecated — not maintained** | Every config change = chart PR |
+| Mode | Source | When to use | Platform scope | Helm interaction |
+|------|--------|-------------|-----------------|-------------------|
+| **`configUrl`** (primary) | S3, HTTPS, R2 | **Default recommendation for all deployments** — production, fleet-scale, cross-platform, shareable configs | Kubernetes, ECS, Zeabur, AgentCore — identical workflow everywhere | `helm install`/equivalent once; config changes need only a restart, no redeploy |
+| **`configFile`/`configToml`** (secondary) | Local `config.toml` or inline TOML string in values.yaml | Local iteration with no external deps yet — a stepping stone, not an end state | Kubernetes (Helm) only | `helm upgrade` picks up file/value changes |
+| **Legacy rendering** ⚠️ | `values.yaml` → template → ConfigMap | **Deprecated — not maintained** | Kubernetes (Helm) only | Every config change = chart PR |
 
-### configUrl mode (recommended for production)
+### configUrl mode (primary — recommended for all deployments, all platforms)
 
 ```yaml
 agents:
@@ -74,9 +118,9 @@ agents:
     serviceAccountName: "openab"
 ```
 
-Pod starts with `openab run -c s3://...` — config fetched at boot.
+Pod starts with `openab run -c s3://...` — config fetched at boot. The exact same `-c s3://...` flag is what `ecsctl` puts in an ECS task definition and what a Zeabur or AgentCore service start command uses — no Kubernetes required to get this workflow.
 
-### configFile mode (recommended for dev / simple deployments)
+### configFile / configToml mode (secondary — Kubernetes-only convenience for local iteration)
 
 ```yaml
 agents:
@@ -105,7 +149,7 @@ The user maintains a **real `config.toml`** — what they write is exactly what 
 
 Existing `values.yaml` → `templates/configmap.yaml` rendering continues to work for backward compatibility but is **no longer maintained**. It will not receive bug fixes, new config features, or support for new platforms.
 
-> **Community notice:** We recommend all users migrate to `configUrl` (production) or `configFile` (dev/simple). The legacy `values.yaml` ConfigMap rendering path will not be updated going forward. Both new paths give you full visibility into your actual config.toml — no more guessing what Helm templates produce.
+> **Community notice:** We recommend all users migrate to `configUrl` — the platform-agnostic, fleet-shareable path that works identically on Kubernetes, ECS, Zeabur, and AgentCore. `configFile`/`configToml` remain available as a Kubernetes-only convenience for local iteration. The legacy `values.yaml` ConfigMap rendering path will not be updated going forward. All non-legacy paths give you full visibility into your actual config.toml — no more guessing what Helm templates produce.
 
 ## 5. Minimal Helm Values (configUrl mode)
 
@@ -243,9 +287,12 @@ Since Helm template-time checks (e.g. Discord ID precision, enum validation) no 
 
 ### Positive
 
+- **Platform parity** — `configUrl` gives Kubernetes, ECS, Zeabur, and AgentCore users the identical config workflow; no platform is forced to adopt Helm to get a good experience.
+- **Fleet-scale hot-reload-by-restart** — N agents sharing one `configUrl` pick up a change fleet-wide in seconds by restarting, with no chart change and no CI/CD pipeline required.
+- **Shareable, credential-free config** — with secrets resolved via `aws-sm://`, a `config.toml` (and its `configUrl`) can be published or shared so others reproduce the exact same agent behavior instantly.
 - **Zero chart maintenance for new config features** — schema changes never propagate to Helm.
 - **Users see the full config** — no mental model of values → template → ConfigMap required.
-- **Edit-and-restart workflow** — change config in S3/gist, restart pod, done.
+- **Edit-and-restart workflow** — change config in S3/gist, restart pod (or ECS/Zeabur/AgentCore equivalent), done.
 - **Aligned with declarative tooling** — ecsctl, oabctl, and Operator all operate on final config state.
 - **Reduced issue surface** — eliminates "my Helm values don't render correctly" class of bugs.
 - **S3 availability** — `s3://` path gives 99.99% SLA, private access via IAM, versioning, and CloudTrail audit.
@@ -258,7 +305,7 @@ Since Helm template-time checks (e.g. Discord ID precision, enum validation) no 
 
 ### Neutral
 
-- Helm is not deprecated — it remains the recommended way to enforce runtime security posture on Kubernetes. Its scope simply narrows.
+- Helm is not deprecated — it remains the recommended way to enforce runtime security posture on Kubernetes. Its scope simply narrows, and it is one of several platform integrations (alongside ecsctl, Zeabur, AgentCore) rather than the architecture's default assumption.
 - Multi-agent deployments still benefit from Helm's `agents.<name>` loop for generating multiple Deployments/PVCs from a single release.
 
 ## 11. References
