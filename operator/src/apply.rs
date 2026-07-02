@@ -60,30 +60,12 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
         }
     }
 
-    let mut needs_recreate: Vec<String> = Vec::new();
     for m in &manifests {
         println!("  Applying {} (ECS)...", m.metadata.name);
-        if apply_ecs(&ecs, &s3, aws_config, m, wait).await? {
-            needs_recreate.push(format!("{}/{}", m.metadata.namespace, m.metadata.name));
-        }
+        apply_ecs(&ecs, &s3, aws_config, m, wait).await?;
     }
 
     println!("\n{} service(s) applied.", manifests.len());
-
-    // Surface the create-only service-discovery limitation as a consolidated
-    // summary so it isn't lost in mid-run output (e.g. in non-interactive CI).
-    if !needs_recreate.is_empty() {
-        eprintln!(
-            "\n⚠ {} service(s) have ingress configured but were created WITHOUT service\n  discovery, so webhook traffic will NOT reach them until recreated:",
-            needs_recreate.len()
-        );
-        for id in &needs_recreate {
-            eprintln!("    - {id}");
-        }
-        eprintln!(
-            "  ECS service registries can only be set at creation time. For each, run:\n    oabctl delete oabservice <name> --cluster oab --namespace <ns> && oabctl apply -f <manifest>"
-        );
-    }
     Ok(())
 }
 
@@ -135,7 +117,7 @@ async fn apply_ecs(
     config: &aws_config::SdkConfig,
     m: &OABServiceManifest,
     wait: bool,
-) -> Result<bool> {
+) -> Result<()> {
     let ecs_rt = match &m.spec.runtime {
         Runtime::Ecs(rt) => rt,
         _ => unreachable!(),
@@ -277,8 +259,11 @@ async fn apply_ecs(
         .awsvpc_configuration(vpc_config)
         .build();
 
-    // Ingress: ensure Cloud Map BEFORE the service exists-check, because ECS
-    // service registries can only be attached at service *creation* time.
+    // Ingress: ensure Cloud Map BEFORE the service exists-check, so the
+    // registry ARN is ready whether the ECS service needs to be created (via
+    // `create_service`) or updated to attach/replace service discovery (via
+    // `update_service` — ECS has supported changing `serviceRegistries` on an
+    // existing service since March 2022; no delete-and-recreate is needed).
     let cloud_map = if let Some(ingress) = &m.spec.ingress {
         eprintln!("  🌐 Reconciling ingress (Cloud Map)...");
         Some(crate::ingress::ensure_cloud_map(config, m, ingress).await?)
@@ -314,47 +299,57 @@ async fn apply_ecs(
         .unwrap_or_default();
     let has_registries = !existing_registry_arns.is_empty();
 
-    let mut needs_recreate = false;
     if service_active {
-        ecs.update_service()
-            .cluster("oab")
-            .service(&service_name)
-            .task_definition(&task_def_arn)
-            .network_configuration(network_config)
-            .send()
-            .await
-            .context("failed to update ECS service")?;
-        println!("  ✓ {} updated", m.metadata.name);
-
-        // Recreate is needed either when the service has no registry at all,
-        // or when it has one but it doesn't match the registry we just
-        // resolved for the manifest's current `ingress.cloudMapNamespace` —
-        // e.g. the namespace was changed after the service was created. The
-        // service's registry is fixed at creation time either way, so a
-        // mismatch means traffic is routed at the old namespace and 503s.
+        // Recreate is NOT required to attach/fix service discovery: ECS's
+        // UpdateService API has supported adding/updating/removing
+        // serviceRegistries since March 2022 (rolling replacement — new tasks
+        // start with the updated registry, old tasks stop once they're
+        // healthy, no downtime gap). It does require the AWSServiceRoleForECS
+        // service-linked role, which ECS creates automatically the first time
+        // any account uses ECS service discovery — no action needed here.
         let registry_mismatch = cloud_map.as_ref().is_some_and(|cm| {
             has_registries && !existing_registry_arns.contains(&cm.registry_arn)
         });
+
+        let mut update_req = ecs
+            .update_service()
+            .cluster("oab")
+            .service(&service_name)
+            .task_definition(&task_def_arn)
+            .network_configuration(network_config);
+
+        if let Some(cm) = &cloud_map {
+            if !has_registries || registry_mismatch {
+                let mut registry = aws_sdk_ecs::types::ServiceRegistry::builder()
+                    .registry_arn(&cm.registry_arn);
+                if let Some(ingress) = &m.spec.ingress {
+                    registry = registry
+                        .container_name("openab")
+                        .container_port(ingress.container_port as i32);
+                }
+                update_req = update_req.service_registries(registry.build());
+            }
+        }
+
+        update_req
+            .send()
+            .await
+            .context("failed to update ECS service")?;
+
         if cloud_map.is_some() && (!has_registries || registry_mismatch) {
-            needs_recreate = true;
             if registry_mismatch {
-                eprintln!(
-                    "  ⚠ Service '{}' is registered under a DIFFERENT Cloud Map service than\n    the one resolved for its current ingress.cloudMapNamespace (likely changed\n    since the service was created).",
+                println!(
+                    "  ✓ {} updated (service discovery re-pointed to the current Cloud Map service; rolling replacement, no downtime)",
                     m.metadata.name
                 );
             } else {
-                eprintln!(
-                    "  ⚠ Service '{}' already exists WITHOUT service discovery.",
+                println!(
+                    "  ✓ {} updated (service discovery attached; rolling replacement, no downtime)",
                     m.metadata.name
                 );
             }
-            eprintln!("    ECS service registries can only be set at creation time, so ingress");
-            eprintln!("    resources were provisioned but traffic won't reach the task until you");
-            eprintln!("    recreate the service (safe once desiredCount is drained):");
-            eprintln!(
-                "      oabctl delete oabservice {} --cluster oab --namespace {} && oabctl apply -f <manifest>",
-                m.metadata.name, m.metadata.namespace
-            );
+        } else {
+            println!("  ✓ {} updated", m.metadata.name);
         }
     } else {
         let cap_strategy = CapacityProviderStrategyItem::builder()
@@ -427,7 +422,7 @@ async fn apply_ecs(
         eprintln!("  ✓ {} is stable", m.metadata.name);
     }
 
-    Ok(needs_recreate)
+    Ok(())
 }
 
 async fn wait_for_stable(ecs: &aws_sdk_ecs::Client, cluster: &str, service: &str) -> Result<()> {

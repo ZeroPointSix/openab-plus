@@ -260,20 +260,26 @@ LINE console:
    https://{api-id}.execute-api.{region}.amazonaws.com/prod/webhook/line
 ```
 
-> **Security note:** the API Gateway endpoint is public and unauthenticated at the
-> transport layer — requests are authenticated at the app layer by OpenAB (LINE
-> signature via `LINE_CHANNEL_SECRET`, Telegram bot token in the path).
+> **Security note:** the API Gateway endpoint itself is public and unauthenticated
+> at the transport layer (no IAM auth, no API key). OpenAB's webhook handlers add
+> their own app-layer verification on top: Telegram validates the
+> `X-Telegram-Bot-Api-Secret-Token` header (`TELEGRAM_SECRET_TOKEN`) and the
+> request's source IP against Telegram's published webhook subnets; LINE
+> verifies an HMAC-SHA256 signature using `LINE_CHANNEL_SECRET`. Set
+> `TELEGRAM_SECRET_TOKEN` when registering the webhook with BotFather to enable
+> that check.
 >
-> **Recreate caveat:** ECS service registries can only be set at *creation* time.
-> If the service already exists without service discovery — or its registry
-> points at a different Cloud Map service than the one currently resolved for
+> **Adding/fixing service discovery never requires recreating the service:**
+> if an existing ECS service has no Cloud Map registry, or has one pointing at a
+> different Cloud Map service than the one currently resolved for
 > `ingress.cloudMapNamespace` (e.g. the namespace was changed after the service
-> was created) — `apply` provisions the ingress resources and prints how to
-> recreate the service so traffic can reach it. Recreating via
-> `oabctl delete oabservice ... && oabctl apply` **keeps the same webhook URL**:
-> deleting a service only strips its routes/integration/stage from its HTTP API,
-> it never deletes the API resource itself, so the `api-id` (and thus the URL
-> hostname) survives.
+> was created), `apply`'s `update_service` call attaches or replaces the
+> registry directly — ECS has supported adding/updating/removing
+> `serviceRegistries` on an existing service via a normal rolling replacement
+> (new tasks start with the new registry, old tasks stop once healthy — no
+> downtime gap) since March 2022. This requires the `AWSServiceRoleForECS`
+> service-linked role, which ECS creates automatically the first time any
+> service in the account uses service discovery — no setup needed.
 >
 > **Shared per-VPC (not per-account):** all ingress-enabled bots in the *same VPC*
 > share one VPC Link (`oab-vpc-link-<vpc-id>`) and one Cloud Map namespace
@@ -425,4 +431,21 @@ With `oabctl bootstrap`, most prerequisites are handled automatically. You only 
 
 1. **AWS credentials** — IAM user/role with permissions to create the above resources
 2. **Docker** — to build custom images (optional if using official images)
+
+### Additional permissions for `spec.ingress`
+
+The resources bootstrap creates cover outbound-only (Discord) deployments. If
+any manifest sets `spec.ingress`, the **caller of `oabctl apply`/`delete`**
+(not the task role) also needs:
+
+| Service | Actions |
+|---------|---------|
+| Cloud Map | `servicediscovery:CreatePrivateDnsNamespace`, `CreateService`, `DeleteService`, `ListNamespaces`, `ListServices`, `GetOperation` |
+| API Gateway | `apigateway:CreateVpcLink`, `CreateApi`, `CreateIntegration`, `CreateRoute`, `CreateStage`, `DeleteRoute`, `DeleteIntegration`, `DeleteStage`, `DeleteApi`, `GetVpcLinks`, `GetVpcLink`, `GetApis`, `GetIntegrations`, `GetRoutes`, `GetStages` |
+| EC2 | `ec2:DescribeSubnets`, `AuthorizeSecurityGroupIngress` |
+| ECS | `ecs:UpdateService` with `serviceRegistries` (requires the `AWSServiceRoleForECS` service-linked role, which ECS creates automatically the first time any service in the account uses service discovery) |
+
+`AdministratorAccess`-equivalent or a broad `servicediscovery:*`/`apigateway:*`
+during development is fine; the table above is for scoping a least-privilege
+policy.
 

@@ -13,10 +13,14 @@
 //! VPC ID) since a VPC Link's ENIs and a namespace's private DNS are only valid
 //! within the VPC they were created in — two VPCs never share either resource.
 //!
-//! The reconciliation is split in two because ECS service discovery
-//! (`--service-registries`) can only be set at service *creation* time:
-//!   1. [`ensure_cloud_map`] — namespace + service. Must run BEFORE the ECS
-//!      service is created so its registry ARN can be attached.
+//! The reconciliation is split in two so Cloud Map is ready before the ECS
+//! service needs it (whether creating a new service or attaching service
+//! discovery to an existing one via `UpdateService` — ECS has supported
+//! adding/updating/removing `serviceRegistries` on an existing service via a
+//! normal rolling replacement since March 2022, so no delete-and-recreate is
+//! needed either way):
+//!   1. [`ensure_cloud_map`] — namespace + service. Runs BEFORE the ECS
+//!      create/update-service call so its registry ARN is ready to attach.
 //!   2. [`ensure_gateway`] — VPC Link + HTTP API + integration + routes + stage
 //!      + security-group inbound rule. Runs AFTER the task is wired up.
 
