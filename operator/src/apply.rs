@@ -153,15 +153,45 @@ async fn apply_ecs(
         };
     let generation = current_gen + 1;
 
+    // Look up the ECS service's current registry ARN(s) up front so both the
+    // ingress-removal teardown below and the update/create logic further down
+    // can use the *exact* registry rather than falling back to a name-only
+    // Cloud Map scan (which can collide across VPCs/environments that share
+    // an account and reuse the same namespace/name).
+    let describe_resp = ecs
+        .describe_services()
+        .cluster("oab")
+        .services(&service_name)
+        .send()
+        .await;
+    let existing_registry_arns: Vec<String> = describe_resp
+        .as_ref()
+        .ok()
+        .and_then(|r| r.services().first())
+        .map(|s| {
+            s.service_registries()
+                .iter()
+                .filter_map(|r| r.registry_arn())
+                .map(|a| a.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let has_registries = !existing_registry_arns.is_empty();
+
     // If ingress was configured before but is absent now, tear down the
-    // orphaned per-bot ingress resources (best-effort, mirrors `oabctl delete`).
+    // orphaned per-bot ingress resources (best-effort, mirrors `oabctl delete`)
+    // and detach the stale registry from the ECS service itself — omitting
+    // `serviceRegistries` on `UpdateService` leaves the existing configuration
+    // untouched (AWS only clears it when explicitly passed an empty list), so
+    // without this the service would keep pointing at a Cloud Map service that
+    // teardown() is about to delete.
     if previously_had_ingress && m.spec.ingress.is_none() {
         eprintln!("  🌐 ingress removed from manifest — tearing down orphaned resources...");
         if let Err(e) = crate::ingress::teardown(
             config,
             &m.metadata.namespace,
             &m.metadata.name,
-            None,
+            existing_registry_arns.first().map(|s| s.as_str()),
         )
         .await
         {
@@ -271,33 +301,14 @@ async fn apply_ecs(
         None
     };
 
-    // Check if service exists
-    let existing = ecs
-        .describe_services()
-        .cluster("oab")
-        .services(&service_name)
-        .send()
-        .await;
-
-    let service_active = existing
+    // Check if service exists. Reuses `describe_resp` captured above (before
+    // the ingress-removal teardown) — `ensure_cloud_map` above doesn't touch
+    // the ECS service, so its ACTIVE status can't have changed since then.
+    let service_active = describe_resp
         .as_ref()
         .ok()
         .and_then(|r| r.services().first())
         .is_some_and(|s| s.status() == Some("ACTIVE"));
-
-    let existing_registry_arns: Vec<String> = existing
-        .as_ref()
-        .ok()
-        .and_then(|r| r.services().first())
-        .map(|s| {
-            s.service_registries()
-                .iter()
-                .filter_map(|r| r.registry_arn())
-                .map(|a| a.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let has_registries = !existing_registry_arns.is_empty();
 
     if service_active {
         // Recreate is NOT required to attach/fix service discovery: ECS's
@@ -310,6 +321,14 @@ async fn apply_ecs(
         let registry_mismatch = cloud_map.as_ref().is_some_and(|cm| {
             has_registries && !existing_registry_arns.contains(&cm.registry_arn)
         });
+        // `ingress` was removed from the manifest (cloud_map is None here)
+        // but the ECS service still has a registry attached from a previous
+        // apply — must explicitly detach it. `UpdateService` treats an
+        // *omitted* `serviceRegistries` field as "leave unchanged", not
+        // "clear"; only an explicit empty list detaches it. Without this the
+        // service keeps pointing at the Cloud Map service that the
+        // ingress-removal teardown (above) just deleted.
+        let needs_detach = cloud_map.is_none() && has_registries;
 
         let mut update_req = ecs
             .update_service()
@@ -329,6 +348,8 @@ async fn apply_ecs(
                 }
                 update_req = update_req.service_registries(registry.build());
             }
+        } else if needs_detach {
+            update_req = update_req.set_service_registries(Some(Vec::new()));
         }
 
         update_req
@@ -348,6 +369,11 @@ async fn apply_ecs(
                     m.metadata.name
                 );
             }
+        } else if needs_detach {
+            println!(
+                "  ✓ {} updated (service discovery detached; rolling replacement, no downtime)",
+                m.metadata.name
+            );
         } else {
             println!("  ✓ {} updated", m.metadata.name);
         }
