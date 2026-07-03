@@ -14,12 +14,38 @@ use std::path::Path;
 /// rejects the request with "you must also specify a value for
 /// 'executionRoleArn'" otherwise.
 async fn load_bootstrap_state(config: &aws_config::SdkConfig) -> Option<BootstrapState> {
-    let sts = aws_sdk_sts::Client::new(config);
-    let account = sts.get_caller_identity().send().await.ok()?
-        .account()?.to_string();
-    let bucket = format!("oab-control-plane-{account}");
+    let bucket = if let Some(b) = crate::config::OabConfig::load().ok().and_then(|c| c.bucket()) {
+        b
+    } else {
+        let sts = aws_sdk_sts::Client::new(config);
+        let identity = match sts.get_caller_identity().send().await {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("  ⚠ load_bootstrap_state: STS get_caller_identity failed: {e}");
+                return None;
+            }
+        };
+        let account = match identity.account() {
+            Some(a) => a.to_string(),
+            None => {
+                eprintln!("  ⚠ load_bootstrap_state: STS response missing account field");
+                return None;
+            }
+        };
+        format!("oab-control-plane-{account}")
+    };
     let s3 = aws_sdk_s3::Client::new(config);
-    crate::bootstrap::load_state_pub(&s3, &bucket).await.ok().flatten()
+    match crate::bootstrap::load_state_pub(&s3, &bucket).await {
+        Ok(Some(state)) => Some(state),
+        Ok(None) => {
+            eprintln!("  ⚠ load_bootstrap_state: no bootstrap state found in s3://{bucket}/bootstrap-state.json (run `oabctl bootstrap` first)");
+            None
+        }
+        Err(e) => {
+            eprintln!("  ⚠ load_bootstrap_state: failed to read bootstrap state from s3://{bucket}: {e}");
+            None
+        }
+    }
 }
 
 pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_config: bool, wait: bool) -> Result<()> {
@@ -223,9 +249,8 @@ async fn apply_ecs(
     // resolve region via the standard chain: AWS_REGION env var → profile →
     // IMDS. Fargate tasks have no EC2 instance metadata to fall back to, so
     // without this the SDK can fail to resolve an endpoint at all.
-    if let Some(region) = config.region() {
-        env_vars.push(KeyValuePair::builder().name("AWS_REGION").value(region.as_ref()).build());
-    }
+    // Region is injected below after bootstrap_state is loaded (to allow
+    // fallback to bootstrap_state.region when config.region() is None).
     if let Some(ref bootstrap) = m.spec.bootstrap_from {
         env_vars.push(KeyValuePair::builder().name("BOOTSTRAP_FROM").value(bootstrap).build());
     }
@@ -246,6 +271,16 @@ async fn apply_ecs(
     // can or should specify directly (bootstrap owns these, not the manifest —
     // see operator/README.md's "Resources Created" section).
     let bootstrap_state = load_bootstrap_state(config).await;
+
+    // Resolve effective region: prefer SDK config, fall back to bootstrap
+    // state's recorded region. Fargate has no IMDS, so without AWS_REGION the
+    // container's SDK calls will fail to resolve endpoints entirely.
+    let effective_region: Option<String> = config.region()
+        .map(|r| r.as_ref().to_string())
+        .or_else(|| bootstrap_state.as_ref().map(|s| s.region.clone()));
+    if let Some(ref region) = effective_region {
+        env_vars.push(KeyValuePair::builder().name("AWS_REGION").value(region).build());
+    }
 
     let mut container = ContainerDefinition::builder()
         .name("openab")
@@ -275,12 +310,12 @@ async fn apply_ecs(
     // ECS uses no log driver and task failures are opaque (no log stream at
     // all, not even an empty one).
     if let Some(log_group) = bootstrap_state.as_ref().map(|s| &s.resources.log_group) {
-        if let Some(region) = config.region() {
+        if let Some(ref region) = effective_region {
             container = container.log_configuration(
                 aws_sdk_ecs::types::LogConfiguration::builder()
                     .log_driver(aws_sdk_ecs::types::LogDriver::Awslogs)
                     .options("awslogs-group", log_group.as_str())
-                    .options("awslogs-region", region.as_ref())
+                    .options("awslogs-region", region.as_str())
                     .options("awslogs-stream-prefix", &service_name)
                     .options("awslogs-create-group", "true")
                     .build()?,
