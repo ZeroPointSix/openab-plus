@@ -200,7 +200,7 @@ impl GatedEvent {
 
 /// Only constructible within this module (the Trust Gate).
 /// No other module in the crate can call this.
-pub(super) fn seal(event: InboundEvent) -> GatedEvent {
+fn seal(event: InboundEvent) -> GatedEvent {
     GatedEvent { inner: event }
 }
 
