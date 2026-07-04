@@ -422,16 +422,18 @@ spec:
     # for a plain-string secret.
     TELEGRAM_BOT_TOKEN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:oab/telegram/mybot-AC80TP:TELEGRAM_BOT_TOKEN::"
 
-    # Format 2 — aws-sm://<secret-id>#<json-key> shorthand, equivalent to
-    # the line above (same secret, same key). This is the same convention
-    # openab itself uses for in-app secret refs in config.toml (see
-    # docs/secrets-management.md). oabctl resolves this to the ECS-native
-    # form automatically; <secret-id> can be a bare secret name (resolved
-    # to its ARN via DescribeSecret) or a full ARN directly.
-    # TELEGRAM_BOT_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_BOT_TOKEN"
-
+    # Format 2 — aws-sm://<secret-id>#<json-key> shorthand: the same
+    # convention openab itself uses for in-app secret refs in config.toml
+    # (see docs/secrets-management.md). oabctl resolves this to the
+    # ECS-native form automatically; <secret-id> can be a bare secret name
+    # (resolved to its ARN via DescribeSecret) or a full ARN directly.
     TELEGRAM_SECRET_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_SECRET_TOKEN"
 ```
+
+Either format works for **any** key — `TELEGRAM_BOT_TOKEN` above could just
+as well be written `"aws-sm://oab/telegram/mybot#TELEGRAM_BOT_TOKEN"`, and
+`TELEGRAM_SECRET_TOKEN` could just as well use the full ARN form. The choice
+is per-value, not tied to which secret it is.
 
 ### IAM Execution Role Permissions
 
