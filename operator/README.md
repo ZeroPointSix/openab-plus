@@ -424,6 +424,7 @@ spec:
     # `:<jsonKey>::` suffix to extract one field of a JSON secret; omit it
     # for a plain-string secret.
     TELEGRAM_BOT_TOKEN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:oab/telegram/mybot-AC80TP:TELEGRAM_BOT_TOKEN::"
+    # TELEGRAM_BOT_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_BOT_TOKEN"  # equivalent, Format 2 below
 
     # Format 2 — aws-sm://<secret-id>#<json-key> shorthand: the same
     # convention openab itself uses for in-app secret refs in config.toml
