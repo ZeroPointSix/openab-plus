@@ -277,7 +277,10 @@ must still be registered manually in the LINE Developers console.
 > request's source IP against Telegram's published webhook subnets; LINE
 > verifies an HMAC-SHA256 signature using `LINE_CHANNEL_SECRET`. Set
 > `TELEGRAM_SECRET_TOKEN` in `spec.secrets` to enable that check — `apply`
-> passes it to Telegram automatically as described above.
+> passes it to Telegram automatically as described above. `TELEGRAM_SECRET_TOKEN`
+> is Telegram's own `secret_token` hardening mechanism for `setWebhook`, not an
+> openab-specific convention — see the [official Telegram Bot API
+> docs](https://core.telegram.org/bots/api#setwebhook) for details.
 >
 
 > **Stage prefix stripped before it reaches the backend:** for private
