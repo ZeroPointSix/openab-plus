@@ -242,6 +242,42 @@ spec:
       - /webhook/line
 ```
 
+#### Minimal working manifest: Telegram on AWS
+
+The complete set of fields actually required to deploy a Telegram bot with
+ingress — everything else in the schema has a default. Save as a file and
+`oabctl apply -f <file>`:
+
+```yaml
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: my-telegram-bot
+  namespace: prod
+spec:
+  image: ghcr.io/openabdev/openab:latest
+  resources: { cpu: "256", memory: "512" }
+  configFrom: s3://<your-bucket>/config.toml
+  secrets:
+    TELEGRAM_BOT_TOKEN: "aws-sm://oab/telegram/my-telegram-bot#TELEGRAM_BOT_TOKEN"
+  runtime:
+    type: ecs
+    networking:
+      subnets: [subnet-aaa, subnet-bbb]
+      securityGroups: [sg-xxx]
+  ingress:
+    paths:
+      - /webhook/telegram
+```
+
+`spec.secrets.TELEGRAM_BOT_TOKEN` isn't required by the schema (`spec.secrets`
+defaults to empty), but without it the bot has no way to authenticate to
+Telegram and `apply` has nothing to call `setWebhook` with — include it for
+Telegram to actually work. `configFrom` must point at a `config.toml` with a
+matching `[telegram]` block (`webhook_path = "/webhook/telegram"`,
+`bot_token = "${TELEGRAM_BOT_TOKEN}"`) — see
+[docs/telegram.md](../docs/telegram.md) for the full config reference.
+
 On `apply` this reconciles (idempotently, reused by name):
 
 1. **Cloud Map** private DNS namespace (`<cloudMapNamespace>-<vpc-id>`, shared per-VPC) + a per-service **SRV** record (carries the container port; a plain A record does not work as a VPC-Link integration target)
