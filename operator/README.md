@@ -196,7 +196,7 @@ metadata:
   name: my-bot
   namespace: prod
 spec:
-  image: public.ecr.aws/oablab/kiro:stable
+  image: ghcr.io/openabdev/openab:stable
   resources:
     cpu: "256"
     memory: "512"
@@ -224,7 +224,7 @@ linked here.
 
 ```yaml
 spec:
-  image: public.ecr.aws/oablab/kiro:beta
+  image: ghcr.io/openabdev/openab:beta
   resources: { cpu: "256", memory: "512" }
   configFrom: s3://.../config.toml
   runtime:
@@ -386,7 +386,7 @@ metadata:
   namespace: prod
 spec:
   template:
-    image: public.ecr.aws/oablab/kiro:stable
+    image: ghcr.io/openabdev/openab:stable
     resources: { cpu: "256", memory: "512" }
     runtime:
       type: ecs
