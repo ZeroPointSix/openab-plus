@@ -415,17 +415,28 @@ Attached to `oab-task-role` — the identity the *running container* assumes.
 value from at task launch (via the execution role below — the container
 itself never sees a raw secret reference, only the resolved value). Two
 formats are accepted **per value** — either works for any key, and both can
-be mixed freely across different keys in the same manifest:
+be mixed freely across different keys in the same manifest. The example
+below uses the two Telegram-specific keys from "Auto-register the Telegram
+webhook" above, annotated with what each is for:
 
 ```yaml
 spec:
   secrets:
+    # TELEGRAM_BOT_TOKEN — the bot's API token from BotFather. Required for
+    # openab to authenticate as the bot, and for `apply` to auto-register
+    # the webhook via setWebhook (see above).
+    #
     # Format 1 — ECS-native valueFrom: a full Secrets Manager ARN. Add a
     # `:<jsonKey>::` suffix to extract one field of a JSON secret; omit it
     # for a plain-string secret.
     TELEGRAM_BOT_TOKEN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:oab/telegram/mybot-AC80TP:TELEGRAM_BOT_TOKEN::"
     # TELEGRAM_BOT_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_BOT_TOKEN"  # equivalent, Format 2 below
 
+    # TELEGRAM_SECRET_TOKEN — optional. Telegram's own setWebhook
+    # secret_token request-signing hardening (see the security note above),
+    # not an openab-specific convention. `apply` passes it to Telegram
+    # automatically if present.
+    #
     # Format 2 — aws-sm://<secret-id>#<json-key> shorthand: the same
     # convention openab itself uses for in-app secret refs in config.toml
     # (see docs/secrets-management.md). oabctl resolves this to the
