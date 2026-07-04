@@ -176,21 +176,51 @@ calling convention. The Trust Gate consumes `InboundEvent` and produces a
 **different type** — `GatedEvent` — which is the only type Handler accepts:
 
 ```rust
+// In crate::trust::gate (narrow module — only Trust Gate code lives here)
+
 /// Receiver produces this (untrusted).
 pub struct InboundEvent { /* ... */ }
 
-/// Trust Gate produces this (trusted). Only constructible by the gate.
+/// Trust Gate produces this (trusted).
+/// The inner field is PRIVATE (not pub(crate)) — only code in this module
+/// can construct it. This makes bypass impossible even within openab-core.
 pub struct GatedEvent {
-    pub(crate) inner: InboundEvent,  // pub(crate) — Handler cannot forge this
+    inner: InboundEvent,  // private — only gate module can construct
+}
+
+impl GatedEvent {
+    /// Read-only access to the trusted event data.
+    pub fn event(&self) -> &InboundEvent { &self.inner }
+    pub fn platform(&self) -> &str { &self.inner.platform }
+    pub fn sender_id(&self) -> &str { &self.inner.sender_id }
+    pub fn channel_id(&self) -> &str { &self.inner.channel_id }
+    pub fn is_dm(&self) -> bool { self.inner.is_dm }
+    pub fn into_inner(self) -> InboundEvent { self.inner }
+}
+
+/// Only constructible within this module (the Trust Gate).
+/// No other module in the crate can call this.
+pub(super) fn seal(event: InboundEvent) -> GatedEvent {
+    GatedEvent { inner: event }
 }
 
 /// Handler signature — cannot accept InboundEvent directly.
+/// Cannot forge GatedEvent (private field, no public constructor).
 async fn handle(&self, event: GatedEvent) { /* ... */ }
 ```
 
+**Module layout for enforcement:**
+```
+crate::trust
+├── mod.rs          // PlatformTrustConfigs, TrustConfig, Decision (public)
+├── gate.rs         // gate_event() + GatedEvent (constructor is pub(super))
+└── (no other module can construct GatedEvent)
+```
+
 A Handler that tries to accept `InboundEvent` directly will not compile.
-A Receiver that tries to construct `GatedEvent` will fail (private field).
-This makes the bypass impossible at compile time, not just by convention.
+Any module outside `crate::trust` that tries to construct `GatedEvent` will fail
+(private field, no public constructor). This makes the bypass impossible at
+compile time — not `pub(crate)`, but truly module-private.
 
 **Trust lookup key:** The gate uses the **per-event platform** from
 `InboundEvent.platform` (which maps to `ChannelRef.platform`), NOT
@@ -408,22 +438,23 @@ caller level**, not inside `TrustConfig::decide()`. This keeps `decide()` a pure
 L2+L3 function with no bot-awareness:
 
 ```rust
-// Trust Gate layer (pseudocode)
+// Trust Gate layer (pseudocode) — lives in crate::trust::gate
 async fn gate_event(event: &InboundEvent, configs: &PlatformTrustConfigs) -> Option<GatedEvent> {
     // Bot bypass — skip L3 identity check, but STILL enforce L2 scope.
     // Bots must respect channel/DM scope (noise/cost control) even though
     // they don't need identity trust.
     if event.is_bot {
-        if !configs.surface_allowed(&event.platform, &event.channel_id, event.is_dm) {
+        let config = configs.get(&event.platform);
+        if !config.surface_allowed(&event.channel_id, event.is_dm) {
             return None;  // DenyScope — bot in wrong channel, silent drop
         }
-        return Some(GatedEvent { inner: event.clone() });  // L2 pass, skip L3
+        return Some(seal(event.clone()));  // L2 pass, skip L3
     }
 
     // Human sender — full L2 + L3 evaluation
     let decision = configs.decide(&event.platform, &event.channel_id, event.is_dm, &event.sender_id);
     match decision {
-        Decision::Allow => Some(GatedEvent { inner: event.clone() }),
+        Decision::Allow => Some(seal(event.clone())),
         Decision::DenyIdentity => { echo_sender_id(&event).await; None }
         Decision::DenyScope => None,  // silent drop
     }
@@ -650,8 +681,9 @@ The default flip is phased to avoid silently severing live bots on upgrade:
 | Phase | Behavior | When |
 |-------|----------|------|
 | **Phase 0** | Types + `decide()` defined, no runtime behavior change. Additive only. | Done (on main) |
-| **Phase 1** | Wire Trust Gate into ingress pipeline. **Keep current allow-all default.** Log deprecation warning when relying on implicit allow-all. | Next release |
-| **Phase 2** | Require explicit `allow_all_users = true` to preserve old behavior. Deployments without it get a **startup error** (not silent denial). | Pre-GA release |
+| **Phase 0.5** | Partial wiring: `AdapterRouter::gate_incoming`, gateway unified path gating, Discord L3 gate — using existing adapter structure (not yet the Receiver/Handler split). Trust checks co-exist with scattered per-adapter checks during transition. | Done (on main) |
+| **Phase 1** | Complete Receiver/Handler split. Wire Trust Gate as the sole ingress layer. **Keep current allow-all default.** Log deprecation warning when relying on implicit allow-all. Remove scattered checks. | Next release |
+| **Phase 2** | Require explicit `allow_all_users = true` to preserve old behavior. Deployments without it get a **startup error** (not silent denial — bot refuses to start, operator must explicitly choose). | Pre-GA release |
 | **Phase 3** | Flip default: empty `allowed_users` + no `allow_all_users` = **deny-all**. | GA release |
 
 ### Migration path
