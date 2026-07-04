@@ -170,6 +170,28 @@ Each adapter is split into two components with the Trust Gate in between:
 - No adapter can bypass the gate — it is architecturally mandatory
 - New platform = write Receiver + Handler; trust is automatic
 
+**Type-level enforcement (compile-time guarantee):**
+The "impossible to bypass" property is enforced via Rust's type system, not just
+calling convention. The Trust Gate consumes `InboundEvent` and produces a
+**different type** — `GatedEvent` — which is the only type Handler accepts:
+
+```rust
+/// Receiver produces this (untrusted).
+pub struct InboundEvent { /* ... */ }
+
+/// Trust Gate produces this (trusted). Only constructible by the gate.
+pub struct GatedEvent {
+    pub(crate) inner: InboundEvent,  // pub(crate) — Handler cannot forge this
+}
+
+/// Handler signature — cannot accept InboundEvent directly.
+async fn handle(&self, event: GatedEvent) { /* ... */ }
+```
+
+A Handler that tries to accept `InboundEvent` directly will not compile.
+A Receiver that tries to construct `GatedEvent` will fail (private field).
+This makes the bypass impossible at compile time, not just by convention.
+
 **Trust lookup key:** The gate uses the **per-event platform** from
 `InboundEvent.platform` (which maps to `ChannelRef.platform`), NOT
 `adapter.platform()`. This correctly handles unified mode where a single
@@ -188,7 +210,7 @@ events from multiple real platforms.
        │               │               │                     │
        ▼               ▼               ▼                     ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                Layer 1: Receivers (per-platform transport)                 │
+│                Receivers (per-platform transport)                          │
 │                                                                          │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────┐            │
 │  │ Discord  │  │  Slack   │  │   Gateway    │  │   Cron   │            │
@@ -209,7 +231,7 @@ events from multiple real platforms.
                                    │  InboundEvent (unified format)
                                    ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│           🔒  Layer 2+3: TRUST GATE  (unified, one implementation)  🔒    │
+│           🔒  TRUST GATE (L2 scope + L3 identity, unified)  🔒            │
 │                                                                          │
 │  PlatformTrustConfigs::decide(                                           │
 │      event.platform,      // per-event platform (not adapter.platform()) │
@@ -233,7 +255,7 @@ events from multiple real platforms.
                                    │  Only Allow events reach here
                                    ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│              Layer 4: Handlers (per-platform interaction logic)            │
+│              Handlers (per-platform interaction logic)                     │
 │                                                                          │
 │  ┌────────────┐  ┌────────────┐  ┌─────────────┐  ┌───────────┐        │
 │  │  Discord   │  │   Slack    │  │   Gateway   │  │   Cron    │        │
@@ -255,6 +277,14 @@ events from multiple real platforms.
 ```
 
 ### InboundEvent (Receiver output / Trust Gate input)
+
+**Gateway Receiver note:** The Gateway Receiver is a **single receiver** that
+connects to the openab-gateway WebSocket and **demultiplexes by platform**. Each
+incoming `GatewayEvent` carries a `platform` field (e.g. `"telegram"`, `"line"`,
+`"feishu"`); the Receiver uses this to populate `InboundEvent.platform`. It does
+NOT spawn per-platform receivers — there is one WS connection, one event loop,
+producing `InboundEvent`s tagged with the correct platform. The Trust Gate then
+routes the decision to the right platform's `TrustConfig`.
 
 ```rust
 /// Unified inbound event produced by all Receivers.
@@ -360,6 +390,30 @@ Bot admission is NOT part of the identity trust model — it is platform-specifi
 structural logic (e.g. `trusted_bot_ids`, `allow_bot_messages`) that stays in the
 Handler. The Trust Gate only evaluates human sender identity.
 
+**Implementation note:** The `is_bot` bypass is implemented at the **Trust Gate
+caller level**, not inside `TrustConfig::decide()`. This keeps `decide()` a pure
+L2+L3 function with no bot-awareness:
+
+```rust
+// Trust Gate layer (pseudocode)
+async fn gate_event(event: InboundEvent, configs: &PlatformTrustConfigs) -> Option<GatedEvent> {
+    // Bot bypass — skip L3 entirely; bot admission is Handler's job
+    if event.is_bot {
+        return Some(GatedEvent { inner: event });
+    }
+
+    let decision = configs.decide(&event.platform, &event.channel_id, event.is_dm, &event.sender_id);
+    match decision {
+        Decision::Allow => Some(GatedEvent { inner: event }),
+        Decision::DenyIdentity => { echo_sender_id(&event).await; None }
+        Decision::DenyScope => None,  // silent drop
+    }
+}
+```
+
+This means `PlatformTrustConfigs::decide()` does NOT need an `is_bot` parameter —
+the bot check happens before `decide()` is called.
+
 ### Echo reply on deny
 
 ```rust
@@ -377,12 +431,29 @@ if decision == Decision::DenyIdentity {
 **Echo safeguards:**
 - **Rate-limit:** max 1 echo per sender per platform per 5 minutes (prevents spam/DoS amplification)
 - **Bot exclusion:** if `is_bot` → silent deny, no echo (prevents infinite reply loops between bots)
-- **DM preferred:** in group/channel contexts, prefer DM reply to avoid leaking sender UID publicly; fall back to in-channel if DM unavailable
+- **DM preferred:** in group/channel contexts, prefer DM reply to avoid leaking sender UID publicly; if DM unavailable, **silent drop** (do NOT fall back to in-channel echo, to avoid UID leakage in shared groups)
 - **Best-effort:** echo delivery is not guaranteed (e.g. LINE reply tokens expire); this is acceptable — the echo is a UX convenience, not a security mechanism
 
 **Platform-specific delivery caveats:**
 - **LINE:** reply tokens are single-use and short-TTL (~30s). If the echo cannot use the reply token, fall back to push message API (requires separate quota/permission).
 - **Other platforms:** no known delivery constraints for the echo use case.
+
+### Sender ID format notes (for `allowed_users` configuration)
+
+`InboundEvent.sender_id` is always a `String`. Each platform's native ID is
+converted to its string representation. Operators must configure `allowed_users`
+using the **exact format** the platform provides in event payloads:
+
+| Platform | Native type | `allowed_users` format | Example | Gotcha |
+|----------|-------------|----------------------|---------|--------|
+| Discord | Snowflake (u64) | Numeric string | `"845835116920307722"` | — |
+| Slack | String | U-prefix or W-prefix | `"U01ABCDEFGH"` | Enterprise Grid uses `W` prefix; use whichever the event payload provides |
+| Telegram | Integer (i64) | Stringified integer | `"123456789"` | ⚠️ Do NOT use `@username` — only numeric ID works |
+| LINE | String | U + 32 hex chars | `"U1234567890abcdef0123456789abcdef"` | — |
+| Feishu | String | open_id | `"ou_xxxxxxxxxxxxxxxxxxxx"` | ⚠️ `open_id` is **per-app** — same user has different ID in different Feishu apps |
+| WeCom | String | UserID | `"zhangsan"` | — |
+| Google Chat | String | User resource name | `"users/123456789"` | — |
+| MS Teams | String | `activity.from.id` | `"29:1abc..."` | Verify via actual event payload; may differ from AAD Object ID |
 
 ## 6. Migration
 
