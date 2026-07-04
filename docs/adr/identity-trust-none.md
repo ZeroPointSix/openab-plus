@@ -1,9 +1,9 @@
 # ADR: Identity Trust-None Default & Trust Pyramid
 
-- **Status:** Proposed
-- **Date:** 2026-06-30
+- **Status:** Proposed (v2 — revised per PR #1263 review feedback)
+- **Date:** 2026-06-30 (revised 2026-07-04)
 - **Author:** @chaodu-agent
-- **Reviewers:** @pahud
+- **Reviewers:** @pahud, @howie
 - **Tracking issues:** #1262
 - **Depends on:** [First-Class Per-Platform Configuration](first-class-platform-config.md) — per-platform `allowed_users` live in the first-class `[platform]` sections defined there.
 
@@ -16,14 +16,24 @@ platform's `allowed_users` is empty and `allow_all_users` is not explicitly set 
 `true`, deny all incoming messages and echo the sender their own ID so they can
 request access.
 
-Trust is enforced at a **single router-level gate** (`AdapterRouter::handle_message()`),
-not scattered across adapters.
+Trust is enforced at a **dedicated ingress layer** — the Trust Gate — that sits
+between the platform Receiver and the per-platform Handler. This is a structural
+guarantee: no event reaches any Handler (or the Dispatcher / Agent) without passing
+through the gate. The gate is **not** inside any adapter — it is an independent
+layer that all adapters are wired through.
 
 ## 2. Motivation: trust-all default is insecure
 
 All adapters currently auto-detect: empty `allowed_users` → `allow_all_users = true`.
 A fresh deployment trusts **everyone** by default. For publicly discoverable bots
 (e.g. anyone can DM a Telegram bot), this means any stranger can drive the agent.
+
+Additionally, trust checks are currently **scattered** across adapters — each one
+implements its own variant (`is_denied_user()` in Discord, `should_skip_event()` in
+Gateway, inline allowlist in Slack). This means:
+- Different implementations doing the same thing
+- A new adapter forgetting the check = fully open bot
+- No architectural guarantee that trust is enforced
 
 ## 3. Trust Pyramid (Defense in Depth)
 
@@ -132,54 +142,131 @@ When a message arrives from an untrusted sender:
 2. Reply with an echo message showing the sender their own ID
 3. Do NOT dispatch to any agent
 
-### 4.2 Trust check at router level (single gate)
+**Semantics of `allowed_users`:**
+- Missing key = empty list = deny-all (unless `allow_all_users = true`)
+- Empty string sender_id = always denied (fail-closed, regardless of `allow_all_users`)
+- Startup validation: warn when a platform section has neither `allowed_users` nor
+  explicit `allow_all_users = true` — helps operators catch misconfiguration.
 
-Trust enforcement happens in **one place only**: `AdapterRouter::handle_message()`.
-The gateway remains a pure transport layer (L1 only).
+### 4.2 Three-layer adapter architecture (Receiver → Trust Gate → Handler)
+
+Trust enforcement happens in a **dedicated ingress layer** — the Trust Gate —
+that is structurally between the Receiver and the Handler. This is NOT inside
+any adapter. It is an independent layer that every platform flows through.
+
+**Architecture: Receiver → Trust Gate → Handler**
+
+Each adapter is split into two components with the Trust Gate in between:
+
+| Layer | Responsibility | Per-platform? |
+|-------|---------------|---------------|
+| **Receiver** | Connect, listen, L1 verify, normalize to `InboundEvent` | Yes |
+| **Trust Gate** | L2 scope check + L3 identity check (`decide()`) | **No — unified** |
+| **Handler** | Platform-specific interaction logic + dispatch | Yes |
+
+**Why this order:**
+- Trust Gate is upstream of Handler — Handler never sees untrusted events
+- Slash commands (`/reset`, `/cancel`) are in the Handler — they are gated
+- No adapter can bypass the gate — it is architecturally mandatory
+- New platform = write Receiver + Handler; trust is automatic
+
+**Trust lookup key:** The gate uses the **per-event platform** from
+`InboundEvent.platform` (which maps to `ChannelRef.platform`), NOT
+`adapter.platform()`. This correctly handles unified mode where a single
+`UnifiedGatewayAdapter` (whose `platform()` returns `"unified"`) multiplexes
+events from multiple real platforms.
 
 ## 5. Architecture
 
 ```
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│   Telegram   │  │     LINE     │  │    Feishu    │  │  WeCom / GC  │
-│   Webhook    │  │   Webhook    │  │  WebSocket   │  │   Webhook    │
-└──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
-       │                 │                 │                 │
-       ▼                 ▼                 ▼                 ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│           openab-gateway — L1: Platform Authentication               │
-│                                                                     │
-│  ✅ Verify webhook signature / JWT / secret token / IP              │
-│  ✅ Normalize → GatewayEvent                                        │
-│  ✅ Forward ALL authenticated events                                 │
-│  ❌ No user filtering (L3 is in core)                               │
-└────────────────────────────┬────────────────────────────────────────┘
-                             │ WebSocket
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    openab-core — L2 + L3                              │
-│                                                                     │
-│  ┌───────────┐ ┌───────────┐ ┌─────────────────────────────┐       │
-│  │  Discord  │ │   Slack   │ │  GatewayAdapter             │       │
-│  │  Handler  │ │  Handler  │ │  (TG/LINE/Feishu/WeCom/GC)  │       │
-│  └─────┬─────┘ └─────┬─────┘ └──────────────┬──────────────┘       │
-│        └──────────────┼──────────────────────┘                      │
-│                       ▼                                             │
-│  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ 🔒 AdapterRouter::handle_message()                            │  │
-│  │                                                               │  │
-│  │   L2: scope check (optional, default-open; channel/group/DM)  │  │
-│  │   L3: TrustConfig::is_allowed(platform, sender_id) — DENY dflt │  │
-│  │                                                               │  │
-│  │   if denied → log + echo sender ID → RETURN                   │  │
-│  │   if allowed → dispatch to ACP ✅                              │  │
-│  └───────────────────────────────────────────────────────────────┘  │
-│                       │                                             │
-│                       ▼                                             │
-│              ┌─────────────────┐                                    │
-│              │  ACP Session    │                                    │
-│              └─────────────────┘                                    │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         Platform Sources                                   │
+├──────────────┬───────────────┬────────────────┬─────────────────────────┤
+│   Discord    │    Slack      │    Gateway     │         Cron            │
+│  (WebSocket) │ (Socket Mode) │  (TG/LINE/..) │      (timer)            │
+└──────┬───────┴───────┬───────┴───────┬────────┴────────────┬────────────┘
+       │               │               │                     │
+       ▼               ▼               ▼                     ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                Layer 1: Receivers (per-platform transport)                 │
+│                                                                          │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────┐            │
+│  │ Discord  │  │  Slack   │  │   Gateway    │  │   Cron   │            │
+│  │ Receiver │  │ Receiver │  │  Receiver    │  │ Receiver │            │
+│  └──────────┘  └──────────┘  └──────────────┘  └──────────┘            │
+│                                                                          │
+│  Responsibilities:                                                       │
+│  • Connect & listen (WebSocket / HTTP webhook / timer)                   │
+│  • L1 authentication (verify signature / JWT / token)                    │
+│  • Normalize → InboundEvent { platform, sender_id, channel_id, is_dm }  │
+│                                                                          │
+│  Does NOT:                                                               │
+│  • ❌ Check allowed_users                                                │
+│  • ❌ Handle slash commands                                              │
+│  • ❌ Evaluate @mention / multibot / role logic                          │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                   │
+                                   │  InboundEvent (unified format)
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│           🔒  Layer 2+3: TRUST GATE  (unified, one implementation)  🔒    │
+│                                                                          │
+│  PlatformTrustConfigs::decide(                                           │
+│      event.platform,      // per-event platform (not adapter.platform()) │
+│      event.channel_id,                                                   │
+│      event.is_dm,                                                        │
+│      event.sender_id,                                                    │
+│  ) → Decision { Allow | DenyScope | DenyIdentity }                       │
+│                                                                          │
+│  L2 (scope):    surface_allowed(channel_id, is_dm) — default OPEN        │
+│  L3 (identity): identity_allowed(sender_id)        — default DENY-ALL    │
+│                                                                          │
+│  On DenyIdentity: echo sender ID (with rate-limit)                       │
+│  On DenyScope:    silent drop                                            │
+│  On Allow:        pass event to Handler ↓                                │
+│                                                                          │
+│  Bot messages:    if is_bot → skip L3 (bot admission stays in Handler)   │
+│                                                                          │
+│  🔑 Architectural guarantee: Handler never receives untrusted events      │
+└──────────────────────────────────┬───────────────────────────────────────┘
+                                   │
+                                   │  Only Allow events reach here
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│              Layer 4: Handlers (per-platform interaction logic)            │
+│                                                                          │
+│  ┌────────────┐  ┌────────────┐  ┌─────────────┐  ┌───────────┐        │
+│  │  Discord   │  │   Slack    │  │   Gateway   │  │   Cron    │        │
+│  │  Handler   │  │  Handler   │  │   Handler   │  │  Handler  │        │
+│  │            │  │            │  │             │  │           │        │
+│  │ • @mention │  │ • thread   │  │ • /reset    │  │ • format  │        │
+│  │ • role     │  │ • assist   │  │ • /cancel   │  │   prompt  │        │
+│  │ • multibot │  │   mode     │  │ • group     │  │           │        │
+│  │ • reaction │  │ • emoji    │  │   routing   │  │           │        │
+│  │ • channel  │  │            │  │             │  │           │        │
+│  └─────┬──────┘  └─────┬──────┘  └──────┬──────┘  └─────┬─────┘        │
+│        │               │                │               │              │
+└────────┼───────────────┼────────────────┼───────────────┼──────────────┘
+         │               │                │               │
+         ▼               ▼                ▼               ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    Dispatcher → dispatch_batch() → ACP Session            │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### InboundEvent (Receiver output / Trust Gate input)
+
+```rust
+/// Unified inbound event produced by all Receivers.
+/// Contains the minimum fields needed for trust evaluation.
+pub struct InboundEvent {
+    pub platform: String,           // "discord", "telegram", "line", etc.
+    pub sender_id: String,          // platform-specific sender identifier
+    pub channel_id: String,         // conversation surface
+    pub is_dm: bool,                // DM vs group/channel
+    pub is_bot: bool,               // bot-originated message
+    pub raw: RawPlatformEvent,      // opaque; Handler interprets this
+}
 ```
 
 ### Per-platform TrustConfig
@@ -206,123 +293,171 @@ impl TrustConfig {
     }
 
     /// L3: is this identity trusted? (default-deny)
-    pub fn is_allowed(&self, sender_id: &str) -> bool {
+    pub fn identity_allowed(&self, sender_id: &str) -> bool {
+        if sender_id.is_empty() { return false; }  // fail-closed on empty ID
         self.allow_all_users || self.allowed_users.contains(sender_id)
+    }
+
+    /// Combined decision: L2 then L3.
+    pub fn decide(&self, channel_id: &str, is_dm: bool, sender_id: &str) -> Decision {
+        if !self.surface_allowed(channel_id, is_dm) {
+            return Decision::DenyScope;
+        }
+        if !self.identity_allowed(sender_id) {
+            return Decision::DenyIdentity;
+        }
+        Decision::Allow
     }
 }
 
-/// Router holds one TrustConfig per platform
+/// Decision outcome.
+#[non_exhaustive]
+pub enum Decision {
+    Allow,
+    DenyScope,       // silent drop (L2 — not a security failure)
+    DenyIdentity,    // echo sender ID (L3 — request-access UX)
+}
+```
+
+### PlatformTrustConfigs (registry)
+
+```rust
 pub struct PlatformTrustConfigs {
-    configs: HashMap<String, TrustConfig>,  // keyed by platform name
+    configs: HashMap<String, TrustConfig>,  // keyed by lowercase platform name
 }
 
 impl PlatformTrustConfigs {
-    pub fn get(&self, platform: &str) -> &TrustConfig {
-        self.configs.get(platform).unwrap_or(&DEFAULT)
+    /// Look up by per-event platform (case-insensitive).
+    /// Unknown platform → default config (L2 open, L3 deny-all).
+    pub fn decide(&self, platform: &str, channel_id: &str, is_dm: bool, sender_id: &str) -> Decision {
+        let config = self.configs
+            .get(&platform.to_lowercase())
+            .unwrap_or(&Self::default_config());
+        config.decide(channel_id, is_dm, sender_id)
+    }
+
+    fn default_config() -> TrustConfig {
+        // L2 open, L3 deny-all — unknown platform = nobody in.
+        TrustConfig {
+            allow_all_channels: true,
+            allowed_channels: HashSet::new(),
+            allow_dm: true,
+            allow_all_users: false,
+            allowed_users: HashSet::new(),
+        }
     }
 }
-
-/// Default: L2 open (act anywhere the platform allows), L3 deny-all.
-static DEFAULT: TrustConfig = TrustConfig {
-    allow_all_channels: true,
-    allowed_channels: HashSet::new(),
-    allow_dm: true,
-    allow_all_users: false,                  // trust-none on identity
-    allowed_users: HashSet::new(),
-};
 ```
 
-### Trait & Type Changes (no new trait)
+Note: The default config uses a runtime-constructed `TrustConfig` (not a `static`
+with `HashSet::new()` which would not compile). The actual implementation uses
+`LazyLock` or returns a fresh default; see `trust.rs` on main for the real code.
 
-The trust gate is **uniform logic**, not per-platform behavior, so it is a plain
-`TrustConfig` + a router method — **not** a `ChatAdapter` method and **not** a new
-trait (see Rejected Alternatives). The `ChatAdapter` trait is unchanged:
-`platform()` already keys the `TrustConfig` and `send_message()` already performs
-the echo. What changes are the **shared data carriers** that feed the router:
+### Bot message handling
 
-**1. `MessageContext` — carry structured sender identity (not opaque JSON).**
-Today the router only receives `sender_json` (a serialized blob); it would have to
-parse JSON to read `sender_id`. Pass the `SenderContext` struct so L3 can read
-`sender_id` / `is_bot` directly (the router can still serialize it for the agent):
-
-```rust
-pub struct MessageContext {
-    pub thread_channel: ChannelRef,
-    pub sender: SenderContext,        // ← was: sender_json: String
-    pub prompt: String,
-    pub extra_blocks: Vec<ContentBlock>,
-    pub trigger_msg: MessageRef,
-    pub other_bot_present: bool,
-}
-```
-
-**2. `ChannelRef` — add an `is_dm` flag.**
-DM detection is platform-specific *structural* knowledge the adapter already has at
-construction time (Discord DM channel vs Telegram private chat vs Slack IM), so it
-is a **field the adapter populates**, not a trait method. This lets the router
-evaluate `allow_dm` (L2) uniformly:
-
-```rust
-pub struct ChannelRef {
-    pub platform: String,
-    pub channel_id: String,
-    pub is_dm: bool,                  // ← new; excluded from Hash/Eq like origin_event_id
-    pub thread_id: Option<String>,
-    pub parent_id: Option<String>,
-    pub origin_event_id: Option<String>,
-}
-```
-
-**3. Remove scattered trust checks from adapters.**
-The real refactor is deleting the `allowed_channels` / `allowed_users` checks
-currently in `discord.rs`, `slack.rs`, and `gateway.rs`, and letting the data flow
-into `MessageContext` / `ChannelRef` so the single router gate is the only place
-trust is enforced — this is what makes L3 un-bypassable. Structural concerns
-(thread detection, @mention gating, multibot detection, bot-ownership) **stay in
-the adapters** — they are not trust.
+Bot messages (where `InboundEvent.is_bot == true`) **bypass L3** at the Trust Gate.
+Bot admission is NOT part of the identity trust model — it is platform-specific
+structural logic (e.g. `trusted_bot_ids`, `allow_bot_messages`) that stays in the
+Handler. The Trust Gate only evaluates human sender identity.
 
 ### Echo reply on deny
 
 ```rust
-// In AdapterRouter::handle_message()
-let echo = format!(
-    "⚠️ You are not in the trusted list.\nYour ID: {}\nPlease ask the admin to add you to [{}].allowed_users.",
-    msg.sender_id,
-    adapter.platform()
-);
-let _ = adapter.send_message(&msg.channel, &echo).await;
+// In the Trust Gate layer (not in any adapter)
+if decision == Decision::DenyIdentity {
+    let echo = format!(
+        "⚠️ You are not in the trusted list.\nYour ID: {}\nPlease ask the admin to add you to [{}].allowed_users.",
+        event.sender_id,
+        event.platform,  // per-event platform, not adapter.platform()
+    );
+    send_echo(&event, &echo).await;
+}
 ```
+
+**Echo safeguards:**
+- **Rate-limit:** max 1 echo per sender per platform per 5 minutes (prevents spam/DoS amplification)
+- **Bot exclusion:** if `is_bot` → silent deny, no echo (prevents infinite reply loops between bots)
+- **DM preferred:** in group/channel contexts, prefer DM reply to avoid leaking sender UID publicly; fall back to in-channel if DM unavailable
+- **Best-effort:** echo delivery is not guaranteed (e.g. LINE reply tokens expire); this is acceptable — the echo is a UX convenience, not a security mechanism
+
+**Platform-specific delivery caveats:**
+- **LINE:** reply tokens are single-use and short-TTL (~30s). If the echo cannot use the reply token, fall back to push message API (requires separate quota/permission).
+- **Other platforms:** no known delivery constraints for the echo use case.
 
 ## 6. Migration
 
-### Breaking change
+### Phased rollout (not a hard cutover)
 
-Existing deployments with no `allowed_users` configured will stop accepting messages.
+The default flip is phased to avoid silently severing live bots on upgrade:
+
+| Phase | Behavior | When |
+|-------|----------|------|
+| **Phase 0** | Types + `decide()` defined, no runtime behavior change. Additive only. | Done (on main) |
+| **Phase 1** | Wire Trust Gate into ingress pipeline. **Keep current allow-all default.** Log deprecation warning when relying on implicit allow-all. | Next release |
+| **Phase 2** | Require explicit `allow_all_users = true` to preserve old behavior. Deployments without it get a **startup error** (not silent denial). | Pre-GA release |
+| **Phase 3** | Flip default: empty `allowed_users` + no `allow_all_users` = **deny-all**. | GA release |
 
 ### Migration path
 
 ```toml
-# Before (implicit trust-all):
+# Before (implicit trust-all — works in Phase 0/1, warns in Phase 1, errors in Phase 2):
 [discord]
 bot_token = "..."
 
-# After (explicit trust-all to keep old behavior):
+# After (explicit trust-all to keep old behavior across all phases):
 [discord]
 bot_token = "..."
 allow_all_users = true
+
+# Or (recommended — actually configure trust):
+[discord]
+bot_token = "..."
+allowed_users = ["845835116920307722"]
 ```
+
+### `[gateway]` vs first-class section precedence
+
+When both a deprecated `[gateway]` section and a matching first-class section
+(e.g. `[telegram]`) exist in config, the **first-class section wins**. The
+`[gateway]` entry for that platform is ignored and a deprecation warning is
+logged at startup. If only `[gateway]` exists for a platform, it remains
+functional.
 
 ## 7. Implementation Plan
 
-1. **Define `TrustConfig` + `PlatformTrustConfigs`** in `openab-core`
-2. **Extend carriers** — add `is_dm` to `ChannelRef`; pass `SenderContext` in `MessageContext`
-3. **Wire trust gate into `AdapterRouter::handle_message()`** — L2 (scope) then L3 (identity), single check point
-4. **Remove scattered trust checks** from:
-   - `is_denied_user()` in Discord EventHandler
-   - `should_skip_event()` user/channel filter in `gateway.rs`
-   - `allowed_users` checks in Slack / Feishu adapters
-5. **Add echo reply** on deny using `ChatAdapter::send_message()`
-6. **Update `config.toml.example`** and docs; migration guide in release notes
+1. **Define `InboundEvent`** — unified event struct that all Receivers produce
+2. **Refactor adapters into Receiver + Handler** — starting with Discord and
+   Gateway (Telegram). The Receiver produces `InboundEvent`; the Handler consumes
+   only events that passed the Trust Gate.
+3. **Wire Trust Gate as the ingress layer** between Receiver and Handler:
+   - Receives `InboundEvent` from Receiver
+   - Calls `PlatformTrustConfigs::decide(event.platform, ...)`
+   - Passes allowed events to Handler
+   - Echoes + drops denied events
+4. **Remove scattered trust checks** — replaced by the unified Trust Gate:
+   - `is_denied_user()` in Discord EventHandler (`discord.rs:2892`)
+   - `should_skip_event()` user/channel filter in `gateway.rs` (`:832`, `:1160`)
+   - Inline user allowlist in Slack (`slack.rs:1224`)
+   - Feishu L3 check in the gateway crate (`feishu.rs:425`) — must relocate to
+     core, not just delete (contradicts "gateway = L1 only" model)
+   - Discord reaction-dispatch gating (`discord.rs:1241`)
+   - Note: `trusted_bot_ids`, `allow_bot_messages`, `allowed_role_ids` **stay in
+     Handlers** — they are structural/trigger semantics, not identity trust.
+5. **Add echo reply with safeguards** — rate-limit, bot exclusion, DM-preferred
+6. **Structured logging** — log sender_id + platform on both deny AND allow
+   (existing dispatch logs use sender name; add structured sender_id field)
+7. **Update `config.toml.example`** and docs; migration guide in release notes
+
+### What stays in Handlers (NOT moved to Trust Gate)
+
+These are platform-specific structural concerns, not trust:
+- Thread detection and routing
+- @mention gating and multibot detection
+- Bot-ownership and `trusted_bot_ids`
+- `allowed_role_ids` (Discord role-based trigger control)
+- Reaction dispatch gating (triggers, not authorization)
+- Slash command routing (`/reset`, `/cancel`) — but note these now run AFTER the
+  Trust Gate, so untrusted senders cannot invoke them.
 
 ## 8. Rejected Alternatives
 
@@ -332,7 +467,7 @@ Each adapter implements `is_trusted_sender()`. Rejected because:
 - Trust logic is identical across all platforms (`allowed_users.contains(id)`)
 - Forces N identical implementations with no polymorphic benefit
 - New adapter forgetting to implement = security hole
-- Router-level gate is impossible to bypass by construction
+- Three-layer architecture makes this impossible to bypass by construction
 
 ### Trust check at gateway layer
 
@@ -340,6 +475,18 @@ Gateway adapters filter untrusted senders before forwarding. Rejected because:
 - Gateway is transport (L1) — mixing L3 policy violates layer separation
 - Trust config lives in core's `config.toml`, not gateway env vars
 - Reply capability already wired in core via `ChatAdapter::send_message()`
+
+### Trust gate inside Dispatcher::submit() (downstream of adapter)
+
+Wire gate into `Dispatcher::submit()` or `AdapterRouter::handle_message()`.
+Rejected because:
+- Gate is downstream of the Handler — Handler still receives untrusted events
+- Slash commands (`/reset`, `/cancel`) processed in the Handler would execute
+  before the gate is reached
+- Does not provide the architectural guarantee that untrusted events are invisible
+  to platform-specific logic
+- The "by construction" safety property requires the gate to be UPSTREAM of any
+  platform-specific code that acts on events
 
 ### Treating L2 (channel) as a security layer
 
