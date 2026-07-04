@@ -20,6 +20,8 @@ pub async fn run_from_file(aws_config: &aws_config::SdkConfig, file_path: &str) 
         anyhow::bail!("no manifests found at {}", file_path);
     }
 
+    print_plan(&manifests);
+
     let mut failures = Vec::new();
     for m in &manifests {
         println!("Deleting {} (from {})...", m.metadata.name, file_path);
@@ -33,6 +35,32 @@ pub async fn run_from_file(aws_config: &aws_config::SdkConfig, file_path: &str) 
         anyhow::bail!("failed to delete {} of {} service(s): {}", failures.len(), manifests.len(), failures.join(", "));
     }
     Ok(())
+}
+
+/// Print the upfront plan: every resource `delete -f` may remove for each
+/// manifest, as an unchecked `[ ]` list, before any AWS calls are made.
+/// Purely informational — see [`crate::apply::print_plan`] for the same
+/// rationale on the apply side; the existing `✓`/`⚠` lines printed by
+/// `run`/`ingress::teardown` as each step actually completes remain the
+/// source of truth for real detail.
+fn print_plan(manifests: &[crate::manifest::OABServiceManifest]) {
+    println!("Plan:");
+    for m in manifests {
+        println!("  {}:", m.metadata.name);
+        println!("    [ ] Scale ECS service to 0");
+        println!("    [ ] ECS service");
+        if let Some(ingress) = &m.spec.ingress {
+            println!("    [ ] Cloud Map service (namespace kept — shared per-VPC)");
+            for path in &ingress.paths {
+                println!("    [ ] API Gateway route: {path}");
+            }
+            println!("    [ ] API Gateway integration");
+            println!("    [ ] API Gateway HTTP API");
+        }
+        println!("    [ ] S3 manifest");
+        println!("    [ ] S3 config artifacts");
+    }
+    println!();
 }
 
 pub async fn run(

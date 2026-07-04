@@ -89,6 +89,8 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
         }
     }
 
+    print_plan(&manifests);
+
     for m in &manifests {
         println!("  Applying {} (ECS)...", m.metadata.name);
         apply_ecs(&ecs, &s3, aws_config, m, wait).await?;
@@ -96,6 +98,41 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
 
     println!("\n{} service(s) applied.", manifests.len());
     Ok(())
+}
+
+/// Print the upfront plan: every resource `apply` may touch for each
+/// manifest, as an unchecked `[ ]` list, before any AWS calls are made.
+/// Purely informational — derived straight from manifest fields, so it
+/// never blocks execution and never needs to stay in sync with exactly what
+/// each step decides to do at runtime (create vs. update, skip vs. act);
+/// the existing `✓`/`⚠` lines printed by `apply_ecs`/`ensure_gateway` as
+/// each step actually completes remain the source of truth for real detail
+/// (resource IDs, ARNs, URLs) — this is just the "what's coming" preview.
+fn print_plan(manifests: &[OABServiceManifest]) {
+    println!("Plan:");
+    for m in manifests {
+        println!("  {}:", m.metadata.name);
+        println!("    [ ] S3 manifest");
+        println!("    [ ] ECS task definition");
+        println!("    [ ] ECS service");
+        if let Some(ingress) = &m.spec.ingress {
+            println!("    [ ] Cloud Map namespace + service");
+            println!("    [ ] VPC Link");
+            println!("    [ ] API Gateway HTTP API");
+            println!("    [ ] API Gateway integration");
+            for path in &ingress.paths {
+                println!("    [ ] API Gateway route: {path}");
+            }
+            println!("    [ ] API Gateway stage");
+            println!("    [ ] Security group inbound rule");
+            if ingress.paths.iter().any(|p| p == "/webhook/telegram")
+                && m.spec.secrets.contains_key("TELEGRAM_BOT_TOKEN")
+            {
+                println!("    [ ] Telegram webhook registration");
+            }
+        }
+    }
+    println!();
 }
 
 pub(crate) fn load_manifests(path: &Path) -> Result<Vec<OABServiceManifest>> {
