@@ -247,7 +247,7 @@ events from multiple real platforms.
 │  On DenyScope:    silent drop                                            │
 │  On Allow:        pass event to Handler ↓                                │
 │                                                                          │
-│  Bot messages:    if is_bot → skip L3 (bot admission stays in Handler)   │
+│  Bot messages:    if is_bot → skip L3, still enforce L2 scope             │
 │                                                                          │
 │  🔑 Architectural guarantee: Handler never receives untrusted events      │
 └──────────────────────────────────┬───────────────────────────────────────┘
@@ -285,6 +285,19 @@ incoming `GatewayEvent` carries a `platform` field (e.g. `"telegram"`, `"line"`,
 NOT spawn per-platform receivers — there is one WS connection, one event loop,
 producing `InboundEvent`s tagged with the correct platform. The Trust Gate then
 routes the decision to the right platform's `TrustConfig`.
+
+**Cross-crate boundary:** The Gateway Receiver is actually **two stages** across
+two crates:
+1. **`openab-gateway` (edge crate):** receives platform webhooks, performs L1
+   authentication, normalizes to `GatewayEvent`, forwards over WebSocket. This
+   crate has NO dependency on `openab-core` and does NOT construct `InboundEvent`.
+2. **`openab-core` (core crate):** receives `GatewayEvent` over WebSocket,
+   wraps it into `InboundEvent { raw: RawPlatformEvent::Gateway(gw_event) }`,
+   then feeds the Trust Gate.
+
+This means `InboundEvent` and `GatedEvent` types live in `openab-core` only.
+The gateway crate never sees them — it only produces `GatewayEvent` (a simpler
+struct defined in a shared types crate or serialized as JSON over the WS).
 
 ```rust
 /// Unified inbound event produced by all Receivers.
@@ -396,15 +409,21 @@ L2+L3 function with no bot-awareness:
 
 ```rust
 // Trust Gate layer (pseudocode)
-async fn gate_event(event: InboundEvent, configs: &PlatformTrustConfigs) -> Option<GatedEvent> {
-    // Bot bypass — skip L3 entirely; bot admission is Handler's job
+async fn gate_event(event: &InboundEvent, configs: &PlatformTrustConfigs) -> Option<GatedEvent> {
+    // Bot bypass — skip L3 identity check, but STILL enforce L2 scope.
+    // Bots must respect channel/DM scope (noise/cost control) even though
+    // they don't need identity trust.
     if event.is_bot {
-        return Some(GatedEvent { inner: event });
+        if !configs.surface_allowed(&event.platform, &event.channel_id, event.is_dm) {
+            return None;  // DenyScope — bot in wrong channel, silent drop
+        }
+        return Some(GatedEvent { inner: event.clone() });  // L2 pass, skip L3
     }
 
+    // Human sender — full L2 + L3 evaluation
     let decision = configs.decide(&event.platform, &event.channel_id, event.is_dm, &event.sender_id);
     match decision {
-        Decision::Allow => Some(GatedEvent { inner: event }),
+        Decision::Allow => Some(GatedEvent { inner: event.clone() }),
         Decision::DenyIdentity => { echo_sender_id(&event).await; None }
         Decision::DenyScope => None,  // silent drop
     }
@@ -412,7 +431,7 @@ async fn gate_event(event: InboundEvent, configs: &PlatformTrustConfigs) -> Opti
 ```
 
 This means `PlatformTrustConfigs::decide()` does NOT need an `is_bot` parameter —
-the bot check happens before `decide()` is called.
+the bot check happens before `decide()` is called. Bots skip L3 but NOT L2.
 
 ### Echo reply on deny
 
@@ -454,6 +473,173 @@ using the **exact format** the platform provides in event payloads:
 | WeCom | String | UserID | `"zhangsan"` | — |
 | Google Chat | String | User resource name | `"users/123456789"` | — |
 | MS Teams | String | `activity.from.id` | `"29:1abc..."` | Verify via actual event payload; may differ from AAD Object ID |
+
+### Event loop binding (how platforms wire into the pipeline)
+
+The ingress pipeline is a **generic function** parameterized by Receiver and
+Handler. Each platform spawns one `tokio::spawn` with this pipeline. The Trust
+Gate is the same code for all platforms — only Receiver and Handler differ.
+
+```rust
+/// Generic ingress pipeline — all platforms use this.
+async fn run_platform<R, H>(receiver: R, trust: Arc<PlatformTrustConfigs>, handler: H)
+where
+    R: EventReceiver,       // trait: produces InboundEvent
+    H: EventHandler,        // trait: consumes GatedEvent
+{
+    let mut rx = receiver.start().await;
+
+    loop {
+        let event: InboundEvent = match rx.recv().await {
+            Some(e) => e,
+            None => break,  // connection closed / shutdown
+        };
+
+        // 🔒 Trust Gate (unified for all platforms)
+        let gated = match gate_event(&event, &trust).await {
+            Some(g) => g,
+            None => continue,  // denied
+        };
+
+        // Handler only receives GatedEvent (compile-time enforced)
+        handler.handle(gated).await;
+    }
+}
+```
+
+**Traits:**
+
+```rust
+#[async_trait]
+trait EventReceiver {
+    /// Start listening, return a channel of normalized events.
+    async fn start(&self) -> mpsc::Receiver<InboundEvent>;
+}
+
+#[async_trait]
+trait EventHandler {
+    /// Process a trusted event (GatedEvent — can only come from Trust Gate).
+    async fn handle(&self, event: GatedEvent);
+}
+```
+
+**Startup wiring (`main.rs`):**
+
+```rust
+async fn main() {
+    let trust = Arc::new(PlatformTrustConfigs::from_config(&config));
+    let dispatcher = Arc::new(Dispatcher::new(...));
+
+    // Discord — own WebSocket connection
+    if config.discord.enabled {
+        tokio::spawn(run_platform(
+            DiscordReceiver::new(config.discord.clone()),
+            trust.clone(),
+            DiscordHandler::new(config.discord, dispatcher.clone()),
+        ));
+    }
+
+    // Slack — own Socket Mode connection
+    if config.slack.enabled {
+        tokio::spawn(run_platform(
+            SlackReceiver::new(config.slack.clone()),
+            trust.clone(),
+            SlackHandler::new(config.slack, dispatcher.clone()),
+        ));
+    }
+
+    // Gateway platforms — ONE shared WebSocket, demux by platform
+    if config.has_gateway_platforms() {
+        tokio::spawn(run_gateway_platforms(
+            config.gateway_url.clone(),
+            trust.clone(),
+            dispatcher.clone(),
+            config.clone(),
+        ));
+    }
+
+    // Cron — timer-based
+    if config.cron.enabled {
+        tokio::spawn(run_platform(
+            CronReceiver::new(config.cron.clone()),
+            trust.clone(),
+            CronHandler::new(config.cron, dispatcher.clone()),
+        ));
+    }
+}
+```
+
+**Gateway platforms — one WebSocket, fan-out by platform:**
+
+Gateway-connected platforms (Telegram, LINE, Feishu, WeCom, Google Chat, Teams)
+share a **single WebSocket** connection to `openab-gateway`. The gateway has
+already performed L1 authentication and normalized events into `GatewayEvent`.
+Core receives all events on one connection and **demuxes by `event.platform`**:
+
+```rust
+async fn run_gateway_platforms(
+    url: String,
+    trust: Arc<PlatformTrustConfigs>,
+    dispatcher: Arc<Dispatcher>,
+    config: Config,
+) {
+    let mut ws = connect_to_gateway(&url).await;
+
+    loop {
+        let gw_event: GatewayEvent = ws.recv().await;
+
+        // Normalize GatewayEvent → InboundEvent
+        let event = InboundEvent {
+            platform: gw_event.platform.clone(),
+            sender_id: gw_event.sender_id.clone(),
+            channel_id: gw_event.channel_id.clone(),
+            is_dm: gw_event.is_dm,
+            is_bot: gw_event.is_bot,
+            raw: RawPlatformEvent::Gateway(gw_event.clone()),
+        };
+
+        // 🔒 Trust Gate (same logic, keyed by event.platform)
+        let gated = match gate_event(&event, &trust).await {
+            Some(g) => g,
+            None => continue,
+        };
+
+        // Fan-out to platform-specific Handler
+        match event.platform.as_str() {
+            "telegram"   => telegram_handler.handle(gated).await,
+            "line"       => line_handler.handle(gated).await,
+            "feishu"     => feishu_handler.handle(gated).await,
+            "wecom"      => wecom_handler.handle(gated).await,
+            "googlechat" => googlechat_handler.handle(gated).await,
+            "teams"      => teams_handler.handle(gated).await,
+            unknown      => warn!("unknown gateway platform: {unknown}"),
+        }
+    }
+}
+```
+
+**Summary of binding topology:**
+
+```
+Discord   → own WS     → DiscordReceiver  → 🔒 Trust Gate → DiscordHandler
+Slack     → own WS     → SlackReceiver    → 🔒 Trust Gate → SlackHandler
+Gateway   → one WS     → GatewayReceiver  → 🔒 Trust Gate → demux by platform
+              (shared)                                          ├→ TelegramHandler
+                                                               ├→ LineHandler
+                                                               ├→ FeishuHandler
+                                                               ├→ WecomHandler
+                                                               ├→ GoogleChatHandler
+                                                               └→ TeamsHandler
+Cron      → timer      → CronReceiver     → 🔒 Trust Gate → CronHandler
+```
+
+**Design choice — one WS for all gateway platforms (not per-platform):**
+- Matches current architecture (minimal change)
+- Gateway already normalizes all platform events into `GatewayEvent`
+- One connection = one reconnect logic, one heartbeat, one backpressure
+- Trust Gate uses `event.platform` to look up the correct per-platform config
+- If the WS drops, all gateway platforms go offline together — acceptable,
+  same as current behavior, and gateway is designed for high availability
 
 ## 6. Migration
 
