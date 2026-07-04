@@ -255,15 +255,18 @@ async fn apply_ecs(
         env_vars.push(KeyValuePair::builder().name("BOOTSTRAP_FROM").value(bootstrap).build());
     }
 
-    // 3. Build secrets from map
-    let secrets: Vec<Secret> = m
-        .spec
-        .secrets
-        .iter()
-        .map(|(name, ssm_path)| {
-            Secret::builder().name(name).value_from(ssm_path).build().unwrap()
-        })
-        .collect();
+    // 3. Build secrets from map. Values can be either the ECS-native
+    //    `valueFrom` format directly (a Secrets Manager ARN, optionally with
+    //    a `:<jsonKey>::` suffix), or the same `aws-sm://<secret-id>#<json-key>`
+    //    shorthand openab itself uses for in-app secret refs — resolved here
+    //    into the ECS-native form ECS actually requires, since ECS has no
+    //    knowledge of that scheme.
+    let sm = aws_sdk_secretsmanager::Client::new(config);
+    let mut secrets: Vec<Secret> = Vec::with_capacity(m.spec.secrets.len());
+    for (name, value) in &m.spec.secrets {
+        let value_from = crate::secrets::resolve_value_from(&sm, value).await?;
+        secrets.push(Secret::builder().name(name).value_from(value_from).build().unwrap());
+    }
 
     // 4. Register task definition. Resolve bootstrap state once up front — it
     // supplies both the CloudWatch log group (for logConfiguration below) and
@@ -554,6 +557,21 @@ async fn apply_ecs(
         println!("  🔗 Webhook URL(s) for {}:", m.metadata.name);
         for u in &urls {
             println!("     {u}");
+        }
+
+        // Best-effort: register the Telegram webhook so the bot starts
+        // receiving updates without a manual `curl setWebhook` step. Only
+        // fires when `/webhook/telegram` is one of the ingress paths and
+        // spec.secrets has a TELEGRAM_BOT_TOKEN entry; a no-op otherwise.
+        // Never fails `apply` — the AWS provisioning above already
+        // succeeded, and this is a convenience on top of it.
+        let path_urls: Vec<(String, String)> =
+            ingress.paths.iter().cloned().zip(urls.iter().cloned()).collect();
+        match crate::ingress::register_telegram_webhook(config, &m.spec.secrets, &path_urls).await
+        {
+            Ok(Some(desc)) => eprintln!("  ✓ Telegram webhook registered: {desc}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("  ⚠ Telegram webhook registration failed (apply still succeeded): {e}"),
         }
     }
 

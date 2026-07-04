@@ -139,6 +139,90 @@ pub async fn ensure_gateway(
     Ok(webhook_urls(&api_endpoint, &ingress.paths))
 }
 
+/// Find the `/webhook/telegram` URL among the resolved webhook URLs, and
+/// confirm a `TELEGRAM_BOT_TOKEN` secret is configured. Returns `None` if
+/// either is missing, meaning [`register_telegram_webhook`] should no-op.
+fn find_telegram_webhook(
+    secrets: &std::collections::HashMap<String, String>,
+    webhook_urls: &[(String, String)],
+) -> Option<(String, String)> {
+    let url = webhook_urls
+        .iter()
+        .find(|(path, _)| path == "/webhook/telegram")
+        .map(|(_, url)| url.clone())?;
+    let token_ref = secrets.get("TELEGRAM_BOT_TOKEN")?.clone();
+    Some((url, token_ref))
+}
+
+/// Register the webhook URL with Telegram's Bot API (`setWebhook`), so the
+/// bot starts receiving updates without a manual `curl` step. Only runs when
+/// `spec.secrets` has a `TELEGRAM_BOT_TOKEN` entry and one of the ingress
+/// paths is `/webhook/telegram`; a no-op otherwise. If `TELEGRAM_SECRET_TOKEN`
+/// is also present, it's passed through so Telegram includes it on every
+/// webhook request (openab's Telegram adapter validates it).
+///
+/// Best-effort: errors are returned to the caller to print as a warning, but
+/// are never fatal to `apply` — the AWS-side provisioning already succeeded
+/// by this point, and a failed Telegram API call (e.g. bad token, network
+/// blip) shouldn't roll any of that back or fail the whole command.
+pub async fn register_telegram_webhook(
+    config: &aws_config::SdkConfig,
+    secrets: &std::collections::HashMap<String, String>,
+    webhook_urls: &[(String, String)],
+) -> Result<Option<String>> {
+    let Some((url, token_arn)) = find_telegram_webhook(secrets, webhook_urls) else {
+        return Ok(None);
+    };
+
+    let sm = aws_sdk_secretsmanager::Client::new(config);
+    let bot_token = crate::secrets::resolve_string(&sm, &token_arn)
+        .await
+        .context("failed to resolve TELEGRAM_BOT_TOKEN")?;
+
+    let secret_token = match secrets.get("TELEGRAM_SECRET_TOKEN") {
+        Some(v) => Some(
+            crate::secrets::resolve_string(&sm, v)
+                .await
+                .context("failed to resolve TELEGRAM_SECRET_TOKEN")?,
+        ),
+        None => None,
+    };
+
+    let mut form = vec![("url".to_string(), url)];
+    if let Some(st) = secret_token {
+        form.push(("secret_token".to_string(), st));
+    }
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("https://api.telegram.org/bot{bot_token}/setWebhook"))
+        .form(&form)
+        .send()
+        .await
+        .context("failed to call Telegram setWebhook API")?;
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse Telegram setWebhook response")?;
+
+    if !status.is_success() || body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        anyhow::bail!(
+            "Telegram setWebhook failed: {}",
+            body.get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error")
+        );
+    }
+    Ok(Some(
+        body.get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("webhook registered")
+            .to_string(),
+    ))
+}
+
+
 /// API Gateway route key for a webhook path (POST only).
 fn route_key(path: &str) -> String {
     format!("POST {path}")
@@ -943,6 +1027,35 @@ mod tests {
     fn stage_path_override_present_when_correctly_set() {
         let params = HashMap::from([("overwrite:path".to_string(), "$request.path".to_string())]);
         assert!(has_stage_path_override(Some(&params)));
+    }
+
+    #[test]
+    fn find_telegram_webhook_finds_url_and_token() {
+        let secrets = HashMap::from([("TELEGRAM_BOT_TOKEN".to_string(), "arn:aws:...".to_string())]);
+        let urls = vec![
+            ("/webhook/line".to_string(), "https://x/prod/webhook/line".to_string()),
+            ("/webhook/telegram".to_string(), "https://x/prod/webhook/telegram".to_string()),
+        ];
+        let (url, token) = find_telegram_webhook(&secrets, &urls).unwrap();
+        assert_eq!(url, "https://x/prod/webhook/telegram");
+        assert_eq!(token, "arn:aws:...");
+    }
+
+    #[test]
+    fn find_telegram_webhook_none_without_telegram_path() {
+        let secrets = HashMap::from([("TELEGRAM_BOT_TOKEN".to_string(), "arn:aws:...".to_string())]);
+        let urls = vec![("/webhook/line".to_string(), "https://x/prod/webhook/line".to_string())];
+        assert!(find_telegram_webhook(&secrets, &urls).is_none());
+    }
+
+    #[test]
+    fn find_telegram_webhook_none_without_bot_token_secret() {
+        let secrets = HashMap::new();
+        let urls = vec![(
+            "/webhook/telegram".to_string(),
+            "https://x/prod/webhook/telegram".to_string(),
+        )];
+        assert!(find_telegram_webhook(&secrets, &urls).is_none());
     }
 
     #[test]

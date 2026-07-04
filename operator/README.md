@@ -251,8 +251,7 @@ On `apply` this reconciles (idempotently, reused by name):
 5. One **route** per path + a `prod` auto-deploy **stage**
 6. A self-referencing **security-group** inbound rule on `containerPort`
 
-`apply` then prints the stable webhook URL(s) to register with BotFather / the
-LINE console:
+`apply` then prints the stable webhook URL(s):
 
 ```
 🔗 Webhook URL(s) for my-bot:
@@ -260,15 +259,27 @@ LINE console:
    https://{api-id}.execute-api.{region}.amazonaws.com/prod/webhook/line
 ```
 
+For Telegram, if `/webhook/telegram` is one of `spec.ingress.paths` and
+`spec.secrets` has a `TELEGRAM_BOT_TOKEN` entry, `apply` also registers the
+webhook URL with Telegram directly (calling `setWebhook` on your behalf) — no
+manual `curl` step needed. If `spec.secrets` also has a
+`TELEGRAM_SECRET_TOKEN` entry, it's passed through so Telegram signs every
+webhook request with it (see the security note below). This is best-effort
+and never fails `apply` — if it errors (bad token, network blip), `apply`
+still succeeds and prints a warning; register the webhook yourself with the
+printed URL in that case. LINE has no `setWebhook`-equivalent API, so its URL
+must still be registered manually in the LINE Developers console.
+
 > **Security note:** the API Gateway endpoint itself is public and unauthenticated
 > at the transport layer (no IAM auth, no API key). OpenAB's webhook handlers add
 > their own app-layer verification on top: Telegram validates the
 > `X-Telegram-Bot-Api-Secret-Token` header (`TELEGRAM_SECRET_TOKEN`) and the
 > request's source IP against Telegram's published webhook subnets; LINE
 > verifies an HMAC-SHA256 signature using `LINE_CHANNEL_SECRET`. Set
-> `TELEGRAM_SECRET_TOKEN` when registering the webhook with BotFather to enable
-> that check.
+> `TELEGRAM_SECRET_TOKEN` in `spec.secrets` to enable that check — `apply`
+> passes it to Telegram automatically as described above.
 >
+
 > **Stage prefix stripped before it reaches the backend:** for private
 > (VPC_LINK) integrations, API Gateway forwards the *stage-prefixed* request
 > path to the backend by default (e.g. `/prod/webhook/telegram`, not
@@ -394,6 +405,28 @@ Attached to `oab-task-role` — the identity the *running container* assumes.
 | `oab-ecs-exec` | ssmmessages:* | * (ECS Exec requirement) |
 | `oab-s3-artifacts` | s3:GetObject, s3:PutObject | `{bucket}/artifacts/*` |
 | `oab-secrets` | secretsmanager:GetSecretValue | `arn:aws:secretsmanager:*:*:secret:oab/*` |
+
+### `spec.secrets` value format
+
+`spec.secrets` maps a container env var name to where ECS should fetch its
+value from at task launch (via the execution role below — the container
+itself never sees a raw secret reference, only the resolved value). Two
+formats are accepted, and can be mixed within the same manifest:
+
+```yaml
+spec:
+  secrets:
+    # ECS-native valueFrom: a full Secrets Manager ARN. Add a `:<jsonKey>::`
+    # suffix to extract one field of a JSON secret; omit it for a
+    # plain-string secret.
+    TELEGRAM_BOT_TOKEN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:oab/telegram/mybot-AC80TP:TELEGRAM_BOT_TOKEN::"
+    # aws-sm://<secret-id>#<json-key> shorthand — the same convention
+    # openab itself uses for in-app secret refs in config.toml (see
+    # docs/secrets-management.md). oabctl resolves this to the ECS-native
+    # form above automatically; <secret-id> can be a bare secret name
+    # (resolved to its ARN via DescribeSecret) or a full ARN directly.
+    TELEGRAM_SECRET_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_SECRET_TOKEN"
+```
 
 ### IAM Execution Role Permissions
 

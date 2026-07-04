@@ -6,6 +6,7 @@ mod create;
 mod get;
 mod delete;
 mod ingress;
+mod secrets;
 
 use clap::{Parser, Subcommand};
 
