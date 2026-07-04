@@ -65,6 +65,17 @@ tar xzf oabctl.tar.gz
 sudo mv oabctl /usr/local/bin/
 ```
 
+Pre-beta builds (matching the rolling `pre-beta-<agent>` image tags, built
+hourly off `main`) are published to a rolling `oabctl-pre-beta` release —
+overwritten on every pre-beta build, so it always tracks the latest `main`:
+
+```bash
+curl -L -o oabctl.tar.gz \
+  https://github.com/openabdev/openab/releases/download/oabctl-pre-beta/oabctl-pre-beta-<platform>.tar.gz
+tar xzf oabctl.tar.gz
+sudo mv oabctl /usr/local/bin/
+```
+
 Or build from source (requires Rust):
 
 ```bash
