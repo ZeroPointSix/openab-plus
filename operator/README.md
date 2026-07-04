@@ -411,20 +411,25 @@ Attached to `oab-task-role` — the identity the *running container* assumes.
 `spec.secrets` maps a container env var name to where ECS should fetch its
 value from at task launch (via the execution role below — the container
 itself never sees a raw secret reference, only the resolved value). Two
-formats are accepted, and can be mixed within the same manifest:
+formats are accepted **per value** — either works for any key, and both can
+be mixed freely across different keys in the same manifest:
 
 ```yaml
 spec:
   secrets:
-    # ECS-native valueFrom: a full Secrets Manager ARN. Add a `:<jsonKey>::`
-    # suffix to extract one field of a JSON secret; omit it for a
-    # plain-string secret.
+    # Format 1 — ECS-native valueFrom: a full Secrets Manager ARN. Add a
+    # `:<jsonKey>::` suffix to extract one field of a JSON secret; omit it
+    # for a plain-string secret.
     TELEGRAM_BOT_TOKEN: "arn:aws:secretsmanager:us-east-1:123456789012:secret:oab/telegram/mybot-AC80TP:TELEGRAM_BOT_TOKEN::"
-    # aws-sm://<secret-id>#<json-key> shorthand — the same convention
+
+    # Format 2 — aws-sm://<secret-id>#<json-key> shorthand, equivalent to
+    # the line above (same secret, same key). This is the same convention
     # openab itself uses for in-app secret refs in config.toml (see
     # docs/secrets-management.md). oabctl resolves this to the ECS-native
-    # form above automatically; <secret-id> can be a bare secret name
-    # (resolved to its ARN via DescribeSecret) or a full ARN directly.
+    # form automatically; <secret-id> can be a bare secret name (resolved
+    # to its ARN via DescribeSecret) or a full ARN directly.
+    # TELEGRAM_BOT_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_BOT_TOKEN"
+
     TELEGRAM_SECRET_TOKEN: "aws-sm://oab/telegram/mybot#TELEGRAM_SECRET_TOKEN"
 ```
 
