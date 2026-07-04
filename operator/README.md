@@ -196,7 +196,7 @@ metadata:
   name: my-bot
   namespace: prod
 spec:
-  image: ghcr.io/openabdev/openab:stable
+  image: ghcr.io/openabdev/openab:stable-kiro
   resources:
     cpu: "256"
     memory: "512"
@@ -224,7 +224,7 @@ linked here.
 
 ```yaml
 spec:
-  image: ghcr.io/openabdev/openab:beta
+  image: ghcr.io/openabdev/openab:beta-kiro
   resources: { cpu: "256", memory: "512" }
   configFrom: s3://.../config.toml
   runtime:
@@ -255,7 +255,7 @@ metadata:
   name: my-telegram-bot
   namespace: prod
 spec:
-  image: ghcr.io/openabdev/openab:latest
+  image: ghcr.io/openabdev/openab:stable-kiro
   resources: { cpu: "256", memory: "512" }
   configFrom: s3://<your-bucket>/config.toml
   secrets:
@@ -386,7 +386,7 @@ metadata:
   namespace: prod
 spec:
   template:
-    image: ghcr.io/openabdev/openab:stable
+    image: ghcr.io/openabdev/openab:stable-kiro
     resources: { cpu: "256", memory: "512" }
     runtime:
       type: ecs
