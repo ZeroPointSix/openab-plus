@@ -213,7 +213,7 @@ async fn handle(&self, event: GatedEvent) { /* ... */ }
 ```
 crate::trust
 ├── mod.rs          // PlatformTrustConfigs, TrustConfig, Decision (public)
-├── gate.rs         // gate_event() + GatedEvent (constructor is pub(super))
+├── gate.rs         // gate_event() + GatedEvent (constructor is private)
 └── (no other module can construct GatedEvent)
 ```
 
