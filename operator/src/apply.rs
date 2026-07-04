@@ -98,7 +98,7 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
     Ok(())
 }
 
-fn load_manifests(path: &Path) -> Result<Vec<OABServiceManifest>> {
+pub(crate) fn load_manifests(path: &Path) -> Result<Vec<OABServiceManifest>> {
     let mut manifests = Vec::new();
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {
