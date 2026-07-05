@@ -324,8 +324,20 @@ async fn main() -> anyhow::Result<()> {
         // (channels) has no Telegram-specific concept distinct from the
         // generic gateway model, so it stays on the shared GATEWAY_* values
         // set above.
-        if let Some(t) = &cfg.telegram {
-            let r = t.resolve();
+        //
+        // Also resolves when running env-only (no [telegram] section but
+        // TELEGRAM_BOT_TOKEN set), so TELEGRAM_ALLOWED_USERS /
+        // TELEGRAM_ALLOW_ALL_USERS are honored in pure-env deployments.
+        let telegram_resolved = if let Some(t) = &cfg.telegram {
+            Some(t.resolve())
+        } else if std::env::var("TELEGRAM_ALLOWED_USERS").is_ok()
+            || std::env::var("TELEGRAM_ALLOW_ALL_USERS").is_ok()
+        {
+            Some(config::TelegramConfig::default().resolve())
+        } else {
+            None
+        };
+        if let Some(r) = telegram_resolved {
             reg.insert(
                 "telegram",
                 TrustConfig::new(
