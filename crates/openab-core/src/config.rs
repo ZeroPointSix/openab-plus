@@ -606,8 +606,8 @@ pub struct TelegramConfig {
     /// (default `/webhook/telegram`).
     pub webhook_path: Option<String>,
     /// Explicit flag: true = allow all users, false = check `allowed_users`.
-    /// When not set, auto-detected: non-empty list → false, empty list → true
-    /// (same convention as `[discord]`/`[slack]`). Env fallback:
+    /// When not set, defaults to `false` (deny-all, per identity-trust-none ADR).
+    /// Set `true` explicitly to allow all users. Env fallback:
     /// `TELEGRAM_ALLOW_ALL_USERS`.
     pub allow_all_users: Option<bool>,
     /// Telegram user IDs allowed to interact with the bot. Only checked when
@@ -684,7 +684,7 @@ impl TelegramConfig {
                 std::env::var("TELEGRAM_ALLOW_ALL_USERS")
                     .ok()
                     .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                    .unwrap_or_else(|| allowed_users.is_empty())
+                    .unwrap_or(false)
             }),
             allowed_users,
         }
@@ -1658,10 +1658,10 @@ mod tests {
         std::env::remove_var("TELEGRAM_ALLOWED_USERS");
 
         // --- Scenario 8: empty list + no explicit flag → allow_all_users
-        //     auto-detects true (same convention as [discord]/[slack]) ---
+        //     defaults to false (identity-trust-none: deny-all by default) ---
         let r = TelegramConfig::default().resolve();
         assert!(r.allowed_users.is_empty());
-        assert!(r.allow_all_users);
+        assert!(!r.allow_all_users);
 
         // --- Scenario 9: non-empty list + no explicit flag → auto-detects
         //     false (deny-all-except-list) ---
@@ -1678,13 +1678,18 @@ mod tests {
         std::env::set_var("TELEGRAM_ALLOWED_USERS", " 111 , 222,333 ");
         let r = TelegramConfig::default().resolve();
         assert_eq!(r.allowed_users, vec!["111".to_string(), "222".to_string(), "333".to_string()]);
-        assert!(!r.allow_all_users); // auto-detected false since the env list is non-empty
+        assert!(!r.allow_all_users); // default false (deny-all)
         std::env::remove_var("TELEGRAM_ALLOWED_USERS");
 
-        // --- Scenario 11: explicit allow_all_users = false overrides
-        //     empty-list auto-detect ---
+        // --- Scenario 11: explicit allow_all_users = false matches
+        //     the deny-all default (no-op but valid config) ---
         let cfg = TelegramConfig { allow_all_users: Some(false), ..Default::default() };
         assert!(!cfg.resolve().allow_all_users);
+
+        // --- Scenario 12: explicit allow_all_users = true opts in to
+        //     allow-all (overrides deny-all default) ---
+        let cfg = TelegramConfig { allow_all_users: Some(true), ..Default::default() };
+        assert!(cfg.resolve().allow_all_users);
 
         // --- Cleanup ---
         for k in [

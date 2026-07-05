@@ -34,8 +34,8 @@ Set environment variables:
 | `TELEGRAM_BOT_USERNAME` | No | Bot username for @mention gating |
 | `TELEGRAM_RICH_MESSAGES` | No | `true` (default) for rich formatting |
 | `TELEGRAM_STREAMING` | No | follows `TELEGRAM_RICH_MESSAGES` | Stream replies via rich message drafts. Defaults to `true` when rich messages are enabled, `false` otherwise. Set explicitly to override |
-| `TELEGRAM_ALLOWED_USERS` | No | Comma-separated Telegram user IDs allowed to interact (empty = allow all) |
-| `TELEGRAM_ALLOW_ALL_USERS` | No | `true`/`false` — explicit override for user gating (auto-detected from list if unset) |
+| `TELEGRAM_ALLOWED_USERS` | No | Comma-separated Telegram user IDs allowed to interact (empty = deny all) |
+| `TELEGRAM_ALLOW_ALL_USERS` | No | `true`/`false` — defaults to `false` (deny-all). Set `true` to allow everyone. |
 | `GATEWAY_LISTEN` | No | Listen address (default: `0.0.0.0:8080`) |
 
 OAB config (`config.toml`):
@@ -90,7 +90,7 @@ rich_messages       = true     # sendRichMessage rendering (default true)
 streaming           = true     # override; defaults to follow rich_messages
 webhook_path        = "/webhook/telegram"
 allowed_users       = ["12345678"]  # restrict to specific Telegram user IDs
-# allow_all_users   = false          # auto-detected: non-empty list → false
+# allow_all_users   = true           # set true to allow everyone (default: false)
 ```
 
 **Precedence (per field):** `[telegram]` value (with `${}` expansion) → `TELEGRAM_*` env var → built-in default. This is config-authoritative and matches `[discord]`/`[slack]`. Any field you omit falls back to its env var, so existing env-only deployments keep working unchanged.
@@ -103,8 +103,8 @@ allowed_users       = ["12345678"]  # restrict to specific Telegram user IDs
 | `rich_messages` | `TELEGRAM_RICH_MESSAGES` | `true` |
 | `streaming` | `TELEGRAM_STREAMING` | follows `rich_messages` |
 | `webhook_path` | `TELEGRAM_WEBHOOK_PATH` | `/webhook/telegram` |
-| `allowed_users` | `TELEGRAM_ALLOWED_USERS` (comma-separated) | `[]` (empty = allow all) |
-| `allow_all_users` | `TELEGRAM_ALLOW_ALL_USERS` | auto-detect from list |
+| `allowed_users` | `TELEGRAM_ALLOWED_USERS` (comma-separated) | `[]` (deny all if empty) |
+| `allow_all_users` | `TELEGRAM_ALLOW_ALL_USERS` | `false` (deny-all) |
 
 > **Tip**: You can run a pure config-only deployment — no `TELEGRAM_*` env vars needed. Just set `bot_token = "your-token"` directly in `[telegram]` and the adapter will activate from config alone.
 
@@ -133,12 +133,12 @@ bot_token     = "${TELEGRAM_BOT_TOKEN}"
 allowed_users = ["12345678", "87654321"]   # only these user IDs can chat
 ```
 
-**Auto-detect logic** (same convention as `[discord]`/`[slack]`):
-- Non-empty `allowed_users` list → `allow_all_users` defaults to `false` (deny-all-except-list)
-- Empty `allowed_users` list → `allow_all_users` defaults to `true` (allow everyone)
-- Set `allow_all_users` explicitly to override the auto-detection
+**Default behavior** (identity-trust-none):
+- No config → `allow_all_users` defaults to `false` → bot denies all users
+- Set `allowed_users = ["12345678"]` → only listed IDs can chat
+- Set `allow_all_users = true` → open to everyone (opt-in)
 
-**Resolution order:** config value → `TELEGRAM_ALLOWED_USERS` env var (comma-separated) → empty (allow all).
+**Resolution order:** config value → `TELEGRAM_ALLOWED_USERS` env var (comma-separated) → empty (deny all).
 
 > **Finding your Telegram user ID:** Send `/start` to [@userinfobot](https://t.me/userinfobot) or use the `getUpdates` API after messaging your bot.
 
@@ -375,8 +375,8 @@ Set `TELEGRAM_RICH_MESSAGES=false` to disable rich messages and use legacy `send
 | `TELEGRAM_SECRET_TOKEN` | No | — | Webhook signature validation |
 | `TELEGRAM_RICH_MESSAGES` | No | `true` | Use `sendRichMessage` for tables/headings/long content (Bot API 10.1+). Set `false` to opt out. |
 | `TELEGRAM_STREAMING` | No | follows `TELEGRAM_RICH_MESSAGES` | Stream replies live via `sendRichMessageDraft`. Defaults to `true` when rich messages are enabled, `false` otherwise. Set `false` for send-once mode (single final message). |
-| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs allowed to interact with the bot. Empty = allow all. |
-| `TELEGRAM_ALLOW_ALL_USERS` | No | auto-detect | Explicit flag: `true` = allow all users, `false` = check `allowed_users`. When unset, auto-detected: non-empty list → `false`, empty list → `true`. |
+| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs allowed to interact with the bot. Empty = deny all. |
+| `TELEGRAM_ALLOW_ALL_USERS` | No | `false` | Explicit flag: `true` = allow all users, `false` = check `allowed_users`. Defaults to `false` (deny-all, per identity-trust-none ADR). |
 | `GATEWAY_WS_TOKEN` | No | — | WebSocket auth token |
 | `GATEWAY_LISTEN` | No | `0.0.0.0:8080` | Listen address |
 | `TELEGRAM_WEBHOOK_PATH` | No | `/webhook/telegram` | Webhook endpoint path |
