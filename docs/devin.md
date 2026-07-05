@@ -149,6 +149,80 @@ Devin CLI supports both stdio and HTTP (Streamable HTTP + SSE fallback) transpor
 
 Devin CLI reads `AGENTS.md` from the project root — the same file OpenAB already uses. It also reads `CLAUDE.md` (for Claude Code compatibility) and rules from `.cursor/rules/` and `.windsurf/rules/`.
 
+## Recommended Permission Config (Headless)
+
+In headless/container deployments, Devin CLI's "cog" permission model may still prompt
+for tool approval even with `DEVIN_PERMISSION_MODE=dangerous` set as an env var or
+`--permission-mode dangerous` CLI flag. The **only reliable fix** is to place a
+`config.json` in the user config directory with explicit permission overrides:
+
+**File:** `~/.config/devin/config.json`
+
+```json
+{
+  "version": 1,
+  "permission_mode": "bypass",
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Write(**)",
+      "Fetch(**)",
+      "Exec(**)",
+      "exec",
+      "read",
+      "edit",
+      "grep",
+      "glob",
+      "webfetch",
+      "web_search",
+      "mcp__*"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "agent": {
+    "model": "glm-5-2"
+  }
+}
+```
+
+**Why both scope-based and tool-based entries?**
+
+- **Scope-based** (`Read(**)`, `Write(**)`, `Exec(**)`, `Fetch(**)`): match by path/URL/command pattern
+- **Tool-based** (`exec`, `read`, `edit`, etc.): match by tool name directly
+- `mcp__*`: wildcard for all MCP tools (documented by Devin)
+
+There is no documented "allow all" wildcard — you must list each tool explicitly.
+
+**What doesn't work alone:**
+
+| Method | Result |
+|--------|--------|
+| `DEVIN_PERMISSION_MODE=dangerous` env var | Ignored in ACP mode |
+| `--permission-mode dangerous` CLI flag | Overridden by team settings / cog |
+| `permission_mode: "bypass"` in config.json alone | Cog still evaluates per-tool |
+| Removing `org_id` from config.json | Team settings still fetched via auth |
+
+**What works:**
+
+`permission_mode: "bypass"` **combined with** explicit `permissions.allow` entries in
+`~/.config/devin/config.json`. This tells the cog to auto-approve matching tools.
+
+### OAB Gist Config
+
+When using OAB's gist-based config, set the `[agent]` section to pass the CLI flag
+as belt-and-suspenders:
+
+```toml
+[agent]
+command = "devin"
+args = ["--permission-mode", "dangerous", "acp"]
+env = { DEVIN_MODEL = "glm-5.2", GHPOOL_URL = "http://ghpool.openab.local:8080", PATH = "/home/agent/bin:/usr/local/bin:/usr/bin:/bin" }
+```
+
+The config.json must be pre-seeded via the home tarball (`ddu-home.tar.gz`) or written
+by a pre-boot hook.
+
 ## Known Limitations
 
 - Requires a paid Devin subscription (Cognition AI); no free tier for CLI access
