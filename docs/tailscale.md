@@ -167,10 +167,10 @@ Grant the task role read access:
 ```toml
 [hooks.pre_seed]
 sources = [
-  "s3://my-bucket/my-bot-home.tar.gz",
   "s3://my-bucket/shared/base.tar.gz",
   "s3://my-bucket/shared/utils.tar.gz",        # provides aws CLI — see below
-  "s3://my-bucket/shared/tailscale-bin.tar.gz", # last layer wins
+  "s3://my-bucket/shared/tailscale-bin.tar.gz",
+  "s3://my-bucket/my-bot-home.tar.gz",          # last layer wins — personal state preserved
 ]
 timeout_seconds = 120
 on_failure = "abort"
@@ -185,39 +185,42 @@ set -e
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
 if [ -x "$HOME/.local/bin/tailscaled" ]; then
+  mkdir -p "$HOME/.local/share/tailscale"
+
+  # Remove stale socket from previous run to avoid race condition
+  rm -f /tmp/tailscaled.sock
+
+  "$HOME/.local/bin/tailscaled" \
+    --state="$HOME/.local/share/tailscale/tailscaled.state" \
+    --socket=/tmp/tailscaled.sock \
+    --tun=userspace-networking \
+    --socks5-server=localhost:1055 \
+    --outbound-http-proxy-listen=localhost:1055 \
+    >/tmp/tailscaled.log 2>&1 &
+
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -S /tmp/tailscaled.sock ] && break
+    sleep 1
+  done
+
   TS_AUTHKEY=$(aws secretsmanager get-secret-value \
     --secret-id my-app/tailscale \
     --query SecretString --output text \
     --region us-east-1 2>/dev/null | \
-    grep -o '"MYBOT_TAILSCALE_KEY":"[^"]*"' | cut -d'"' -f4)
+    grep -o '"MYBOT_TAILSCALE_KEY"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d'"' -f4)
 
   if [ -n "$TS_AUTHKEY" ]; then
-    mkdir -p "$HOME/.local/share/tailscale"
-
-    "$HOME/.local/bin/tailscaled" \
-      --state="$HOME/.local/share/tailscale/tailscaled.state" \
-      --socket="$HOME/.local/share/tailscale/tailscaled.sock" \
-      --tun=userspace-networking \
-      --socks5-server=localhost:1055 \
-      --outbound-http-proxy-listen=localhost:1055 \
-      >"$HOME/.local/share/tailscale/tailscaled.log" 2>&1 &
-
-    for i in $(seq 1 10); do
-      [ -S "$HOME/.local/share/tailscale/tailscaled.sock" ] && break
-      sleep 1
-    done
-
+    export TS_AUTHKEY
     "$HOME/.local/bin/tailscale" \
-      --socket="$HOME/.local/share/tailscale/tailscaled.sock" \
-      up --authkey="$TS_AUTHKEY" \
+      --socket=/tmp/tailscaled.sock \
+      up \
       --hostname="${OPENAB_AGENT_NAME:-openab-bot}" \
       --accept-routes \
       --timeout=30s && echo "export ALL_PROXY=socks5h://localhost:1055" > "$HOME/.tailscale-proxy.env" \
       || echo "tailscale up failed, continuing without VPN"
-
     unset TS_AUTHKEY
   else
-    echo "tailscale: authkey not found, skipping"
+    echo "tailscale: authkey not found — tailscaled running with existing state (if any)"
   fi
 else
   echo "tailscale: binary not found, skipping"
@@ -246,9 +249,15 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" -C "mybot@openab"
 
 cat > ~/.ssh/config << 'EOF'
 Host *.ts.net myhost1 myhost2
-    ProxyCommand /path/to/tailscale --socket=$HOME/.local/share/tailscale/tailscaled.sock nc %h %p
+    ProxyCommand $HOME/.local/bin/tailscale --socket=/tmp/tailscaled.sock nc %h %p
     StrictHostKeyChecking accept-new
     User myuser
+    ConnectTimeout 10
+    ServerAliveInterval 15
+    ServerAliveCountMax 3
+    ControlMaster auto
+    ControlPath ~/.ssh/control-%r@%h:%p
+    ControlPersist 10m
 EOF
 chmod 600 ~/.ssh/config ~/.ssh/id_ed25519
 ```
@@ -274,7 +283,7 @@ This integration is built around a specific division of labor, not just "give th
 
 - **OAB agents are thin clients.** The bot container itself should do inference, conversation/session management, and orchestration — not compute-heavy work. It has no business running `cargo build`, video transcoding, or anything CPU/memory-intensive locally.
 - **OAB is the thin bridge, not the workhorse.** The Tailscale connection exists so the agent can **dispatch** work over SSH to a trusted, adequately-provisioned host — the "remote monster" — and bring back results. The container stays small (matching its ECS task CPU/memory allocation), while the actual heavy lifting happens on hardware sized for it.
-- **Remote monsters do the real work.** A beefy Mac mini (M4, 16GB), a home lab Linux box, or any other trusted host on the tailnet is where compilation, builds, and resource-intensive jobs actually run — reached via `ssh` through the tunnel this doc sets up. See [`principles.md`](https://github.com/pahud) "Build Offloading" for a concrete example: never run `cargo build` on the light bot container — SSH to a capable host, build there, `scp` the artifact back.
+- **Remote monsters do the real work.** A beefy Mac mini (M4, 16GB), a home lab Linux box, or any other trusted host on the tailnet is where compilation, builds, and resource-intensive jobs actually run — reached via `ssh` through the tunnel this doc sets up. See [Build Offloading](principles.md#build-offloading) for a concrete example: never run `cargo build` on the light bot container — SSH to a capable host, build there, `scp` the artifact back.
 
 This keeps container sizing cheap and predictable (no bot needs to provision for a worst-case compile job) while still giving agents access to real compute when a task genuinely needs it.
 
@@ -311,13 +320,26 @@ If you need integrity verification, use the `sha256s` field in `[hooks.pre_seed]
 
 ```bash
 # From inside the agent's shell/exec session:
-$HOME/.local/bin/tailscale --socket=$HOME/.local/share/tailscale/tailscaled.sock status
+
+# 1. Check daemon status and tailnet membership
+$HOME/.local/bin/tailscale --socket=/tmp/tailscaled.sock status
 ```
 
 You should see your bot's hostname alongside the rest of your tailnet, each with its Tailscale IP (`100.x.x.x`).
+
+```bash
+# 2. End-to-end connectivity test via SOCKS5 proxy
+curl -I --proxy socks5h://localhost:1055 http://<your-tailnet-host>:port/
+
+# 3. SSH connectivity test (if SSH is configured)
+ssh -o BatchMode=yes -o ConnectTimeout=5 myhost1 echo "ok"
+```
+
+If step 1 succeeds but step 2 fails, check your Tailscale ACL rules — the bot's tag may not have permission to reach the target host/port.
 
 ## Security Notes
 
 - The authkey grants join access to your **entire tailnet** — scope it with [Tailscale ACL tags](https://tailscale.com/kb/1068/acl-tags) (e.g. `tag:oab-bot`) restricting which hosts/ports it can reach, rather than relying on the default "trust everything" tailnet policy.
 - Treat the authkey with the same sensitivity as any other bot credential — Secrets Manager, not baked into an image layer or committed to a config repo.
 - `--accept-routes` lets the bot reach subnets advertised by other tailnet nodes (e.g. a home LAN behind a subnet router). Omit it if the bot should only reach other tailnet *nodes* directly, not routed subnets.
+- **Key expiry**: Tailscale nodes have a default key expiry of 180 days. Long-running OAB agents will lose connectivity when the node key expires. To prevent this, disable key expiry for your bot nodes in the [Admin Console → Machines](https://login.tailscale.com/admin/machines) page (click the node → Disable key expiry), or apply an ACL `autoApprovers` policy for your `tag:oab-bot` tag that automatically approves re-authentication.
