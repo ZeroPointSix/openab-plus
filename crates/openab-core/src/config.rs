@@ -605,6 +605,16 @@ pub struct TelegramConfig {
     /// Webhook mount path. Env fallback: `TELEGRAM_WEBHOOK_PATH`
     /// (default `/webhook/telegram`).
     pub webhook_path: Option<String>,
+    /// Explicit flag: true = allow all users, false = check `allowed_users`.
+    /// When not set, auto-detected: non-empty list → false, empty list → true
+    /// (same convention as `[discord]`/`[slack]`). Env fallback:
+    /// `TELEGRAM_ALLOW_ALL_USERS`.
+    pub allow_all_users: Option<bool>,
+    /// Telegram user IDs allowed to interact with the bot. Only checked when
+    /// `allow_all_users` resolves to `false`. Env fallback:
+    /// `TELEGRAM_ALLOWED_USERS` (comma-separated).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
 }
 
 /// Fully resolved Telegram settings (config → env → default applied).
@@ -618,6 +628,8 @@ pub struct ResolvedTelegram {
     pub rich_messages: bool,
     pub streaming: Option<bool>,
     pub webhook_path: String,
+    pub allow_all_users: bool,
+    pub allowed_users: Vec<String>,
 }
 
 impl TelegramConfig {
@@ -627,6 +639,16 @@ impl TelegramConfig {
     /// unset env vars, so `bot_token = "${UNSET_VAR}"` correctly falls through
     /// to the `TELEGRAM_BOT_TOKEN` env fallback rather than holding `Some("")`.
     pub fn resolve(&self) -> ResolvedTelegram {
+        let allowed_users: Vec<String> = if !self.allowed_users.is_empty() {
+            self.allowed_users.clone()
+        } else {
+            std::env::var("TELEGRAM_ALLOWED_USERS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
         ResolvedTelegram {
             bot_token: self
                 .bot_token
@@ -658,6 +680,13 @@ impl TelegramConfig {
                 .cloned()
                 .or_else(|| std::env::var("TELEGRAM_WEBHOOK_PATH").ok())
                 .unwrap_or_else(|| "/webhook/telegram".into()),
+            allow_all_users: self.allow_all_users.unwrap_or_else(|| {
+                std::env::var("TELEGRAM_ALLOW_ALL_USERS")
+                    .ok()
+                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or_else(|| allowed_users.is_empty())
+            }),
+            allowed_users,
         }
     }
 }
@@ -1521,6 +1550,8 @@ mod tests {
             "TELEGRAM_RICH_MESSAGES",
             "TELEGRAM_STREAMING",
             "TELEGRAM_WEBHOOK_PATH",
+            "TELEGRAM_ALLOW_ALL_USERS",
+            "TELEGRAM_ALLOWED_USERS",
         ] {
             std::env::remove_var(k);
         }
@@ -1534,6 +1565,8 @@ mod tests {
             rich_messages: Some(false),
             streaming: Some(true),
             webhook_path: Some("/custom/tg".into()),
+            allow_all_users: None,
+            allowed_users: Vec::new(),
         };
         let r = cfg.resolve();
         assert_eq!(r.bot_token.as_deref(), Some("cfg-token"));
@@ -1608,6 +1641,51 @@ mod tests {
         assert_eq!(r.secret_token.as_deref(), Some("real-secret"));
         assert_eq!(r.webhook_path, "/webhook/telegram"); // env not set → default
 
+        // --- Scenario 7: allowed_users config wins over env; the separate
+        //     allow_all_users flag resolves independently (config → env →
+        //     auto-detect) and here falls through to the env var since the
+        //     config struct didn't set it explicitly ---
+        std::env::set_var("TELEGRAM_ALLOW_ALL_USERS", "true");
+        std::env::set_var("TELEGRAM_ALLOWED_USERS", "999"); // must be ignored — config list wins
+        let cfg = TelegramConfig {
+            allowed_users: vec!["111".into(), "222".into()],
+            ..Default::default()
+        };
+        let r = cfg.resolve();
+        assert_eq!(r.allowed_users, vec!["111".to_string(), "222".to_string()]);
+        assert!(r.allow_all_users); // from TELEGRAM_ALLOW_ALL_USERS=true, not auto-detect
+        std::env::remove_var("TELEGRAM_ALLOW_ALL_USERS");
+        std::env::remove_var("TELEGRAM_ALLOWED_USERS");
+
+        // --- Scenario 8: empty list + no explicit flag → allow_all_users
+        //     auto-detects true (same convention as [discord]/[slack]) ---
+        let r = TelegramConfig::default().resolve();
+        assert!(r.allowed_users.is_empty());
+        assert!(r.allow_all_users);
+
+        // --- Scenario 9: non-empty list + no explicit flag → auto-detects
+        //     false (deny-all-except-list) ---
+        let cfg = TelegramConfig {
+            allowed_users: vec!["176096071".into()],
+            ..Default::default()
+        };
+        let r = cfg.resolve();
+        assert_eq!(r.allowed_users, vec!["176096071".to_string()]);
+        assert!(!r.allow_all_users);
+
+        // --- Scenario 10: TELEGRAM_ALLOWED_USERS env fallback (comma-separated,
+        //     trimmed) when config list is empty ---
+        std::env::set_var("TELEGRAM_ALLOWED_USERS", " 111 , 222,333 ");
+        let r = TelegramConfig::default().resolve();
+        assert_eq!(r.allowed_users, vec!["111".to_string(), "222".to_string(), "333".to_string()]);
+        assert!(!r.allow_all_users); // auto-detected false since the env list is non-empty
+        std::env::remove_var("TELEGRAM_ALLOWED_USERS");
+
+        // --- Scenario 11: explicit allow_all_users = false overrides
+        //     empty-list auto-detect ---
+        let cfg = TelegramConfig { allow_all_users: Some(false), ..Default::default() };
+        assert!(!cfg.resolve().allow_all_users);
+
         // --- Cleanup ---
         for k in [
             "TELEGRAM_BOT_TOKEN",
@@ -1616,6 +1694,8 @@ mod tests {
             "TELEGRAM_RICH_MESSAGES",
             "TELEGRAM_STREAMING",
             "TELEGRAM_WEBHOOK_PATH",
+            "TELEGRAM_ALLOW_ALL_USERS",
+            "TELEGRAM_ALLOWED_USERS",
         ] {
             std::env::remove_var(k);
         }
