@@ -125,11 +125,6 @@ fn print_plan(manifests: &[OABServiceManifest]) {
             }
             println!("    [ ] API Gateway stage");
             println!("    [ ] Security group inbound rule");
-            if ingress.paths.iter().any(|p| p == "/webhook/telegram")
-                && m.spec.secrets.contains_key("TELEGRAM_BOT_TOKEN")
-            {
-                println!("    [ ] Telegram webhook registration");
-            }
         }
     }
     println!();
