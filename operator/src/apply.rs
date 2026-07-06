@@ -531,19 +531,21 @@ async fn apply_ecs(
             match create_req.clone().send().await {
                 Ok(_) => {
                     if attempt > 0 {
-                        println!(" ok");
+                        eprintln!(" ok");
                     }
                     last_err = None;
                     break;
                 }
                 Err(e) => {
                     let msg = format!("{e}");
-                    if msg.contains("still Draining") && attempt < 11 {
+                    if msg.contains("still Draining") {
                         if attempt == 0 {
                             eprint!("  ⏳ Service still draining, retrying...");
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         last_err = Some(e);
+                        if attempt < 11 {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        }
                     } else {
                         if attempt > 0 {
                             eprintln!(" failed");

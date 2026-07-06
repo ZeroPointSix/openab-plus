@@ -91,8 +91,9 @@ pub async fn run(
     // 2a. Wait for the service to fully drain (INACTIVE status) so that
     // a subsequent `apply` doesn't hit "Unable to Start a service that
     // is still Draining".
-    print!("  ⏳ Waiting for drain to complete...");
-    for i in 0..60 {
+    eprint!("  ⏳ Waiting for drain to complete...");
+    for i in 0..12 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let resp = ecs
             .describe_services()
             .cluster(cluster)
@@ -105,16 +106,19 @@ pub async fn run(
                 .first()
                 .map(|s| s.status() == Some("INACTIVE"))
                 .unwrap_or(true),
-            Err(_) => true,
+            Err(e) => {
+                eprintln!("\n  ⚠ describe_services error (retrying): {e}");
+                false
+            }
         };
         if is_gone {
-            println!(" done ({i}s)");
+            let elapsed = (i + 1) * 5;
+            eprintln!(" done ({elapsed}s)");
             break;
         }
-        if i == 59 {
-            println!(" timed out (service may still be draining)");
+        if i == 11 {
+            eprintln!(" timed out (service may still be draining)");
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
     // 2b. Best-effort ingress teardown: Cloud Map service + this API's
