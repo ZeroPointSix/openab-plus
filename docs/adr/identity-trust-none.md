@@ -256,6 +256,12 @@ events from multiple real platforms.
 │  • ❌ Check allowed_users                                                │
 │  • ❌ Handle slash commands                                              │
 │  • ❌ Evaluate @mention / multibot / role logic                          │
+│                                                                          │
+│  EXCEPTION — LINE @mention pre-filter:                                   │
+│  • LINE Receiver drops non-@mention group messages BEFORE producing      │
+│    InboundEvent (prevents ordinary chatter from hitting Trust Gate        │
+│    and triggering deny-echo spam). This is a deliberate exception to     │
+│    "Receiver = pure transport."                                          │
 └──────────────────────────────────┬───────────────────────────────────────┘
                                    │
                                    │  InboundEvent (unified format)
@@ -392,6 +398,42 @@ pub enum Decision {
 }
 ```
 
+### LINE group policy (platform-specific extension to `decide()`)
+
+LINE groups have a platform-specific challenge: `sender_id` may be `"unknown"`
+when a user's privacy settings prevent LINE from revealing their identity. To
+handle this, LINE's trust config extends the base `TrustConfig` with a per-group
+policy:
+
+```toml
+[line]
+allowed_users = ["Uaaa", "Ubbb"]
+default_group_policy = "members"          # fail-closed default
+
+[[line.groups]]
+id = "C1234567890"
+policy = "open"         # group-level trust: any @mention sender is allowed
+                        # "unknown" senders permitted; audit at group level only
+
+[[line.groups]]
+id = "C0987654321"
+policy = "members"      # per-user trust: must be in allowed_users
+                        # "unknown" senders denied; full per-user audit
+```
+
+**Decision logic for LINE (extends base `decide()`):**
+- **1:1 DM:** `sender_id == "unknown"` → Deny; otherwise check `allowed_users`
+- **Group not in configured groups** → DenyScope (not in scope)
+- **Group `policy = "open"`** → Allow (group-level trust — `"unknown"` permitted)
+- **Group `policy = "members"`** → `sender_id == "unknown"` → Deny; otherwise
+  check `allowed_users`
+
+**Operator tradeoff (documented):** choosing `"open"` means accepting that:
+1. Anonymous/unidentifiable users can use the bot in that group
+2. Audit logs only reach group level (no per-user tracking)
+
+If per-user audit is required, use `"members"` policy.
+
 ### PlatformTrustConfigs (registry)
 
 ```rust
@@ -432,6 +474,29 @@ Bot messages (where `InboundEvent.is_bot == true`) **bypass L3** at the Trust Ga
 Bot admission is NOT part of the identity trust model — it is platform-specific
 structural logic (e.g. `trusted_bot_ids`, `allow_bot_messages`) that stays in the
 Handler. The Trust Gate only evaluates human sender identity.
+
+**`is_bot` per-platform derivation (pinned — each Receiver must use these rules):**
+
+| Platform | `is_bot` derivation | Notes |
+|----------|-------------------|-------|
+| Discord | `message.author.bot` flag | Native field from Discord API |
+| Slack | `event.bot_id.is_some() \|\| event.subtype == "bot_message"` | Plus `USLACKBOT` always treated as bot |
+| LINE | Always `false` | LINE has no bot-to-bot webhook delivery; bot-bypass is a no-op |
+| Feishu | `trusted_bot_ids.contains(sender_open_id)` | Feishu marks other bots as `sender_type="user"` — unreliable; must match against known bot IDs |
+| Telegram | `message.from.is_bot` flag | Native field from Telegram API |
+
+**`trusted_bot_ids` is shared config (NOT Handler-only):**
+
+`trusted_bot_ids` is readable by **all layers** with different purposes:
+- **Receiver:** reads the list to compute `InboundEvent.is_bot` (especially for
+  Feishu where platform signals are unreliable)
+- **Trust Gate:** reads `is_bot` flag to bypass L3 (does not need the list itself)
+- **Handler:** reads the list for bot admission (which specific bots are allowed
+  to trigger the agent vs. ignored)
+
+This resolves the Feishu circular dependency: the Receiver can compute `is_bot`
+because it has access to the config, and the Handler independently uses the same
+config for admission decisions.
 
 **Implementation note:** The `is_bot` bypass is implemented at the **Trust Gate
 caller level**, not inside `TrustConfig::decide()`. This keeps `decide()` a pure
@@ -481,12 +546,29 @@ if decision == Decision::DenyIdentity {
 **Echo safeguards:**
 - **Rate-limit:** max 1 echo per sender per platform per 5 minutes (prevents spam/DoS amplification)
 - **Bot exclusion:** if `is_bot` → silent deny, no echo (prevents infinite reply loops between bots)
-- **DM preferred:** in group/channel contexts, prefer DM reply to avoid leaking sender UID publicly; if DM unavailable, **silent drop** (do NOT fall back to in-channel echo, to avoid UID leakage in shared groups)
-- **Best-effort:** echo delivery is not guaranteed (e.g. LINE reply tokens expire); this is acceptable — the echo is a UX convenience, not a security mechanism
+- **Best-effort:** echo delivery is not guaranteed; this is acceptable — the echo is a UX convenience, not a security mechanism
 
-**Platform-specific delivery caveats:**
-- **LINE:** reply tokens are single-use and short-TTL (~30s). If the echo cannot use the reply token, fall back to push message API (requires separate quota/permission).
-- **Other platforms:** no known delivery constraints for the echo use case.
+**Platform-specific echo delivery (via platform echo trait):**
+
+The Trust Gate makes the **decision** (Allow/Deny) in core. Actual echo delivery
+is delegated to a platform-specific **echo trait implementation** — core never
+calls platform APIs directly.
+
+| Platform | Echo mechanism | Rationale |
+|----------|---------------|-----------|
+| Discord | DM to user | Discord guarantees DM delivery |
+| Slack | `chat.postEphemeral` in-channel | Only needs `chat:write` scope; no `im:write` required; visible only to target user; no UID leak |
+| LINE | Reply API only; silent drop if token expired | **Never** use Push API for deny-echo (prevents attackers from burning paid Push quota) |
+| Telegram | Reply in-chat | Standard reply |
+| Feishu | Reply in-chat | Standard reply |
+
+**Echo content by scope (leak-safe):**
+- **DM / 1:1 context:** echo includes sender UID (self-serve — user forwards to admin to request access)
+- **Group / channel context:** echo carries **no sender ID** — generic "not authorized, contact admin" only (prevents leaking identity in shared spaces)
+
+**LINE-specific invariant:** LINE deny-echo uses Reply API only. If the reply
+token is expired (~50s TTL) or already consumed, the echo is **silently dropped**.
+Push API is never used for deny-echo — this is non-overridable (not a config knob).
 
 ### Sender ID format notes (for `allowed_users` configuration)
 
@@ -497,7 +579,7 @@ using the **exact format** the platform provides in event payloads:
 | Platform | Native type | `allowed_users` format | Example | Gotcha |
 |----------|-------------|----------------------|---------|--------|
 | Discord | Snowflake (u64) | Numeric string | `"845835116920307722"` | — |
-| Slack | String | U-prefix or W-prefix | `"U01ABCDEFGH"` | Enterprise Grid uses `W` prefix; use whichever the event payload provides |
+| Slack | String | U-prefix or W-prefix | `"U01ABCDEFGH"` | Enterprise Grid: use `enterprise_user.id` (stable across workspaces) when available; trust key = `(team_id, sender_id)` for Grid deployments |
 | Telegram | Integer (i64) | Stringified integer | `"123456789"` | ⚠️ Do NOT use `@username` — only numeric ID works |
 | LINE | String | U + 32 hex chars | `"U1234567890abcdef0123456789abcdef"` | — |
 | Feishu | String | open_id | `"ou_xxxxxxxxxxxxxxxxxxxx"` | ⚠️ `open_id` is **per-app** — same user has different ID in different Feishu apps |
@@ -724,12 +806,24 @@ functional.
    - Passes allowed events to Handler
    - Echoes + drops denied events
 4. **Remove scattered trust checks** — replaced by the unified Trust Gate:
-   - `is_denied_user()` in Discord EventHandler (`discord.rs:2892`)
-   - `should_skip_event()` user/channel filter in `gateway.rs` (`:832`, `:1160`)
-   - Inline user allowlist in Slack (`slack.rs:1224`)
-   - Feishu L3 check in the gateway crate (`feishu.rs:425`) — must relocate to
-     core, not just delete (contradicts "gateway = L1 only" model)
-   - Discord reaction-dispatch gating (`discord.rs:1241`)
+   - `is_denied_user()` call sites in Discord `EventHandler` (forum-post, DM,
+     and guild-message paths)
+   - `should_skip_event()` call sites in `run_gateway_adapter` and
+     `process_gateway_event` (gateway.rs)
+   - Inline `allowed_users` check in Slack `should_process_message()`
+   - `allowed_users` + `allowed_groups` filters in Feishu `parse_message_event()`
+     (gateway crate) — must relocate to core Trust Gate, not just delete
+     (contradicts "gateway = L1 only" model)
+     **Feishu double-gating elimination:** Currently Feishu identity is checked
+     twice — `FEISHU_ALLOWED_USERS`/`FEISHU_ALLOWED_GROUPS` in the gateway crate
+     AND `[gateway].allowed_users` in core. These can diverge, and the core side
+     **fails open** when its list is empty (`resolve_allow_all = list.is_empty()`).
+     Resolution: gateway crate performs L1 only (signature + decrypt); all
+     `allowed_users` / `allowed_groups` checks move to core Trust Gate. Empty
+     list = **deny-all** (requires explicit `allow_all_users = true` to open).
+     Gateway env vars (`FEISHU_ALLOWED_USERS`, `FEISHU_ALLOWED_GROUPS`) are
+     deprecated in Phase 1 (warn), conflict-error in Phase 2, removed in Phase 3.
+   - Discord reaction-dispatch gating in `EventHandler`
    - Note: `trusted_bot_ids`, `allow_bot_messages`, `allowed_role_ids` **stay in
      Handlers** — they are structural/trigger semantics, not identity trust.
 5. **Add echo reply with safeguards** — rate-limit, bot exclusion, DM-preferred
@@ -747,6 +841,39 @@ These are platform-specific structural concerns, not trust:
 - Reaction dispatch gating (triggers, not authorization)
 - Slash command routing (`/reset`, `/cancel`) — but note these now run AFTER the
   Trust Gate, so untrusted senders cannot invoke them.
+  **Scope note:** "slash commands are gated" applies to **gateway-platform
+  commands** (Telegram `/reset`, `/cancel`) implemented as text-prefix detection
+  in the Handler. The **Slack adapter does not consume `slash_commands` or
+  `interactive` envelopes** — thread routing cannot be reconstructed for them.
+  If Slack slash command support is added in the future, those events must flow
+  through the full Receiver → Trust Gate → Handler pipeline.
+
+### Non-message events that MUST flow through the Trust Gate
+
+Any event type that can **trigger agent state changes** must flow through the
+full Receiver → Trust Gate → Handler pipeline. The Trust Gate is not limited to
+`message` events:
+
+| Event | Platform | Must gate? | `InboundEvent` mapping |
+|-------|----------|-----------|----------------------|
+| `assistant_thread_started` | Slack | **Yes** — untrusted user can establish agent state | `is_dm: true`, `sender_id: event.user` |
+| `assistant_thread_context_changed` | Slack | **Yes** — modifies thread context | `is_dm: true`, `sender_id: event.user` |
+| `reaction_added` | Slack | Not implemented today | Future: reactor identity (`event.user`) must pass L3 if reactions trigger agent actions |
+| Message events | All | **Yes** | Standard mapping |
+
+**Rule:** if a new event type is added to any Receiver and it can cause the agent
+to execute, store state, or respond, its sender identity **must** pass through L3.
+Events that are purely informational (e.g. typing indicators) may be excluded.
+
+### Slack-specific scope notes
+
+- **L1 authentication:** Slack L1 = Socket Mode `app_token` verification. Events
+  API HTTP mode (`X-Slack-Signature` HMAC) is out of scope for this ADR.
+- **MPIM classification:** `D`-prefix channels = DM (`is_dm = true`). `G`-prefix
+  channels (MPIM / group DMs) are treated as **channels** (`is_dm = false`) — they
+  behave more like channels (multiple participants, shared context). If operators
+  need MPIM-as-DM semantics, a future enhancement can add `conversations.info`
+  lookup.
 
 ## 8. Rejected Alternatives
 
