@@ -383,7 +383,8 @@ async fn apply_ecs(
     // schedule on Graviton (ARM64) vs Intel/AMD (X86_64).
     let cpu_arch = match ecs_rt.architecture.as_str() {
         "ARM64" => aws_sdk_ecs::types::CpuArchitecture::Arm64,
-        _ => aws_sdk_ecs::types::CpuArchitecture::X8664,
+        "X86_64" => aws_sdk_ecs::types::CpuArchitecture::X8664,
+        other => anyhow::bail!("unsupported architecture '{other}' — should be caught by manifest validation"),
     };
     register_req = register_req.runtime_platform(
         RuntimePlatform::builder()

@@ -467,6 +467,141 @@ spec:
     }
 
     #[test]
+    fn accepts_arm64_architecture() {
+        let yaml = r#"
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: mybot
+  namespace: prod
+spec:
+  image: img:tag
+  resources:
+    cpu: "256"
+    memory: "512"
+  configFrom: s3://bucket/config.toml
+  runtime:
+    type: ecs
+    architecture: ARM64
+    capacityProvider: FARGATE_SPOT
+    networking:
+      subnets: ["subnet-a"]
+      securityGroups: ["sg-1"]
+"#;
+        let m = parse(yaml);
+        m.validate().expect("ARM64 should be valid");
+    }
+
+    #[test]
+    fn accepts_x86_64_architecture() {
+        let yaml = r#"
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: mybot
+  namespace: prod
+spec:
+  image: img:tag
+  resources:
+    cpu: "256"
+    memory: "512"
+  configFrom: s3://bucket/config.toml
+  runtime:
+    type: ecs
+    architecture: X86_64
+    capacityProvider: FARGATE_SPOT
+    networking:
+      subnets: ["subnet-a"]
+      securityGroups: ["sg-1"]
+"#;
+        let m = parse(yaml);
+        m.validate().expect("X86_64 should be valid");
+    }
+
+    #[test]
+    fn defaults_to_x86_64_when_architecture_omitted() {
+        let yaml = r#"
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: mybot
+  namespace: prod
+spec:
+  image: img:tag
+  resources:
+    cpu: "256"
+    memory: "512"
+  configFrom: s3://bucket/config.toml
+  runtime:
+    type: ecs
+    capacityProvider: FARGATE_SPOT
+    networking:
+      subnets: ["subnet-a"]
+      securityGroups: ["sg-1"]
+"#;
+        let m = parse(yaml);
+        m.validate().expect("should be valid with default architecture");
+        match &m.spec.runtime {
+            Runtime::Ecs(ecs) => assert_eq!(ecs.architecture, "X86_64"),
+            _ => panic!("expected ECS runtime"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_architecture() {
+        let yaml = r#"
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: mybot
+  namespace: prod
+spec:
+  image: img:tag
+  resources:
+    cpu: "256"
+    memory: "512"
+  configFrom: s3://bucket/config.toml
+  runtime:
+    type: ecs
+    architecture: MIPS
+    capacityProvider: FARGATE_SPOT
+    networking:
+      subnets: ["subnet-a"]
+      securityGroups: ["sg-1"]
+"#;
+        let m = parse(yaml);
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("runtime.architecture must be one of"));
+    }
+
+    #[test]
+    fn rejects_lowercase_architecture() {
+        let yaml = r#"
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: mybot
+  namespace: prod
+spec:
+  image: img:tag
+  resources:
+    cpu: "256"
+    memory: "512"
+  configFrom: s3://bucket/config.toml
+  runtime:
+    type: ecs
+    architecture: arm64
+    capacityProvider: FARGATE_SPOT
+    networking:
+      subnets: ["subnet-a"]
+      securityGroups: ["sg-1"]
+"#;
+        let m = parse(yaml);
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("runtime.architecture must be one of"));
+    }
+
+    #[test]
     fn fleet_passes_ingress_from_template_and_override_wins() {
         let yaml = r#"
 apiVersion: oab.dev/v2
