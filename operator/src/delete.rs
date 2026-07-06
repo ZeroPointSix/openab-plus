@@ -93,7 +93,8 @@ pub async fn run(
     // is still Draining".
     eprint!("  ⏳ Waiting for drain to complete...");
     for i in 0..12 {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // Check status first, then sleep — avoids an unnecessary initial delay
+        // when the service transitions quickly.
         let resp = ecs
             .describe_services()
             .cluster(cluster)
@@ -112,12 +113,19 @@ pub async fn run(
             }
         };
         if is_gone {
-            let elapsed = (i + 1) * 5;
-            eprintln!(" done ({elapsed}s)");
+            if i == 0 {
+                eprintln!(" done (immediate)");
+            } else {
+                let elapsed = i * 5;
+                eprintln!(" done ({elapsed}s)");
+            }
             break;
         }
         if i == 11 {
             eprintln!(" timed out (service may still be draining)");
+        } else {
+            eprint!(".");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     }
 
