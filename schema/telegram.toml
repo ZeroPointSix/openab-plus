@@ -1,0 +1,266 @@
+# Telegram — Platform Schema (source of truth)
+# Schema version: 2026-07-06
+# Ref: ADR identity-trust-none (#1291), PR #1295
+
+# ─── Platform Identity ───────────────────────────────────────────────
+[platform]
+name = "telegram"
+official_docs = "https://core.telegram.org/bots/api"
+description = "Webhook-based bot platform with groups, supergroups, channels, and forum topics"
+adapter_crate = "openab-gateway"
+adapter_path = "crates/openab-gateway/src/adapters/telegram.rs"
+
+# ─── Trust Layers (per ADR #1291 three-layer architecture) ───────────
+# L1: Platform Authentication — verify request is from real Telegram
+# L2: Channel/Group Scope — which conversations the bot engages in (default OPEN)
+# L3: Identity Trust — which senders can trigger agent actions (default DENY-ALL)
+
+[trust]
+current_phase = 3  # Phase 3 = deny-all default is live on main
+
+[trust.l1]
+description = "Platform authentication — verify webhook is from Telegram"
+mechanism = "secret_token header + optional source IP subnet check"
+config_fields = ["secret_token", "trusted_source_only"]
+default_enabled = true
+symbols = ["webhook", "check_telegram_subnet"]
+
+[trust.l1.ip_subnets]
+description = "Telegram Bot API source subnets"
+values = ["149.154.160.0/20", "91.108.4.0/22"]
+
+[trust.l2]
+description = "Scope control — which conversations the bot listens to (NOT a security boundary)"
+default_policy = "open"
+config_fields = ["allow_all_channels", "allowed_channels", "allow_dm"]
+note = "L2 stays open so untrusted senders reach L3 and get the echo-UID onboarding reply"
+
+[trust.l3]
+description = "Identity trust — the security gate (default deny-all)"
+default_policy = "deny-all"
+config_fields = ["allow_all_users", "allowed_users"]
+sender_id_format = "numeric string (e.g. \"176096071\")"
+empty_sender_handling = "always DenyIdentity (fail-closed)"
+echo_window_seconds = 300
+echo_mechanism = "reply with sender UID + instructions to contact admin"
+symbols = ["gate_incoming"]
+
+# ─── Message Capabilities ────────────────────────────────────────────
+[message]
+max_length = 4096
+rich_message_max_length = 32768
+caption_max_length = 1024
+supports_edit = true
+supports_delete = true       # native API supports it; adapter does NOT implement
+supports_markdown = true     # Markdown, MarkdownV2, HTML parse_mode
+supports_mentions = true     # @username entity + text_mention entity
+supports_rich_messages = true  # Bot API 10.1 sendRichMessage (GFM tables, headings, code)
+
+[message.attachments]
+images = true
+files = true
+audio = true
+video = true
+inbound_download_limit_mb = 20   # Telegram cloud getFile cap
+outbound_photo_limit_mb = 10
+outbound_file_limit_mb = 50
+image_max_download_mb = 10       # OpenAB adapter limit
+audio_max_download_mb = 20       # OpenAB adapter limit
+file_max_download_mb = 20        # OpenAB adapter limit
+
+# ─── Thread & Conversation Model ─────────────────────────────────────
+[threads]
+supported = true
+auto_create = true           # core creates forum topic for supergroup messages without thread_id
+method = "forum_topics"
+description = "Supergroups with topics enabled carry message_thread_id; created via createForumTopic"
+symbols = ["handle_reply::create_topic"]
+
+[threads.detection]
+method = "message_thread_id"
+description = "message_thread_id present = forum topic thread"
+
+# ─── Interaction Primitives ──────────────────────────────────────────
+[interactions]
+slash_commands = true
+reactions = true
+reactions_per_message = 1    # non-premium limitation (single-slot, non-additive)
+typing_indicator = true      # sendChatAction; not used by adapter
+buttons = true               # inline keyboards
+select_menus = false         # not a Telegram primitive
+
+# ─── Bot Behaviour ───────────────────────────────────────────────────
+[bot]
+reply_model = "any_time"         # can send at any time to users who /start'd the bot
+mention_trigger = true           # group messages require @bot_username mention (privacy mode)
+bot_to_bot = false               # "Bots will not be able to see messages from other bots"
+dm_support = true                # 1:1 private chat; user must /start first
+proactive_push = true            # no reply-window gating; rate-limited only
+
+[bot.rate_limits]
+per_chat_per_second = 1
+bulk_broadcast_per_second = 30
+per_group_per_minute = 20
+
+[bot.group_model]
+types = ["private", "group", "supergroup", "channel"]
+sender_identity = "always"   # stable numeric from.id (not consent-gated like LINE)
+privacy_mode = true          # with privacy ON, bot only sees @mentions + commands + replies
+
+# ─── OpenAB Feature Support ─────────────────────────────────────────
+# status: implemented | partial | workaround | not_implemented | n_a
+
+[[openab_features]]
+feature = "send_message"
+status = "implemented"
+source = "handle_reply"
+description = "sendMessage with Markdown parse_mode + plaintext fallback; chunks at 4096 chars"
+
+[[openab_features]]
+feature = "rich_messages"
+status = "implemented"
+source = "send_rich_message"
+description = "Bot API 10.1 sendRichMessage for GFM (tables, headings, code); gated by rich_messages flag; up to 32768 chars"
+
+[[openab_features]]
+feature = "edit_message"
+status = "implemented"
+source = "handle_reply"
+description = "editMessageText on real msg_id; draft path via sendRichMessageDraft when rich_messages=true"
+
+[[openab_features]]
+feature = "delete_message"
+status = "not_implemented"
+source = ""
+description = "No deleteMessage call in adapter despite native API support; trait default returns unsupported"
+
+[[openab_features]]
+feature = "emoji_reactions"
+status = "workaround"
+source = "handle_reply"
+description = "setMessageReaction with full replacing set (single-slot); mood faces skipped; 🆗→👍 remapped"
+
+[[openab_features]]
+feature = "thread_creation"
+status = "implemented"
+source = "handle_reply"
+description = "createForumTopic in supergroups; core auto-creates for messages without thread_id"
+
+[[openab_features]]
+feature = "streaming"
+status = "partial"
+source = "send_rich_message_draft"
+description = "sendRichMessageDraft exists but #[allow(dead_code)]; edit_message with reply_to='draft' triggers draft path; short updates <30 chars skipped"
+
+[[openab_features]]
+feature = "media_inbound"
+status = "implemented"
+source = "download_telegram_media"
+description = "Photos (largest resolution), voice, audio via getFile; documents (text-only, UTF-8 validated) via download_telegram_document"
+
+[[openab_features]]
+feature = "media_outbound"
+status = "not_implemented"
+source = ""
+description = "No sendPhoto/sendDocument API calls; only text replies supported"
+
+[[openab_features]]
+feature = "voice_stt"
+status = "implemented"
+source = "download_and_transcribe"
+description = "Adapter downloads audio as MediaKind::Audio; core transcribes when stt_config.enabled via Whisper API"
+
+[[openab_features]]
+feature = "trust_gate"
+status = "implemented"
+source = "gate_incoming"
+description = "L1 in gateway (secret_token + IP), L2/L3 in core via gate_incoming(); Phase 3 deny-all live"
+
+[[openab_features]]
+feature = "deny_echo"
+status = "implemented"
+source = "gate_incoming"
+description = "DenyIdentity echoes sender UID + instructions; throttled per (platform, sender) per ECHO_WINDOW (300s)"
+
+[[openab_features]]
+feature = "mention_gating"
+status = "implemented"
+source = "should_skip_event"
+description = "In groups without thread: requires @bot_username mention; in-thread events bypass"
+
+[[openab_features]]
+feature = "slash_commands"
+status = "implemented"
+source = "process_gateway_event"
+description = "/reset and /cancel handled in core gateway; responses via send_fire_and_forget"
+
+[[openab_features]]
+feature = "multibot"
+status = "implemented"
+source = "should_skip_event"
+description = "trusted_bot_ids bypass user allowlist; untrusted bots dropped; Telegram rarely delivers other bot messages anyway"
+
+[[openab_features]]
+feature = "group_routing"
+status = "implemented"
+source = "webhook"
+description = "Session keyed by chat.id + optional message_thread_id; compute_draft_id derives stable per-(chat,thread) draft id"
+
+[[openab_features]]
+feature = "reply_quote"
+status = "partial"
+source = "handle_reply"
+description = "GatewayReply carries quote_message_id but adapter never sets reply_to_message_id; only message_thread_id set for topic routing"
+
+[[openab_features]]
+feature = "ip_validation"
+status = "implemented"
+source = "check_telegram_subnet"
+description = "Source IP validated against Telegram subnets; telegram_trusted_source_only flag enforces (403 on fail)"
+
+# ─── Quirks & Findings ──────────────────────────────────────────────
+
+[[quirks]]
+date = "2026-07-04"
+description = "Reactions are single-slot non-additive — adapter maintains full replacing set via setMessageReaction; mood faces deliberately dropped so terminal 👍 isn't clobbered"
+reference = "https://core.telegram.org/bots/api#setmessagereaction"
+
+[[quirks]]
+date = "2026-07-04"
+description = "Bot API 10.1 (2026-06-11) added sendRichMessage/sendRichMessageDraft/InputRichMessage — the adapter's rich path targets a REAL API; exact 32768 limit unverified from truncated docs"
+reference = "https://core.telegram.org/bots/api-changelog"
+
+[[quirks]]
+date = "2026-07-04"
+description = "Cloud getFile caps downloads at 20 MB; up to 2 GB only with self-hosted local Bot API server"
+reference = "https://core.telegram.org/bots/api#getfile"
+
+[[quirks]]
+date = "2026-07-04"
+description = "deleteMessage only works within 48h for bot's own messages; deleting others needs admin can_delete_messages"
+reference = "https://core.telegram.org/bots/api#deletemessage"
+
+[[quirks]]
+date = "2026-07-04"
+description = "message_reaction updates require bot be chat admin + opt-in via allowed_updates; never delivered for reactions set by bots"
+reference = "https://core.telegram.org/bots/api#update"
+
+[[quirks]]
+date = "2026-07-04"
+description = "With privacy mode ON, group bot only receives: /cmd@bot commands, general commands if it messaged last, replies to it, inline messages via it, service messages"
+reference = "https://core.telegram.org/bots/features#privacy-mode"
+
+[[quirks]]
+date = "2026-07-04"
+description = "L1 IP extraction trusts CF-Connecting-IP / X-Real-IP then spoofable leftmost X-Forwarded-For — documented phase-2 gap"
+reference = ""
+
+[[quirks]]
+date = "2026-07-04"
+description = "Outbound send sets message_thread_id for topic routing but never reply_to_message_id — agent quote-replies aren't native Telegram quotes"
+reference = ""
+
+[[quirks]]
+date = "2026-07-06"
+description = "sendMessage text limit is 1-4096 UTF-8 chars; broadcasting limits: ~1 msg/s per chat, ~30 msg/s bulk, 20 msg/min per group"
+reference = "https://core.telegram.org/bots/faq"
