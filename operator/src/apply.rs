@@ -524,10 +524,39 @@ async fn apply_ecs(
             create_req = create_req.service_registries(registry.build());
         }
 
-        create_req
-            .send()
-            .await
-            .context("failed to create ECS service")?;
+        // Retry with backoff if ECS reports "still Draining" (race with a
+        // recent delete that hasn't fully completed yet).
+        let mut last_err = None;
+        for attempt in 0..12 {
+            match create_req.clone().send().await {
+                Ok(_) => {
+                    if attempt > 0 {
+                        println!(" ok");
+                    }
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if msg.contains("still Draining") && attempt < 11 {
+                        if attempt == 0 {
+                            eprint!("  ⏳ Service still draining, retrying...");
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        last_err = Some(e);
+                    } else {
+                        if attempt > 0 {
+                            eprintln!(" failed");
+                        }
+                        return Err(e).context("failed to create ECS service");
+                    }
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            eprintln!(" timed out");
+            return Err(anyhow::anyhow!(e)).context("failed to create ECS service after retries");
+        }
         println!(
             "  ✓ {} created ({}, {}cpu/{}mem{})",
             m.metadata.name,

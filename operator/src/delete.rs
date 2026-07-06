@@ -88,6 +88,35 @@ pub async fn run(
         .context("failed to delete ECS service")?;
     println!("  ✓ ECS service deleted");
 
+    // 2a. Wait for the service to fully drain (INACTIVE status) so that
+    // a subsequent `apply` doesn't hit "Unable to Start a service that
+    // is still Draining".
+    print!("  ⏳ Waiting for drain to complete...");
+    for i in 0..60 {
+        let resp = ecs
+            .describe_services()
+            .cluster(cluster)
+            .services(&service_name)
+            .send()
+            .await;
+        let is_gone = match resp {
+            Ok(r) => r
+                .services()
+                .first()
+                .map(|s| s.status() == Some("INACTIVE"))
+                .unwrap_or(true),
+            Err(_) => true,
+        };
+        if is_gone {
+            println!(" done ({i}s)");
+            break;
+        }
+        if i == 59 {
+            println!(" timed out (service may still be draining)");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
     // 2b. Best-effort ingress teardown: Cloud Map service + this API's
     // routes/integration/stage. No-op for bots that never had ingress. Never
     // blocks deletion — failures are logged only.
