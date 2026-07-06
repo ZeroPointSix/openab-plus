@@ -247,6 +247,10 @@ pub enum Runtime {
 pub struct EcsRuntime {
     #[serde(default = "default_capacity_provider")]
     pub capacity_provider: String,
+    /// CPU architecture for the ECS task. Defaults to `X86_64`.
+    /// Valid values: `X86_64`, `ARM64`.
+    #[serde(default = "default_architecture")]
+    pub architecture: String,
     pub networking: EcsNetworking,
 }
 
@@ -272,6 +276,10 @@ pub struct KubernetesRuntime {
 
 fn default_capacity_provider() -> String {
     "FARGATE".to_string()
+}
+
+fn default_architecture() -> String {
+    "X86_64".to_string()
 }
 
 /// Valid ECS Fargate CPU/memory combinations
@@ -302,6 +310,14 @@ impl OABServiceManifest {
                 let valid_cp = ["FARGATE", "FARGATE_SPOT"];
                 if !valid_cp.contains(&ecs.capacity_provider.as_str()) {
                     anyhow::bail!("runtime.capacityProvider must be FARGATE or FARGATE_SPOT");
+                }
+                let valid_arch = ["X86_64", "ARM64"];
+                if !valid_arch.contains(&ecs.architecture.as_str()) {
+                    anyhow::bail!(
+                        "runtime.architecture must be one of {:?} (got '{}')",
+                        valid_arch,
+                        ecs.architecture
+                    );
                 }
                 if ecs.networking.subnets.is_empty() {
                     anyhow::bail!("runtime.networking.subnets must not be empty");
