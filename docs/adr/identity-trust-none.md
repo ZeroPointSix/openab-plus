@@ -170,10 +170,12 @@ Each adapter is split into two components with the Trust Gate in between:
 - No adapter can bypass the gate — it is architecturally mandatory
 - New platform = write Receiver + Handler; trust is automatic
 
-**Type-level enforcement (compile-time guarantee):**
-The "impossible to bypass" property is enforced via Rust's type system, not just
-calling convention. The Trust Gate consumes `InboundEvent` and produces a
-**different type** — `GatedEvent` — which is the only type Handler accepts:
+**Type-level enforcement (compile-time hardening):**
+The private constructor makes *accidental* bypass a compile error. The Trust Gate
+consumes `InboundEvent` and produces a **different type** — `GatedEvent` — which
+is the only type Handler accepts. No code outside `crate::trust::gate` can
+construct `GatedEvent`, ensuring untrusted events cannot reach Handlers through
+normal code paths:
 
 ```rust
 // In crate::trust::gate (narrow module — only Trust Gate code lives here)
@@ -183,7 +185,7 @@ pub struct InboundEvent { /* ... */ }
 
 /// Trust Gate produces this (trusted).
 /// The inner field is PRIVATE (not pub(crate)) — only code in this module
-/// can construct it. This makes bypass impossible even within openab-core.
+/// can construct it. This makes accidental bypass a compile error.
 pub struct GatedEvent {
     inner: InboundEvent,  // private — only gate module can construct
 }
@@ -195,7 +197,19 @@ impl GatedEvent {
     pub fn sender_id(&self) -> &str { &self.inner.sender_id }
     pub fn channel_id(&self) -> &str { &self.inner.channel_id }
     pub fn is_dm(&self) -> bool { self.inner.is_dm }
-    pub fn into_inner(self) -> InboundEvent { self.inner }
+
+    /// Consuming unwrap — restricted to `pub(crate)` to minimize escape paths.
+    /// Only used by the Dispatcher when it needs ownership of the inner event
+    /// for session creation. Handlers should use read-only accessors above.
+    pub(crate) fn into_inner(self) -> InboundEvent { self.inner }
+
+    /// Test-only constructor — allows Handler unit tests to create GatedEvent
+    /// without wiring the full Trust Gate pipeline. Excluded from production
+    /// binaries via cfg(test).
+    #[cfg(test)]
+    pub(crate) fn assume_trusted_for_test(event: InboundEvent) -> Self {
+        Self { inner: event }
+    }
 }
 
 /// Only constructible within this module (the Trust Gate).
@@ -219,8 +233,10 @@ crate::trust
 
 A Handler that tries to accept `InboundEvent` directly will not compile.
 Any module outside `crate::trust` that tries to construct `GatedEvent` will fail
-(private field, no public constructor). This makes the bypass impossible at
-compile time — not `pub(crate)`, but truly module-private.
+(private field, no public constructor). This makes accidental bypass a compile
+error — the type system enforces the trust boundary structurally. The consuming
+unwrap (`into_inner`) is intentionally `pub(crate)` to minimize escape paths
+while allowing the Dispatcher to take ownership when creating sessions.
 
 **Trust lookup key:** The gate uses the **per-event platform** from
 `InboundEvent.platform` (which maps to `ChannelRef.platform`), NOT
@@ -342,11 +358,17 @@ pub struct InboundEvent {
     pub platform: String,           // "discord", "telegram", "line", etc.
     pub sender_id: String,          // platform-specific sender identifier
     pub channel_id: String,         // conversation surface
+    pub workspace_id: Option<String>, // workspace/team context (Slack Enterprise Grid: team_id)
     pub is_dm: bool,                // DM vs group/channel
     pub is_bot: bool,               // bot-originated message
     pub raw: RawPlatformEvent,      // opaque; Handler interprets this
 }
 ```
+
+**`workspace_id` usage:** Only populated when the platform has multi-workspace
+semantics (currently: Slack Enterprise Grid). Used by `PlatformTrustConfigs::decide()`
+to scope trust lookups and by the echo rate-limiter to key per-workspace. For
+single-workspace Slack apps and all other platforms, this is `None`.
 
 ### Per-platform TrustConfig
 
@@ -437,18 +459,60 @@ If per-user audit is required, use `"members"` policy.
 ### PlatformTrustConfigs (registry)
 
 ```rust
+/// Platform-specific trust config — supports base config and platform extensions.
+pub enum PlatformTrustConfig {
+    /// Standard config (Discord, Telegram, Feishu, WeCom, Google Chat, Teams).
+    Base(TrustConfig),
+    /// LINE — extends base with group policy (open/members/unknown handling).
+    Line(LineTrustConfig),
+    /// Slack — extends base with workspace-scoped trust for Enterprise Grid.
+    Slack(SlackTrustConfig),
+}
+
+/// LINE-specific trust config with per-group policy.
+pub struct LineTrustConfig {
+    pub base: TrustConfig,
+    pub default_group_policy: GroupPolicy,           // "members" (fail-closed default)
+    pub groups: HashMap<String, GroupPolicy>,        // group_id → policy
+}
+
+/// Slack-specific trust config with workspace-scoped identity.
+pub struct SlackTrustConfig {
+    pub base: TrustConfig,
+    /// For Enterprise Grid: per-workspace allowed_users override.
+    /// If empty, falls back to base.allowed_users (single-workspace mode).
+    pub workspace_users: HashMap<String, HashSet<String>>,  // team_id → allowed user IDs
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum GroupPolicy {
+    Open,       // group-level trust — "unknown" senders permitted
+    Members,    // per-user trust — "unknown" senders denied
+}
+
 pub struct PlatformTrustConfigs {
-    configs: HashMap<String, TrustConfig>,  // keyed by lowercase platform name
+    configs: HashMap<String, PlatformTrustConfig>,  // keyed by lowercase platform name
 }
 
 impl PlatformTrustConfigs {
-    /// Look up by per-event platform (case-insensitive).
-    /// Unknown platform → default config (L2 open, L3 deny-all).
-    pub fn decide(&self, platform: &str, channel_id: &str, is_dm: bool, sender_id: &str) -> Decision {
+    /// Main decision entry point. Dispatches to platform-specific logic.
+    pub fn decide(
+        &self,
+        platform: &str,
+        channel_id: &str,
+        is_dm: bool,
+        sender_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Decision {
         let config = self.configs
             .get(&platform.to_lowercase())
-            .unwrap_or(&Self::default_config());
-        config.decide(channel_id, is_dm, sender_id)
+            .unwrap_or(&PlatformTrustConfig::Base(Self::default_config()));
+
+        match config {
+            PlatformTrustConfig::Base(c) => c.decide(channel_id, is_dm, sender_id),
+            PlatformTrustConfig::Line(c) => c.decide(channel_id, is_dm, sender_id),
+            PlatformTrustConfig::Slack(c) => c.decide(channel_id, is_dm, sender_id, workspace_id),
+        }
     }
 
     fn default_config() -> TrustConfig {
@@ -462,11 +526,100 @@ impl PlatformTrustConfigs {
         }
     }
 }
+
+impl LineTrustConfig {
+    pub fn decide(&self, channel_id: &str, is_dm: bool, sender_id: &str) -> Decision {
+        // L2 scope check first (same as base)
+        if !self.base.surface_allowed(channel_id, is_dm) {
+            return Decision::DenyScope;
+        }
+
+        // 1:1 DM — standard identity check, but "unknown" always denied
+        if is_dm {
+            if sender_id == "unknown" || sender_id.is_empty() {
+                return Decision::DenyIdentity;
+            }
+            return if self.base.identity_allowed(sender_id) {
+                Decision::Allow
+            } else {
+                Decision::DenyIdentity
+            };
+        }
+
+        // Group — look up per-group policy
+        let policy = self.groups
+            .get(channel_id)
+            .copied()
+            .unwrap_or(self.default_group_policy);
+
+        match policy {
+            GroupPolicy::Open => Decision::Allow,  // group-level trust, "unknown" permitted
+            GroupPolicy::Members => {
+                if sender_id == "unknown" || sender_id.is_empty() {
+                    Decision::DenyIdentity
+                } else if self.base.identity_allowed(sender_id) {
+                    Decision::Allow
+                } else {
+                    Decision::DenyIdentity
+                }
+            }
+        }
+    }
+}
+
+impl SlackTrustConfig {
+    pub fn decide(
+        &self,
+        channel_id: &str,
+        is_dm: bool,
+        sender_id: &str,
+        workspace_id: Option<&str>,
+    ) -> Decision {
+        // L2 scope check
+        if !self.base.surface_allowed(channel_id, is_dm) {
+            return Decision::DenyScope;
+        }
+
+        // L3 identity — workspace-scoped for Enterprise Grid
+        if sender_id.is_empty() { return Decision::DenyIdentity; }
+
+        // If workspace_users is configured and we have a workspace_id,
+        // check workspace-scoped allowlist first.
+        if let Some(ws_id) = workspace_id {
+            if let Some(ws_users) = self.workspace_users.get(ws_id) {
+                return if ws_users.contains(sender_id) || self.base.allow_all_users {
+                    Decision::Allow
+                } else {
+                    Decision::DenyIdentity
+                };
+            }
+        }
+
+        // Fallback to base config (single-workspace or unscoped)
+        if self.base.identity_allowed(sender_id) {
+            Decision::Allow
+        } else {
+            Decision::DenyIdentity
+        }
+    }
+}
 ```
 
-Note: The default config uses a runtime-constructed `TrustConfig` (not a `static`
-with `HashSet::new()` which would not compile). The actual implementation uses
-`LazyLock` or returns a fresh default; see `trust.rs` on main for the real code.
+**Slack Enterprise Grid config example:**
+
+```toml
+# Single-workspace Slack (most deployments):
+[slack]
+allowed_users = ["U01ABCDEFGH", "U09XYZWVUTS"]
+
+# Enterprise Grid — workspace-scoped (optional):
+[slack]
+allowed_users = ["E0123456789"]           # enterprise_user.id (cross-workspace)
+
+[slack.workspace_users]
+T012345 = ["U01ABCDEFGH", "U01IJKLMNOP"]  # workspace-specific overrides
+T067890 = ["U09XYZWVUTS"]
+```
 
 ### Bot message handling
 
@@ -504,7 +657,15 @@ L2+L3 function with no bot-awareness:
 
 ```rust
 // Trust Gate layer (pseudocode) — lives in crate::trust::gate
-async fn gate_event(event: &InboundEvent, configs: &PlatformTrustConfigs) -> Option<GatedEvent> {
+async fn gate_event(event: InboundEvent, configs: &PlatformTrustConfigs) -> Option<GatedEvent> {
+    // System-initiated events (e.g., Cron) bypass trust entirely.
+    // Cron is internal — it has no external sender and targets arbitrary
+    // platform channels. Gating it against platform L2 scope would incorrectly
+    // block scheduled jobs to channels not in the human-facing allowlist.
+    if event.platform == "cron" || event.sender_id == "openab-cron" {
+        return Some(seal(event));  // fully trusted, no L2/L3
+    }
+
     // Bot bypass — skip L3 identity check, but STILL enforce L2 scope.
     // Bots must respect channel/DM scope (noise/cost control) even though
     // they don't need identity trust.
@@ -513,21 +674,36 @@ async fn gate_event(event: &InboundEvent, configs: &PlatformTrustConfigs) -> Opt
         if !config.surface_allowed(&event.channel_id, event.is_dm) {
             return None;  // DenyScope — bot in wrong channel, silent drop
         }
-        return Some(seal(event.clone()));  // L2 pass, skip L3
+        return Some(seal(event));  // L2 pass, skip L3
     }
 
     // Human sender — full L2 + L3 evaluation
-    let decision = configs.decide(&event.platform, &event.channel_id, event.is_dm, &event.sender_id);
+    let decision = configs.decide(
+        &event.platform,
+        &event.channel_id,
+        event.is_dm,
+        &event.sender_id,
+        event.workspace_id.as_deref(),
+    );
     match decision {
-        Decision::Allow => Some(seal(event.clone())),
+        Decision::Allow => Some(seal(event)),
         Decision::DenyIdentity => { echo_sender_id(&event).await; None }
         Decision::DenyScope => None,  // silent drop
     }
 }
 ```
 
-This means `PlatformTrustConfigs::decide()` does NOT need an `is_bot` parameter —
-the bot check happens before `decide()` is called. Bots skip L3 but NOT L2.
+**Note on ownership:** `gate_event` takes `InboundEvent` **by value** (ownership
+transfer). On `Allow`, the event is moved into `GatedEvent` with zero copying.
+On `Deny`, the event is dropped. This avoids deep-cloning `RawPlatformEvent`
+(which may contain the full platform payload) on the hot path.
+
+**Cron bypass rationale:** Cron tasks are system-initiated (no external sender).
+They use `platform = "cron"` and `sender_id = "openab-cron"` — a reserved
+synthetic identity that cannot collide with any real platform sender ID (real
+platform IDs are alphanumeric, never prefixed with `openab-`). The Cron Receiver
+sets these fields; the Trust Gate recognizes them and short-circuits. The CronHandler
+then routes the dispatched event to the appropriate target platform/channel.
 
 ### Echo reply on deny
 
@@ -545,6 +721,11 @@ if decision == Decision::DenyIdentity {
 
 **Echo safeguards:**
 - **Rate-limit:** max 1 echo per sender per platform per 5 minutes (prevents spam/DoS amplification)
+- **Bounded state:** rate-limit cache MUST be bounded (e.g., LRU with max 10,000
+  entries + 5-minute TTL eviction). An unbounded `HashMap<sender_id, Instant>`
+  would allow attackers to OOM the process by sending messages with random/spoofed
+  sender IDs. Implementation: use a TTL-bounded LRU cache (e.g., `moka::sync::Cache`
+  or equivalent) with `max_capacity` and `time_to_live` configured.
 - **Bot exclusion:** if `is_bot` → silent deny, no echo (prevents infinite reply loops between bots)
 - **Best-effort:** echo delivery is not guaranteed; this is acceptable — the echo is a UX convenience, not a security mechanism
 
@@ -579,7 +760,7 @@ using the **exact format** the platform provides in event payloads:
 | Platform | Native type | `allowed_users` format | Example | Gotcha |
 |----------|-------------|----------------------|---------|--------|
 | Discord | Snowflake (u64) | Numeric string | `"845835116920307722"` | — |
-| Slack | String | U-prefix or W-prefix | `"U01ABCDEFGH"` | Enterprise Grid: use `enterprise_user.id` (stable across workspaces) when available; trust key = `(team_id, sender_id)` for Grid deployments |
+| Slack | String | U-prefix or W-prefix | `"U01ABCDEFGH"` | Enterprise Grid: Receiver MUST set `workspace_id = Some(team_id)` and prefer `enterprise_user.id` as `sender_id` when available (stable across workspaces). Config format for Grid: `allowed_users = ["E0123456789"]` (enterprise_user.id) or `"T012345:U01ABCDEFGH"` (team_id:user_id fallback). Trust key = `(workspace_id, sender_id)` — see `decide()` below. |
 | Telegram | Integer (i64) | Stringified integer | `"123456789"` | ⚠️ Do NOT use `@username` — only numeric ID works |
 | LINE | String | U + 32 hex chars | `"U1234567890abcdef0123456789abcdef"` | — |
 | Feishu | String | open_id | `"ou_xxxxxxxxxxxxxxxxxxxx"` | ⚠️ `open_id` is **per-app** — same user has different ID in different Feishu apps |
@@ -608,10 +789,10 @@ where
             None => break,  // connection closed / shutdown
         };
 
-        // 🔒 Trust Gate (unified for all platforms)
-        let gated = match gate_event(&event, &trust).await {
+        // 🔒 Trust Gate (unified for all platforms) — takes ownership of event
+        let gated = match gate_event(event, &trust).await {
             Some(g) => g,
-            None => continue,  // denied
+            None => continue,  // denied (event dropped)
         };
 
         // Handler only receives GatedEvent (compile-time enforced)
@@ -706,19 +887,20 @@ async fn run_gateway_platforms(
             platform: gw_event.platform.clone(),
             sender_id: gw_event.sender_id.clone(),
             channel_id: gw_event.channel_id.clone(),
+            workspace_id: None,  // gateway platforms don't use workspace scoping
             is_dm: gw_event.is_dm,
             is_bot: gw_event.is_bot,
             raw: RawPlatformEvent::Gateway(gw_event.clone()),
         };
 
-        // 🔒 Trust Gate (same logic, keyed by event.platform)
-        let gated = match gate_event(&event, &trust).await {
+        // 🔒 Trust Gate (same logic, keyed by event.platform) — takes ownership
+        let gated = match gate_event(event, &trust).await {
             Some(g) => g,
             None => continue,
         };
 
         // Fan-out to platform-specific Handler
-        match event.platform.as_str() {
+        match gated.platform() {
             "telegram"   => telegram_handler.handle(gated).await,
             "line"       => line_handler.handle(gated).await,
             "feishu"     => feishu_handler.handle(gated).await,
@@ -883,7 +1065,7 @@ Each adapter implements `is_trusted_sender()`. Rejected because:
 - Trust logic is identical across all platforms (`allowed_users.contains(id)`)
 - Forces N identical implementations with no polymorphic benefit
 - New adapter forgetting to implement = security hole
-- Three-layer architecture makes this impossible to bypass by construction
+- Three-layer architecture makes accidental bypass a compile error by construction
 
 ### Trust check at gateway layer
 
