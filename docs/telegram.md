@@ -375,8 +375,8 @@ Set `TELEGRAM_RICH_MESSAGES=false` to disable rich messages and use legacy `send
 | `TELEGRAM_SECRET_TOKEN` | No | — | Webhook signature validation |
 | `TELEGRAM_RICH_MESSAGES` | No | `true` | Use `sendRichMessage` for tables/headings/long content (Bot API 10.1+). Set `false` to opt out. |
 | `TELEGRAM_STREAMING` | No | follows `TELEGRAM_RICH_MESSAGES` | Stream replies live via `sendRichMessageDraft`. Defaults to `true` when rich messages are enabled, `false` otherwise. Set `false` for send-once mode (single final message). |
-| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs allowed to interact with the bot. Empty = deny all. |
-| `TELEGRAM_ALLOW_ALL_USERS` | No | `false` | Explicit flag: `true` = allow all users, `false` = check `allowed_users`. Defaults to `false` (deny-all, per identity-trust-none ADR). |
+| `TELEGRAM_ALLOWED_USERS` | No | — | Comma-separated Telegram user IDs allowed to interact with the bot. Empty = deny all. **Unified binary only** — standalone gateway uses `[gateway].allowed_users` instead. |
+| `TELEGRAM_ALLOW_ALL_USERS` | No | `false` | Explicit flag: `true` = allow all users, `false` = check `allowed_users`. Defaults to `false` (deny-all, per identity-trust-none ADR). **Unified binary only.** |
 | `GATEWAY_WS_TOKEN` | No | — | WebSocket auth token |
 | `GATEWAY_LISTEN` | No | `0.0.0.0:8080` | Listen address |
 | `TELEGRAM_WEBHOOK_PATH` | No | `/webhook/telegram` | Webhook endpoint path |

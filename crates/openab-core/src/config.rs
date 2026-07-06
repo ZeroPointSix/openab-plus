@@ -608,7 +608,10 @@ pub struct TelegramConfig {
     /// Explicit flag: true = allow all users, false = check `allowed_users`.
     /// When not set, defaults to `false` (deny-all, per identity-trust-none ADR).
     /// Set `true` explicitly to allow all users. Env fallback:
-    /// `TELEGRAM_ALLOW_ALL_USERS`.
+    /// `TELEGRAM_ALLOW_ALL_USERS` (empty string treated as unset).
+    ///
+    /// **Note:** When this resolves to `true`, the `allowed_users` list is
+    /// bypassed entirely — all users are permitted regardless of list contents.
     pub allow_all_users: Option<bool>,
     /// Telegram user IDs allowed to interact with the bot. Only checked when
     /// `allow_all_users` resolves to `false`. Env fallback:
@@ -682,6 +685,7 @@ impl TelegramConfig {
             allow_all_users: self.allow_all_users.unwrap_or_else(|| {
                 std::env::var("TELEGRAM_ALLOW_ALL_USERS")
                     .ok()
+                    .filter(|v| !v.is_empty())
                     .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
                     .unwrap_or(false)
             }),
@@ -1702,6 +1706,14 @@ mod tests {
         assert!(r.allowed_users.is_empty()); // explicit empty wins over env
         assert!(!r.allow_all_users);
         std::env::remove_var("TELEGRAM_ALLOWED_USERS");
+
+        // --- Scenario 14: TELEGRAM_ALLOW_ALL_USERS="" (empty string) must
+        //     resolve to false (deny-all), not true. Empty string is treated
+        //     as unset to avoid accidental fail-open. ---
+        std::env::set_var("TELEGRAM_ALLOW_ALL_USERS", "");
+        let r = TelegramConfig::default().resolve();
+        assert!(!r.allow_all_users); // empty string = unset = deny-all
+        std::env::remove_var("TELEGRAM_ALLOW_ALL_USERS");
 
         // --- Cleanup ---
         for k in [
