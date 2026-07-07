@@ -499,27 +499,26 @@ async fn ensure_scheduler_role(
             }]
         });
 
-        iam.create_role()
+        let create_result = iam
+            .create_role()
             .role_name(role_name)
             .assume_role_policy_document(trust_policy.to_string())
             .description(
                 "Allows EventBridge Scheduler to call ECS UpdateService for oabctl scale schedules",
             )
             .send()
-            .await
-            .map(|_| ())
-            .or_else(|e| {
-                // Ignore EntityAlreadyExists (race condition with concurrent oabctl runs)
-                if e.as_service_error()
-                    .map(|se| se.is_entity_already_exists_exception())
-                    .unwrap_or(false)
-                {
-                    Ok(())
-                } else {
-                    Err(e)
-                }
-            })
-            .context("failed to create scheduler IAM role")?;
+            .await;
+
+        // Ignore EntityAlreadyExists (race condition with concurrent oabctl runs)
+        if let Err(e) = create_result {
+            if !e
+                .as_service_error()
+                .map(|se| se.is_entity_already_exists_exception())
+                .unwrap_or(false)
+            {
+                return Err(e).context("failed to create scheduler IAM role");
+            }
+        }
     }
 
     // Always ensure inline policy is current (put_role_policy is idempotent —
