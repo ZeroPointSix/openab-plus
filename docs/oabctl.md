@@ -195,6 +195,7 @@ spec:
   runtime:
     type: ecs
     capacityProvider: FARGATE_SPOT
+    taskRoleArn: arn:aws:iam::123456789012:role/oab-task-role-my-bot  # optional
     networking:
       subnets: [subnet-aaa, subnet-bbb]
       securityGroups: [sg-xxx]
@@ -403,6 +404,40 @@ spec:
 - **Agent config is external** — `configFrom` points to config.toml (managed via `--sync`)
 - **Secrets resolved by OpenAB** — `[secrets.refs]` in config.toml, not in manifest
 - **Runtime-agnostic spec** — same top-level fields regardless of ECS or K8S
+
+### Per-Service IAM Task Role (`taskRoleArn`)
+
+By default, all services use the bootstrap shared role (`oab-task-role`) created
+by `oabctl bootstrap`. For production multi-agent fleets where services need
+different IAM permissions (e.g., one bot accesses a specific S3 bucket, another
+needs DynamoDB), you can declare a per-service task role in the manifest:
+
+```yaml
+spec:
+  runtime:
+    type: ecs
+    taskRoleArn: arn:aws:iam::123456789012:role/oab-task-role-my-bot
+    capacityProvider: FARGATE_SPOT
+    networking: { subnets: [...], securityGroups: [...] }
+```
+
+**Resolution order:**
+1. `runtime.taskRoleArn` from manifest → use it
+2. Otherwise → fall back to bootstrap shared role (`oab-task-role`)
+
+**Requirements for the custom role:**
+- Must have a trust policy allowing `ecs-tasks.amazonaws.com` to `sts:AssumeRole`
+- Should include at minimum the permissions the agent needs at runtime
+  (S3 config access, Secrets Manager, ECS Exec if used)
+
+**Recommendation:** Use the bootstrap shared role for quick starts and single-bot
+setups. For production multi-agent fleets, create per-service roles with
+least-privilege policies and declare them in each manifest.
+
+> **Note:** `taskRoleArn` is distinct from `executionRoleArn`. The execution
+> role (always from bootstrap) is used by ECS itself to pull images and inject
+> secrets *before* the container starts. The task role is the identity the
+> *running container* assumes — this is what `taskRoleArn` overrides.
 
 ## Bootstrap
 
