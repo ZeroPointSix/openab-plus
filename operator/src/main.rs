@@ -97,13 +97,14 @@ enum Commands {
     Scale {
         /// Agent name or ecsctl alias
         alias: String,
-        /// Desired task count
+        /// Desired task count (0–100)
+        #[arg(value_parser = clap::value_parser!(i32).range(0..=100))]
         size: i32,
-        /// Schedule expression (e.g. "cron(0 8 * * ? *)" or "rate(1 hour)")
-        /// instead of scaling immediately
+        /// Create/update a recurring schedule (e.g. "cron(0 8 * * ? *)" or "rate(1 hour)").
+        /// Omit for immediate scaling.
         #[arg(long)]
         with_schedule: Option<String>,
-        /// Timezone for schedule expression (default: UTC)
+        /// IANA timezone for schedule expression (e.g. "Asia/Taipei", default: UTC)
         #[arg(long, default_value = "UTC")]
         timezone: String,
     },
