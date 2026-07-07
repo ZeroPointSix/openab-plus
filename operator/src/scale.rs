@@ -218,7 +218,7 @@ pub async fn run_with_schedule(
     ensure_schedule_group(&scheduler, group_name).await?;
 
     // Ensure scheduler IAM role exists
-    let role_arn = ensure_scheduler_role(&iam, account_id, &region, &cluster).await?;
+    let role_arn = ensure_scheduler_role(&iam, account_id, &region).await?;
 
     // Build schedule name: oab-scale-{alias}-to-{size}
     // AWS schedule names: max 64 chars, pattern [0-9a-zA-Z-_.]+
@@ -266,7 +266,8 @@ pub async fn run_with_schedule(
             .await
             .context("failed to update schedule")?;
     } else {
-        // Retry with backoff to handle IAM role propagation delay
+        // Retry with backoff, but ONLY for IAM propagation errors (AccessDeniedException).
+        // Other errors (validation, quota, etc.) fail immediately.
         let mut last_err = None;
         for attempt in 0..5 {
             if attempt > 0 {
@@ -296,7 +297,17 @@ pub async fn run_with_schedule(
                     break;
                 }
                 Err(e) => {
-                    last_err = Some(e);
+                    // Only retry on AccessDeniedException (IAM propagation delay).
+                    // All other errors (validation, quota, conflict) fail immediately.
+                    let is_iam_propagation = e
+                        .as_service_error()
+                        .map(|se| format!("{:?}", se).contains("AccessDenied"))
+                        .unwrap_or(false);
+                    if is_iam_propagation {
+                        last_err = Some(e);
+                    } else {
+                        return Err(e).context("failed to create schedule");
+                    }
                 }
             }
         }
@@ -456,7 +467,6 @@ async fn ensure_scheduler_role(
     iam: &aws_sdk_iam::Client,
     account_id: &str,
     region: &str,
-    cluster: &str,
 ) -> Result<String> {
     let role_name = "oab-scheduler-role";
     let role_arn = format!("arn:aws:iam::{}:role/{}", account_id, role_name);
@@ -496,13 +506,15 @@ async fn ensure_scheduler_role(
     }
 
     // Always ensure inline policy is current (put_role_policy is idempotent —
-    // overwrites existing policy with same name, handles stale/outdated scope)
+    // overwrites existing policy with same name, handles stale/outdated scope).
+    // Use wildcard for cluster to support multi-cluster deployments — the oab-*
+    // prefix on service name provides sufficient scope restriction.
     let ecs_policy = serde_json::json!({
         "Version": "2012-10-17",
         "Statement": [{
             "Effect": "Allow",
             "Action": "ecs:UpdateService",
-            "Resource": format!("arn:aws:ecs:{region}:{account_id}:service/{cluster}/oab-*")
+            "Resource": format!("arn:aws:ecs:{region}:{account_id}:service/*/oab-*")
         }]
     });
 
