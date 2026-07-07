@@ -354,9 +354,17 @@ async fn apply_ecs(
     // IMDS, which doesn't exist on Fargate, and fails with a generic
     // "dispatch failure". This was previously never set at all.
     let execution_role_arn = bootstrap_state.as_ref().map(|s| s.resources.execution_role_arn.clone());
-    // Manifest task_role_arn takes precedence over bootstrap shared role
-    let task_role_arn = ecs_rt.task_role_arn.clone()
-        .or_else(|| bootstrap_state.as_ref().map(|s| s.resources.task_role_arn.clone()));
+    // Manifest task_role_arn takes precedence over bootstrap shared role.
+    // Filter empty strings so a blank value falls through to bootstrap.
+    let task_role_arn = resolve_task_role_arn(
+        &ecs_rt.task_role_arn,
+        bootstrap_state.as_ref().map(|s| s.resources.task_role_arn.as_str()),
+    );
+    match (&task_role_arn, ecs_rt.task_role_arn.as_deref().filter(|s| !s.is_empty())) {
+        (Some(arn), Some(_)) => eprintln!("  ℹ taskRoleArn: {arn} (from manifest)"),
+        (Some(arn), None) => eprintln!("  ℹ taskRoleArn: {arn} (from bootstrap)"),
+        (None, _) => eprintln!("  ⚠ no taskRoleArn resolved — task will have no IAM role"),
+    }
 
     let mut register_req = ecs
         .register_task_definition()
@@ -709,4 +717,86 @@ async fn wait_for_stable(ecs: &aws_sdk_ecs::Client, cluster: &str, service: &str
         }
     }
     anyhow::bail!("timed out waiting for service to stabilize (5 min)")
+}
+
+/// Resolve the effective task role ARN.
+///
+/// Resolution order:
+/// 1. Manifest `taskRoleArn` (if present and non-empty) → use it
+/// 2. Bootstrap shared task role → fallback
+/// 3. Neither → `None`
+fn resolve_task_role_arn(
+    manifest_role: &Option<String>,
+    bootstrap_role: Option<&str>,
+) -> Option<String> {
+    manifest_role
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| bootstrap_role.map(|s| s.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_role_manifest_wins_over_bootstrap() {
+        let manifest = Some("arn:aws:iam::111:role/manifest-role".to_string());
+        let bootstrap = Some("arn:aws:iam::111:role/bootstrap-role");
+        let result = resolve_task_role_arn(&manifest, bootstrap);
+        assert_eq!(
+            result.as_deref(),
+            Some("arn:aws:iam::111:role/manifest-role")
+        );
+    }
+
+    #[test]
+    fn task_role_falls_back_to_bootstrap() {
+        let manifest: Option<String> = None;
+        let bootstrap = Some("arn:aws:iam::111:role/bootstrap-role");
+        let result = resolve_task_role_arn(&manifest, bootstrap);
+        assert_eq!(
+            result.as_deref(),
+            Some("arn:aws:iam::111:role/bootstrap-role")
+        );
+    }
+
+    #[test]
+    fn task_role_manifest_only_no_bootstrap() {
+        let manifest = Some("arn:aws:iam::111:role/manifest-role".to_string());
+        let bootstrap: Option<&str> = None;
+        let result = resolve_task_role_arn(&manifest, bootstrap);
+        assert_eq!(
+            result.as_deref(),
+            Some("arn:aws:iam::111:role/manifest-role")
+        );
+    }
+
+    #[test]
+    fn task_role_none_when_both_absent() {
+        let manifest: Option<String> = None;
+        let bootstrap: Option<&str> = None;
+        let result = resolve_task_role_arn(&manifest, bootstrap);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn task_role_empty_string_falls_through_to_bootstrap() {
+        let manifest = Some("".to_string());
+        let bootstrap = Some("arn:aws:iam::111:role/bootstrap-role");
+        let result = resolve_task_role_arn(&manifest, bootstrap);
+        assert_eq!(
+            result.as_deref(),
+            Some("arn:aws:iam::111:role/bootstrap-role"),
+            "empty string in manifest should not override bootstrap"
+        );
+    }
+
+    #[test]
+    fn task_role_empty_string_no_bootstrap_returns_none() {
+        let manifest = Some("".to_string());
+        let bootstrap: Option<&str> = None;
+        let result = resolve_task_role_arn(&manifest, bootstrap);
+        assert_eq!(result, None);
+    }
 }
