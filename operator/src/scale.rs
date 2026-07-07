@@ -221,9 +221,17 @@ pub async fn run_with_schedule(
     let role_arn = ensure_scheduler_role(&iam, account_id, &region, &cluster).await?;
 
     // Build schedule name: oab-scale-{alias}-to-{size}
-    // Replace non-alphanumeric chars for valid schedule name
-    let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+    // AWS schedule names: max 64 chars, pattern [0-9a-zA-Z-_.]+
+    let safe_alias = alias.replace(
+        |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
+        "-",
+    );
     let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, size);
+    let schedule_name = if schedule_name.len() > 64 {
+        schedule_name[..64].to_string()
+    } else {
+        schedule_name
+    };
 
     // Build the ECS UpdateService input for the universal target
     let target_input = serde_json::json!({
@@ -465,10 +473,8 @@ async fn ensure_scheduler_role(
                 "Action": "sts:AssumeRole",
                 "Condition": {
                     "StringEquals": {
-                        "aws:SourceAccount": account_id
-                    },
-                    "ArnLike": {
-                        "aws:SourceArn": format!("arn:aws:scheduler:{region}:{account_id}:schedule/oab-schedules/*")
+                        "aws:SourceAccount": account_id,
+                        "aws:SourceArn": format!("arn:aws:scheduler:{region}:{account_id}:schedule-group/oab-schedules")
                     }
                 }
             }]
@@ -569,25 +575,50 @@ mod tests {
     fn test_schedule_name_sanitization() {
         // Test the same logic used in run_with_schedule for schedule naming
         let alias = "my-bot/special";
-        let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        let safe_alias = alias.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
+            "-",
+        );
         let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, 0);
         assert_eq!(schedule_name, "oab-scale-my-bot-special-to-0");
     }
 
     #[test]
     fn test_schedule_name_sanitization_unicode() {
+        // Unicode chars are NOT valid in AWS schedule names — replaced with '-'
         let alias = "bot名前";
-        let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        let safe_alias = alias.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
+            "-",
+        );
         let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, 1);
-        // Unicode alphanumeric chars are kept
-        assert_eq!(schedule_name, "oab-scale-bot名前-to-1");
+        assert_eq!(schedule_name, "oab-scale-bot---to-1");
     }
 
     #[test]
     fn test_schedule_name_sanitization_special_chars() {
         let alias = "my.bot@prod";
-        let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
-        assert_eq!(safe_alias, "my-bot-prod");
+        let safe_alias = alias.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
+            "-",
+        );
+        assert_eq!(safe_alias, "my.bot-prod");
+    }
+
+    #[test]
+    fn test_schedule_name_length_cap() {
+        let alias = "a-very-long-service-name-that-exceeds-the-sixty-four-character-limit";
+        let safe_alias = alias.replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
+            "-",
+        );
+        let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, 0);
+        let schedule_name = if schedule_name.len() > 64 {
+            schedule_name[..64].to_string()
+        } else {
+            schedule_name
+        };
+        assert!(schedule_name.len() <= 64);
     }
 
     #[test]
