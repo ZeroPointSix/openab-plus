@@ -77,20 +77,13 @@ async fn validate_service_status(
     Ok(())
 }
 
-/// Immediate scale: update desired count directly.
+/// Immediate scale: delegates to ecsctl's scale_service for the core ECS call.
 pub async fn run(aws_config: &aws_config::SdkConfig, alias: &str, size: i32) -> Result<()> {
     let (cluster, service_name) = resolve_service(aws_config, alias).await?;
     let ecs = aws_sdk_ecs::Client::new(aws_config);
 
-    ecs.update_service()
-        .cluster(&cluster)
-        .service(&service_name)
-        .desired_count(size)
-        .send()
-        .await
-        .context("failed to update ECS service desired count")?;
+    ecsctl::scale::scale_service(&ecs, &cluster, &service_name, size, false).await?;
 
-    println!("✓ Scaled {alias} ({service_name}) to {size} in cluster {cluster}");
     Ok(())
 }
 
