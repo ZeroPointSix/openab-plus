@@ -222,16 +222,20 @@ pub async fn run_with_schedule(
 
     // Build schedule name: oab-scale-{alias}-to-{size}
     // AWS schedule names: max 64 chars, pattern [0-9a-zA-Z-_.]+
+    // Truncate alias (not suffix) to preserve -to-{size} for uniqueness
     let safe_alias = alias.replace(
         |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
         "-",
     );
-    let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, size);
-    let schedule_name = if schedule_name.len() > 64 {
-        schedule_name[..64].to_string()
+    let suffix = format!("-to-{}", size);
+    let prefix = "oab-scale-";
+    let max_alias_len = 64 - prefix.len() - suffix.len();
+    let truncated_alias = if safe_alias.len() > max_alias_len {
+        &safe_alias[..max_alias_len]
     } else {
-        schedule_name
+        &safe_alias
     };
+    let schedule_name = format!("{}{}{}", prefix, truncated_alias, suffix);
 
     // Build the ECS UpdateService input for the universal target
     let target_input = serde_json::json!({
@@ -612,13 +616,19 @@ mod tests {
             |c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.',
             "-",
         );
-        let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, 0);
-        let schedule_name = if schedule_name.len() > 64 {
-            schedule_name[..64].to_string()
+        let size = 0;
+        let suffix = format!("-to-{}", size);
+        let prefix = "oab-scale-";
+        let max_alias_len = 64 - prefix.len() - suffix.len();
+        let truncated_alias = if safe_alias.len() > max_alias_len {
+            &safe_alias[..max_alias_len]
         } else {
-            schedule_name
+            &safe_alias
         };
+        let schedule_name = format!("{}{}{}", prefix, truncated_alias, suffix);
         assert!(schedule_name.len() <= 64);
+        // Verify suffix is preserved (different sizes produce different names)
+        assert!(schedule_name.ends_with("-to-0"));
     }
 
     #[test]
