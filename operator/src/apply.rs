@@ -354,7 +354,9 @@ async fn apply_ecs(
     // IMDS, which doesn't exist on Fargate, and fails with a generic
     // "dispatch failure". This was previously never set at all.
     let execution_role_arn = bootstrap_state.as_ref().map(|s| s.resources.execution_role_arn.clone());
-    let task_role_arn = bootstrap_state.as_ref().map(|s| s.resources.task_role_arn.clone());
+    // Manifest task_role_arn takes precedence over bootstrap shared role
+    let task_role_arn = ecs_rt.task_role_arn.clone()
+        .or_else(|| bootstrap_state.as_ref().map(|s| s.resources.task_role_arn.clone()));
 
     let mut register_req = ecs
         .register_task_definition()
