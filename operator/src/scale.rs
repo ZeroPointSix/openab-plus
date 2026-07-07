@@ -297,12 +297,17 @@ pub async fn run_with_schedule(
                     break;
                 }
                 Err(e) => {
-                    // Only retry on AccessDeniedException (IAM propagation delay).
-                    // All other errors (validation, quota, conflict) fail immediately.
-                    let is_iam_propagation = e
+                    // Retry on IAM propagation delays. These manifest as:
+                    // - AccessDeniedException: role not yet assumable
+                    // - ValidationException with "execution role": role propagation pending
+                    // All other errors (quota, conflict, bad input) fail immediately.
+                    let err_debug = e
                         .as_service_error()
-                        .map(|se| format!("{:?}", se).contains("AccessDenied"))
-                        .unwrap_or(false);
+                        .map(|se| format!("{:?}", se))
+                        .unwrap_or_default();
+                    let is_iam_propagation = err_debug.contains("AccessDenied")
+                        || (err_debug.contains("ValidationException")
+                            && err_debug.contains("execution role"));
                     if is_iam_propagation {
                         last_err = Some(e);
                     } else {
