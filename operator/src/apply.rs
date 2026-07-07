@@ -13,7 +13,7 @@ use std::path::Path;
 /// task uses ECS-injected secrets (or pulls from a private registry) — ECS
 /// rejects the request with "you must also specify a value for
 /// 'executionRoleArn'" otherwise.
-async fn load_bootstrap_state(config: &aws_config::SdkConfig) -> Option<BootstrapState> {
+pub(crate) async fn load_bootstrap_state(config: &aws_config::SdkConfig) -> Option<BootstrapState> {
     let bucket = if let Some(b) = crate::config::OabConfig::load().ok().and_then(|c| c.bucket()) {
         b
     } else {
@@ -182,6 +182,14 @@ async fn apply_ecs(
         };
     let generation = current_gen + 1;
 
+    // Resolve cluster from config (same source as `get` and `delete` commands).
+    // ~/.oabctl/config.toml defaults.cluster; falls back to "oab".
+    // Propagate config load errors (same behavior as get/delete) — silently
+    // defaulting to "oab" on a malformed config could target the wrong cluster.
+    let oab_cfg = crate::config::OabConfig::load()
+        .context("failed to load ~/.oabctl/config.toml (run `oabctl bootstrap` first)")?;
+    let cluster = &oab_cfg.defaults.cluster;
+
     // Look up the ECS service's current registry ARN(s) up front so both the
     // ingress-removal teardown below and the update/create logic further down
     // can use the *exact* registry rather than falling back to a name-only
@@ -189,7 +197,7 @@ async fn apply_ecs(
     // an account and reuse the same namespace/name).
     let describe_resp = ecs
         .describe_services()
-        .cluster("oab")
+        .cluster(cluster.as_str())
         .services(&service_name)
         .send()
         .await;
@@ -268,11 +276,8 @@ async fn apply_ecs(
         secrets.push(Secret::builder().name(name).value_from(value_from).build().unwrap());
     }
 
-    // 4. Register task definition. Resolve bootstrap state once up front — it
-    // supplies both the CloudWatch log group (for logConfiguration below) and
-    // the execution role ARN (further down), neither of which the manifest
-    // can or should specify directly (bootstrap owns these, not the manifest —
-    // see operator/README.md's "Resources Created" section).
+    // Load bootstrap state — supplies CloudWatch log group, execution role
+    // ARN, task role ARN, and region fallback.
     let bootstrap_state = load_bootstrap_state(config).await;
 
     // Resolve effective region: prefer SDK config, fall back to bootstrap
@@ -465,7 +470,7 @@ async fn apply_ecs(
 
         let mut update_req = ecs
             .update_service()
-            .cluster("oab")
+            .cluster(cluster.as_str())
             .service(&service_name)
             .task_definition(&task_def_arn)
             .enable_execute_command(true)
@@ -519,7 +524,7 @@ async fn apply_ecs(
 
         let mut create_req = ecs
             .create_service()
-            .cluster("oab")
+            .cluster(cluster.as_str())
             .service_name(&service_name)
             .task_definition(&task_def_arn)
             .desired_count(1)
@@ -634,7 +639,7 @@ async fn apply_ecs(
 
     if wait {
         eprintln!("  ⏳ Waiting for {} to stabilize...", m.metadata.name);
-        wait_for_stable(ecs, "oab", &service_name).await?;
+        wait_for_stable(ecs, cluster, &service_name).await?;
         eprintln!("  ✓ {} is stable", m.metadata.name);
     }
 
