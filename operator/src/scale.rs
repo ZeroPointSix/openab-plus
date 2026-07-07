@@ -201,8 +201,8 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
             }
 
             println!(
-                "{:<40} {:<30} {:<16} {}",
-                "NAME", "SCHEDULE", "TIMEZONE", "STATE"
+                "{:<40} {:<30} {:<16} STATE",
+                "NAME", "SCHEDULE", "TIMEZONE"
             );
             for s in schedules {
                 let name = s.name().unwrap_or("-");
