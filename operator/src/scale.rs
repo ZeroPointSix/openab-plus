@@ -483,8 +483,6 @@ async fn ensure_scheduler_role(
             .send()
             .await
             .context("failed to create scheduler IAM role")?;
-
-        println!("  ✓ Created IAM role: {role_name}");
     }
 
     // Always ensure inline policy is current (put_role_policy is idempotent —
