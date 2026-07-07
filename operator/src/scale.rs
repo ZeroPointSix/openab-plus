@@ -8,13 +8,23 @@ async fn resolve_service(
     aws_config: &aws_config::SdkConfig,
     alias_or_name: &str,
 ) -> Result<(String, String)> {
-    let ecsctl_cfg = ecsctl::config::Config::load().unwrap_or_default();
+    let ecsctl_cfg = match ecsctl::config::Config::load() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("  warning: failed to load ecsctl config: {e} — alias lookup disabled");
+            ecsctl::config::Config::default()
+        }
+    };
 
     // Check if it's an ecsctl alias
     if let Some(target) = ecsctl_cfg.aliases.get(alias_or_name) {
         let parts: Vec<&str> = target.splitn(4, '/').collect();
         if parts.len() >= 2 {
-            return Ok((parts[0].to_string(), parts[1].to_string()));
+            let cluster = parts[0].to_string();
+            let service_name = parts[1].to_string();
+            // Validate service exists and is scalable (same check as bare-name path)
+            validate_service_status(aws_config, &cluster, &service_name).await?;
+            return Ok((cluster, service_name));
         }
     }
 
@@ -29,12 +39,23 @@ async fn resolve_service(
     let namespace = oab_cfg.defaults.namespace;
     let service_name = format!("oab-{}-{}", namespace, alias_or_name);
 
-    // Verify the service exists
+    // Verify the service exists and is scalable
+    validate_service_status(aws_config, &cluster, &service_name).await?;
+
+    Ok((cluster, service_name))
+}
+
+/// Validate that a service exists and is in a scalable state (ACTIVE).
+async fn validate_service_status(
+    aws_config: &aws_config::SdkConfig,
+    cluster: &str,
+    service_name: &str,
+) -> Result<()> {
     let ecs = aws_sdk_ecs::Client::new(aws_config);
     let resp = ecs
         .describe_services()
-        .cluster(&cluster)
-        .services(&service_name)
+        .cluster(cluster)
+        .services(service_name)
         .send()
         .await
         .context("failed to describe ECS service")?;
@@ -47,13 +68,13 @@ async fn resolve_service(
     let status = svc.status().unwrap_or("UNKNOWN");
     if status == "INACTIVE" || status == "DRAINING" {
         anyhow::bail!(
-            "service '{}' is {} — cannot scale",
+            "service '{}' is {} — cannot scale. Check service status with 'oabctl get services'.",
             service_name,
             status
         );
     }
 
-    Ok((cluster, service_name))
+    Ok(())
 }
 
 /// Immediate scale: update desired count directly.
@@ -94,6 +115,46 @@ fn build_flexible_time_window() -> Result<aws_sdk_scheduler::types::FlexibleTime
         .context("failed to build flexible time window")
 }
 
+/// Validate schedule expression format.
+/// EventBridge Scheduler accepts: cron(...), rate(...), at(...)
+fn validate_schedule_expression(expr: &str) -> Result<()> {
+    let trimmed = expr.trim();
+    if trimmed.starts_with("cron(") && trimmed.ends_with(')') {
+        // cron expressions should have 6 fields: min hour dom month dow year
+        let inner = &trimmed[5..trimmed.len() - 1];
+        let fields: Vec<&str> = inner.split_whitespace().collect();
+        if fields.len() != 6 {
+            anyhow::bail!(
+                "invalid cron expression: expected 6 fields (min hour dom month dow year), got {}.\n\
+                 Example: cron(0 8 * * ? *)",
+                fields.len()
+            );
+        }
+        Ok(())
+    } else if trimmed.starts_with("rate(") && trimmed.ends_with(')') {
+        let inner = &trimmed[5..trimmed.len() - 1].trim();
+        if inner.is_empty() {
+            anyhow::bail!(
+                "invalid rate expression: empty value.\n\
+                 Example: rate(1 hour) or rate(5 minutes)"
+            );
+        }
+        Ok(())
+    } else if trimmed.starts_with("at(") && trimmed.ends_with(')') {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "invalid schedule expression: '{}'\n\
+             Must start with cron(...), rate(...), or at(...).\n\
+             Examples:\n\
+             - cron(0 8 * * ? *)      — daily at 8:00 AM\n\
+             - rate(1 hour)           — every hour\n\
+             - at(2024-01-01T00:00:00) — one-time",
+            trimmed
+        );
+    }
+}
+
 /// Check if a schedule exists. Returns true only for confirmed existence;
 /// returns false for ResourceNotFoundException; propagates other errors.
 async fn schedule_exists(
@@ -132,6 +193,9 @@ pub async fn run_with_schedule(
     schedule_expression: &str,
     timezone: Option<&str>,
 ) -> Result<()> {
+    // Basic input validation for schedule expression
+    validate_schedule_expression(schedule_expression)?;
+
     let (cluster, service_name) = resolve_service(aws_config, alias).await?;
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
     let sts = aws_sdk_sts::Client::new(aws_config);
@@ -154,8 +218,7 @@ pub async fn run_with_schedule(
     ensure_schedule_group(&scheduler, group_name).await?;
 
     // Ensure scheduler IAM role exists
-    let role_arn =
-        ensure_scheduler_role(&iam, account_id, &region, &cluster).await?;
+    let role_arn = ensure_scheduler_role(&iam, account_id, &region, &cluster).await?;
 
     // Build schedule name: oab-scale-{alias}-to-{size}
     // Replace non-alphanumeric chars for valid schedule name
@@ -191,17 +254,45 @@ pub async fn run_with_schedule(
             .await
             .context("failed to update schedule")?;
     } else {
-        scheduler
-            .create_schedule()
-            .name(&schedule_name)
-            .group_name(group_name)
-            .schedule_expression(schedule_expression)
-            .schedule_expression_timezone(tz)
-            .flexible_time_window(flexible_time_window)
-            .target(target)
-            .send()
-            .await
-            .context("failed to create schedule")?;
+        // Retry with backoff to handle IAM role propagation delay
+        let mut last_err = None;
+        for attempt in 0..5 {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(2u64.pow(attempt));
+                eprintln!(
+                    "  retrying schedule creation (attempt {}/5, waiting {}s for IAM propagation)...",
+                    attempt + 1,
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+            }
+            let t = build_schedule_target(&role_arn, &target_input_str)?;
+            let ftw = build_flexible_time_window()?;
+            match scheduler
+                .create_schedule()
+                .name(&schedule_name)
+                .group_name(group_name)
+                .schedule_expression(schedule_expression)
+                .schedule_expression_timezone(tz)
+                .flexible_time_window(ftw)
+                .target(t)
+                .send()
+                .await
+            {
+                Ok(_) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(e).context(
+                "failed to create schedule after retries (IAM role may not have propagated)",
+            );
+        }
     }
 
     let action = if exists { "Updated" } else { "Created" };
@@ -219,63 +310,83 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
     let group_name = "oab-schedules";
 
-    let resp = scheduler
-        .list_schedules()
-        .group_name(group_name)
-        .send()
-        .await;
+    // Paginate through all schedules
+    let mut all_schedules = Vec::new();
+    let mut next_token: Option<String> = None;
 
-    match resp {
-        Ok(output) => {
-            let schedules = output.schedules();
-            if schedules.is_empty() {
-                println!("No schedules found in group '{group_name}'.");
-                println!("  Use 'oabctl scale <alias> <size> --with-schedule <expr>' to create one.");
-                return Ok(());
+    loop {
+        let mut req = scheduler.list_schedules().group_name(group_name);
+        if let Some(token) = &next_token {
+            req = req.next_token(token);
+        }
+
+        let resp = req.send().await;
+
+        match resp {
+            Ok(output) => {
+                all_schedules.extend(output.schedules().to_vec());
+                next_token = output.next_token().map(|s| s.to_string());
+                if next_token.is_none() {
+                    break;
+                }
             }
-
-            println!(
-                "{:<40} {:<30} {:<16} STATE",
-                "NAME", "SCHEDULE", "TIMEZONE"
-            );
-            for s in schedules {
-                let name = s.name().unwrap_or("-");
-                let state = s.state().map(|st| st.as_str()).unwrap_or("?");
-
-                // Fetch full schedule to get expression and timezone
-                // TODO: N+1 API calls — consider batching with JoinSet if schedule count grows
-                let (expr, tz) = match scheduler
-                    .get_schedule()
-                    .name(name)
-                    .group_name(group_name)
-                    .send()
-                    .await
+            Err(e) => {
+                if e.as_service_error()
+                    .map(|se| se.is_resource_not_found_exception())
+                    .unwrap_or(false)
                 {
-                    Ok(detail) => {
-                        let e = detail.schedule_expression().unwrap_or("-").to_string();
-                        let t = detail
-                            .schedule_expression_timezone()
-                            .unwrap_or("UTC")
-                            .to_string();
-                        (e, t)
-                    }
-                    Err(_) => ("-".to_string(), "-".to_string()),
-                };
+                    println!("No schedules configured yet.");
+                    println!(
+                        "  Use 'oabctl scale <alias> <size> --with-schedule <expr>' to create one."
+                    );
+                    return Ok(());
+                } else {
+                    anyhow::bail!("failed to list schedules: {e}");
+                }
+            }
+        }
+    }
 
-                println!("{:<40} {:<30} {:<16} {}", name, expr, tz, state);
+    if all_schedules.is_empty() {
+        println!("No schedules found in group '{group_name}'.");
+        println!("  Use 'oabctl scale <alias> <size> --with-schedule <expr>' to create one.");
+        return Ok(());
+    }
+
+    // Warn about N+1 latency for large schedule counts
+    if all_schedules.len() > 10 {
+        eprintln!(
+            "  note: fetching details for {} schedules — this may take a moment...",
+            all_schedules.len()
+        );
+    }
+
+    println!("{:<40} {:<30} {:<16} STATE", "NAME", "SCHEDULE", "TIMEZONE");
+    for s in &all_schedules {
+        let name = s.name().unwrap_or("-");
+        let state = s.state().map(|st| st.as_str()).unwrap_or("?");
+
+        // Fetch full schedule to get expression and timezone
+        // Note: N+1 API calls — acceptable for typical oab schedule counts (<20)
+        let (expr, tz) = match scheduler
+            .get_schedule()
+            .name(name)
+            .group_name(group_name)
+            .send()
+            .await
+        {
+            Ok(detail) => {
+                let e = detail.schedule_expression().unwrap_or("-").to_string();
+                let t = detail
+                    .schedule_expression_timezone()
+                    .unwrap_or("UTC")
+                    .to_string();
+                (e, t)
             }
-        }
-        Err(e) => {
-            if e.as_service_error()
-                .map(|se| se.is_resource_not_found_exception())
-                .unwrap_or(false)
-            {
-                println!("No schedules configured yet.");
-                println!("  Use 'oabctl scale <alias> <size> --with-schedule <expr>' to create one.");
-            } else {
-                anyhow::bail!("failed to list schedules: {e}");
-            }
-        }
+            Err(_) => ("-".to_string(), "-".to_string()),
+        };
+
+        println!("{:<40} {:<30} {:<16} {}", name, expr, tz, state);
     }
 
     Ok(())
@@ -314,8 +425,11 @@ async fn ensure_schedule_group(
 
         // Ignore ConflictException (race condition / already exists)
         if let Err(e) = create_result {
-            let err_str = format!("{:?}", e);
-            if !err_str.contains("ConflictException") {
+            if !e
+                .as_service_error()
+                .map(|se| se.is_conflict_exception())
+                .unwrap_or(false)
+            {
                 anyhow::bail!("failed to create schedule group: {e}");
             }
         }
@@ -352,6 +466,9 @@ async fn ensure_scheduler_role(
                 "Condition": {
                     "StringEquals": {
                         "aws:SourceAccount": account_id
+                    },
+                    "ArnLike": {
+                        "aws:SourceArn": format!("arn:aws:scheduler:{region}:{account_id}:schedule/oab-schedules/*")
                     }
                 }
             }]
@@ -370,41 +487,126 @@ async fn ensure_scheduler_role(
         println!("  ✓ Created IAM role: {role_name}");
     }
 
-    // Always ensure inline policy exists (recovers from partial-state)
-    let policy_exists = iam
-        .get_role_policy()
+    // Always ensure inline policy is current (put_role_policy is idempotent —
+    // overwrites existing policy with same name, handles stale/outdated scope)
+    let ecs_policy = serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Action": "ecs:UpdateService",
+            "Resource": format!("arn:aws:ecs:{region}:{account_id}:service/{cluster}/oab-*")
+        }]
+    });
+
+    iam.put_role_policy()
         .role_name(role_name)
         .policy_name(policy_name)
+        .policy_document(ecs_policy.to_string())
         .send()
         .await
-        .is_ok();
+        .context("failed to attach policy to scheduler role")?;
 
-    if !policy_exists {
-        let ecs_policy = serde_json::json!({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": "ecs:UpdateService",
-                "Resource": format!("arn:aws:ecs:{region}:{account_id}:service/{cluster}/*")
-            }]
-        });
-
-        iam.put_role_policy()
-            .role_name(role_name)
-            .policy_name(policy_name)
-            .policy_document(ecs_policy.to_string())
-            .send()
-            .await
-            .context("failed to attach policy to scheduler role")?;
-
-        println!("  ✓ Attached policy: {policy_name}");
-    }
-
-    // Wait for IAM propagation if role was just created
+    // Wait for IAM propagation if role was just created.
+    // IAM is eventually consistent; rather than a fixed sleep, we rely on
+    // retry logic at schedule creation time if the first attempt fails with
+    // AccessDenied due to propagation delay.
     if !role_exists {
-        eprintln!("  Waiting for IAM role propagation...");
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        eprintln!("  ✓ Created IAM role: {role_name} (may take a few seconds to propagate)");
     }
 
     Ok(role_arn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_schedule_expression_valid_cron() {
+        assert!(validate_schedule_expression("cron(0 8 * * ? *)").is_ok());
+        assert!(validate_schedule_expression("cron(30 12 1 * ? 2024)").is_ok());
+    }
+
+    #[test]
+    fn test_validate_schedule_expression_invalid_cron_fields() {
+        // 5 fields instead of 6
+        let result = validate_schedule_expression("cron(0 8 * * ?)");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expected 6 fields"));
+    }
+
+    #[test]
+    fn test_validate_schedule_expression_valid_rate() {
+        assert!(validate_schedule_expression("rate(1 hour)").is_ok());
+        assert!(validate_schedule_expression("rate(5 minutes)").is_ok());
+    }
+
+    #[test]
+    fn test_validate_schedule_expression_empty_rate() {
+        let result = validate_schedule_expression("rate()");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_schedule_expression_valid_at() {
+        assert!(validate_schedule_expression("at(2024-01-01T00:00:00)").is_ok());
+    }
+
+    #[test]
+    fn test_validate_schedule_expression_invalid_prefix() {
+        let result = validate_schedule_expression("every 5 minutes");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Must start with cron("), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_schedule_expression_missing_parens() {
+        let result = validate_schedule_expression("cron 0 8 * * ? *");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_schedule_name_sanitization() {
+        // Test the same logic used in run_with_schedule for schedule naming
+        let alias = "my-bot/special";
+        let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, 0);
+        assert_eq!(schedule_name, "oab-scale-my-bot-special-to-0");
+    }
+
+    #[test]
+    fn test_schedule_name_sanitization_unicode() {
+        let alias = "bot名前";
+        let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        let schedule_name = format!("oab-scale-{}-to-{}", safe_alias, 1);
+        // Unicode alphanumeric chars are kept
+        assert_eq!(schedule_name, "oab-scale-bot名前-to-1");
+    }
+
+    #[test]
+    fn test_schedule_name_sanitization_special_chars() {
+        let alias = "my.bot@prod";
+        let safe_alias = alias.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        assert_eq!(safe_alias, "my-bot-prod");
+    }
+
+    #[test]
+    fn test_build_schedule_target() {
+        let target = build_schedule_target(
+            "arn:aws:iam::123456789012:role/test-role",
+            r#"{"Cluster":"test","Service":"svc","DesiredCount":1}"#,
+        );
+        assert!(target.is_ok());
+        let t = target.unwrap();
+        assert_eq!(t.arn(), "arn:aws:scheduler:::aws-sdk:ecs:updateService");
+        assert_eq!(t.role_arn(), "arn:aws:iam::123456789012:role/test-role");
+    }
+
+    #[test]
+    fn test_build_flexible_time_window() {
+        let ftw = build_flexible_time_window();
+        assert!(ftw.is_ok());
+    }
 }

@@ -530,6 +530,68 @@ s3://oab-control-plane-{account}/
 | `oabctl exec <agent> -- <cmd>` | Execute command in container |
 | `oabctl cp <src> <dst>` | Copy files to/from container |
 | `oabctl sync <src> <dst>` | Sync directories (bidirectional) |
+| `oabctl scale <alias> <size>` | Immediately set desired task count (0–100) |
+| `oabctl scale <alias> <size> --with-schedule '<expr>'` | Create/update recurring schedule |
+| `oabctl scale <alias> <size> --with-schedule '<expr>' --timezone 'Asia/Taipei'` | Schedule with IANA timezone |
+| `oabctl schedule list` | List all scaling schedules |
+| `oabctl schedule delete <name>` | Remove a scaling schedule |
+
+## Scale & Schedule
+
+Scale OAB services immediately or on a recurring schedule using EventBridge Scheduler.
+
+### Immediate Scaling
+
+```bash
+# Scale up to 1 task
+oabctl scale my-bot 1
+
+# Scale down to 0 (stop)
+oabctl scale my-bot 0
+```
+
+### Scheduled Scaling
+
+```bash
+# Scale to 0 at 9PM Taipei time, every day
+oabctl scale my-bot 0 --with-schedule 'cron(0 21 * * ? *)' --timezone 'Asia/Taipei'
+
+# Scale to 1 at 8AM
+oabctl scale my-bot 1 --with-schedule 'cron(0 8 * * ? *)' --timezone 'Asia/Taipei'
+
+# Scale every 6 hours
+oabctl scale my-bot 1 --with-schedule 'rate(6 hours)'
+```
+
+**Schedule expressions** — must be one of:
+- `cron(min hour dom month dow year)` — 6-field cron
+- `rate(value unit)` — e.g. `rate(1 hour)`, `rate(5 minutes)`
+- `at(yyyy-mm-ddThh:mm:ss)` — one-time execution
+
+### Managing Schedules
+
+```bash
+# List all schedules
+oabctl schedule list
+
+# Delete a schedule
+oabctl schedule delete oab-scale-my-bot-to-0
+```
+
+### Architecture
+
+Uses **EventBridge Scheduler** with universal target (`arn:aws:scheduler:::aws-sdk:ecs:updateService`). No Lambda required. Auto-creates:
+
+- `oab-schedules` schedule group (idempotent)
+- `oab-scheduler-role` IAM role with `ecs:UpdateService` scoped to `service/{cluster}/oab-*`
+
+The scheduler role includes confused-deputy protection (`aws:SourceAccount` + `aws:SourceArn` conditions).
+
+### Alias Resolution
+
+The `<alias>` argument supports:
+1. **ecsctl alias** — if the name matches an alias in `~/.ecsctl/config.toml`, uses that cluster/service
+2. **Bare agent name** — resolves as `oab-{namespace}-{name}` in the configured cluster
 
 ## JSON Schema
 
