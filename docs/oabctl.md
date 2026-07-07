@@ -583,7 +583,7 @@ oabctl schedule delete oab-scale-my-bot-to-0
 Uses **EventBridge Scheduler** with universal target (`arn:aws:scheduler:::aws-sdk:ecs:updateService`). No Lambda required. Auto-creates:
 
 - `oab-schedules` schedule group (idempotent)
-- `oab-scheduler-role` IAM role with `ecs:UpdateService` scoped to `service/{cluster}/oab-*`
+- `oab-scheduler-role` IAM role with `ecs:UpdateService` scoped to `service/*/oab-*` (wildcard cluster for multi-cluster support)
 
 The scheduler role includes confused-deputy protection (`aws:SourceAccount` + `aws:SourceArn` conditions).
 

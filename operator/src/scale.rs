@@ -502,6 +502,18 @@ async fn ensure_scheduler_role(
             )
             .send()
             .await
+            .map(|_| ())
+            .or_else(|e| {
+                // Ignore EntityAlreadyExists (race condition with concurrent oabctl runs)
+                if e.as_service_error()
+                    .map(|se| se.is_entity_already_exists_exception())
+                    .unwrap_or(false)
+                {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
             .context("failed to create scheduler IAM role")?;
     }
 
