@@ -482,7 +482,9 @@ async fn main() -> anyhow::Result<()> {
     if cfg.slack.is_some() {
         configured_platforms.push("slack");
     }
-    if cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
+    if cfg!(feature = "telegram")
+        && (cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok())
+    {
         configured_platforms.push("telegram");
     }
     cron::validate_cronjobs(&cfg.cron.jobs, &configured_platforms)?;

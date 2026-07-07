@@ -1618,7 +1618,7 @@ message = "a"
             schedule: "* * * * *".into(),
             channel: "123".into(),
             message: "hi".into(),
-            platform: "telegram".into(),
+            platform: "matrix".into(),
             sender_name: "test".into(),
             thread_id: None,
             timezone: "UTC".into(),
