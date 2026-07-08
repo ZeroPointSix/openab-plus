@@ -621,6 +621,11 @@ oabctl scale my-bot 1 --with-schedule 'rate(6 hours)'
 - `rate(value unit)` — e.g. `rate(1 hour)`, `rate(5 minutes)`
 - `at(yyyy-mm-ddThh:mm:ss)` — one-time execution
 
+### Restrictions
+
+- **Size: 0 or 1 only.** OAB services are single-instance (one bot token per service). Scaling above 1 would cause duplicate responses.
+- **oabctl-managed services only.** The `<name>` argument resolves as `oab-{namespace}-{name}` in the oab cluster. Use `oabctl get oabservice` to list available services. ecsctl aliases are not supported.
+
 ### Managing Schedules
 
 ```bash
@@ -636,15 +641,9 @@ oabctl schedule delete oab-scale-my-bot-to-0
 Uses **EventBridge Scheduler** with universal target (`arn:aws:scheduler:::aws-sdk:ecs:updateService`). No Lambda required. Auto-creates:
 
 - `oab-schedules` schedule group (idempotent)
-- `oab-scheduler-role` IAM role with `ecs:UpdateService` scoped to `service/*/oab-*` (wildcard cluster for multi-cluster support)
+- `oab-scheduler-role` IAM role with `ecs:UpdateService` scoped to `service/*/oab-*`
 
 The scheduler role includes confused-deputy protection (`aws:SourceAccount` + `aws:SourceArn` conditions).
-
-### Alias Resolution
-
-The `<alias>` argument supports:
-1. **ecsctl alias** — if the name matches an alias in `~/.ecsctl/config.toml`, uses that cluster/service
-2. **Bare agent name** — resolves as `oab-{namespace}-{name}` in the configured cluster
 
 ## JSON Schema
 
