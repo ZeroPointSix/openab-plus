@@ -8,7 +8,9 @@ Agents sometimes need to interact with GitHub — push branches, open PRs, comme
 
 ### OAuth device flow vs. PAT stored in Secrets Manager
 
-Some backends (`gh auth login` device flow, `codex login --device-auth`, etc.) authenticate interactively and store a session token on disk inside the container. This works but has tradeoffs versus a PAT resolved from Secrets Manager at boot:
+**OAuth device flow** is ad-hoc authentication/authorization — you run `gh auth login` (or `codex login --device-auth`, etc.) interactively, complete a browser flow, and the resulting token is generated and persisted under `$HOME/` inside the container.
+
+**PAT in Secrets Manager** is the opposite: the token is pre-generated once from the GitHub console (Step 1 below), then stored and protected in AWS Secrets Manager with IAM access control — no interactive step, no per-container state.
 
 | | OAuth device flow | PAT in Secrets Manager (`aws-sm://`) |
 |---|---|---|
