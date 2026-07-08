@@ -1,81 +1,49 @@
 use anyhow::{Context, Result};
 use aws_sdk_scheduler::error::ProvideErrorMetadata;
 
-/// Resolve an alias (or bare name) to (cluster, service_name).
-/// Supports:
-///   - ecsctl alias format: "cluster/service[/container[/task_id]]"
-///   - bare agent name: resolved as "oab-{namespace}-{name}" in the config cluster
+/// Resolve a service name to (cluster, service_name).
+/// Only resolves against oabctl-managed services (oab cluster, oab-* prefix).
+/// Does NOT use ecsctl aliases — scheduled scaling is for oabctl services only.
 async fn resolve_service(
     aws_config: &aws_config::SdkConfig,
-    alias_or_name: &str,
+    name: &str,
 ) -> Result<(String, String)> {
-    let ecsctl_cfg = match ecsctl::config::Config::load() {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("  warning: failed to load ecsctl config: {e} — alias lookup disabled");
-            ecsctl::config::Config::default()
-        }
-    };
-
-    // Check if it's an ecsctl alias
-    if let Some(target) = ecsctl_cfg.aliases.get(alias_or_name) {
-        let parts: Vec<&str> = target.splitn(4, '/').collect();
-        if parts.len() >= 2 {
-            let cluster = parts[0].to_string();
-            let service_name = parts[1].to_string();
-            // Validate service exists and is scalable (same check as bare-name path)
-            validate_service_status(aws_config, &cluster, &service_name).await?;
-            return Ok((cluster, service_name));
-        }
-    }
-
-    // Not an alias — treat as bare agent name
-    eprintln!(
-        "  note: '{}' not found in ecsctl aliases, resolving as bare agent name",
-        alias_or_name
-    );
     let oab_cfg =
         crate::config::OabConfig::load().context("failed to load ~/.oabctl/config.toml")?;
     let cluster = oab_cfg.defaults.cluster;
     let namespace = oab_cfg.defaults.namespace;
-    let service_name = format!("oab-{}-{}", namespace, alias_or_name);
+    let service_name = format!("oab-{}-{}", namespace, name);
 
-    // Verify the service exists and is scalable
-    validate_service_status(aws_config, &cluster, &service_name).await?;
-
-    Ok((cluster, service_name))
-}
-
-/// Validate that a service exists and is in a scalable state (ACTIVE).
-async fn validate_service_status(
-    aws_config: &aws_config::SdkConfig,
-    cluster: &str,
-    service_name: &str,
-) -> Result<()> {
+    // Verify the service exists in the oab cluster
     let ecs = aws_sdk_ecs::Client::new(aws_config);
     let resp = ecs
         .describe_services()
-        .cluster(cluster)
-        .services(service_name)
+        .cluster(&cluster)
+        .services(&service_name)
         .send()
         .await
         .context("failed to describe ECS service")?;
 
-    let svc = resp.services().first().context(format!(
-        "service '{}' not found in cluster '{}'. Use 'oabctl get services' to list available services.",
-        service_name, cluster
-    ))?;
-
-    let status = svc.status().unwrap_or("UNKNOWN");
-    if status == "INACTIVE" || status == "DRAINING" {
-        anyhow::bail!(
-            "service '{}' is {} — cannot scale. Check service status with 'oabctl get services'.",
-            service_name,
-            status
-        );
+    let svc = resp.services().first();
+    match svc {
+        Some(s) if s.status() == Some("ACTIVE") => {}
+        Some(s) => {
+            let status = s.status().unwrap_or("UNKNOWN");
+            anyhow::bail!(
+                "service '{}' is {} — cannot scale. Use 'oabctl get oabservice' to list available services.",
+                name, status
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "service '{}' not found. Use 'oabctl get oabservice' to list available services.\n\
+                 Note: oabctl scale only works with oabctl-managed services, not ecsctl aliases.",
+                name
+            );
+        }
     }
 
-    Ok(())
+    Ok((cluster, service_name))
 }
 
 /// Immediate scale: delegates to ecsctl's scale_service for the core ECS call.
