@@ -294,13 +294,22 @@ pub async fn run_with_schedule(
                     // - AccessDeniedException: role not yet assumable
                     // - ValidationException with "execution role": role propagation pending
                     // All other errors (quota, conflict, bad input) fail immediately.
-                    let err_debug = e
+                    let is_iam_propagation = e
                         .as_service_error()
-                        .map(|se| format!("{:?}", se))
-                        .unwrap_or_default();
-                    let is_iam_propagation = err_debug.contains("AccessDenied")
-                        || (err_debug.contains("ValidationException")
-                            && err_debug.contains("execution role"));
+                        .map(|se| {
+                            if se.is_validation_exception() {
+                                // ValidationException during role propagation mentions "execution role"
+                                se.message()
+                                    .map(|m| m.contains("execution role"))
+                                    .unwrap_or(false)
+                            } else {
+                                // AccessDeniedException is unmodeled; check via code()
+                                se.code()
+                                    .map(|c| c == "AccessDeniedException" || c == "AccessDenied")
+                                    .unwrap_or(false)
+                            }
+                        })
+                        .unwrap_or(false);
                     if is_iam_propagation {
                         last_err = Some(e);
                     } else {
@@ -413,20 +422,33 @@ pub async fn list_schedules(aws_config: &aws_config::SdkConfig) -> Result<()> {
     Ok(())
 }
 
-/// Delete a specific schedule.
+/// Delete a specific schedule (idempotent — already-deleted is not an error).
 pub async fn delete_schedule(aws_config: &aws_config::SdkConfig, name: &str) -> Result<()> {
     let scheduler = aws_sdk_scheduler::Client::new(aws_config);
     let group_name = "oab-schedules";
 
-    scheduler
+    match scheduler
         .delete_schedule()
         .name(name)
         .group_name(group_name)
         .send()
         .await
-        .context(format!("failed to delete schedule '{name}'"))?;
+    {
+        Ok(_) => {
+            println!("✓ Deleted schedule: {name}");
+        }
+        Err(e) => {
+            if e.as_service_error()
+                .map(|se| se.is_resource_not_found_exception())
+                .unwrap_or(false)
+            {
+                println!("Schedule '{name}' not found (already deleted or never existed).");
+            } else {
+                return Err(e).context(format!("failed to delete schedule '{name}'"));
+            }
+        }
+    }
 
-    println!("✓ Deleted schedule: {name}");
     Ok(())
 }
 
