@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use aws_sdk_scheduler::error::ProvideErrorMetadata;
 
 /// Resolve an alias (or bare name) to (cluster, service_name).
 /// Supports:
