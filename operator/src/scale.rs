@@ -48,6 +48,7 @@ async fn resolve_service(
 
 /// Immediate scale: delegates to ecsctl's scale_service for the core ECS call.
 pub async fn run(aws_config: &aws_config::SdkConfig, alias: &str, size: i32) -> Result<()> {
+    validate_size(size)?;
     let (cluster, service_name) = resolve_service(aws_config, alias).await?;
     let ecs = aws_sdk_ecs::Client::new(aws_config);
 
@@ -75,6 +76,19 @@ fn build_flexible_time_window() -> Result<aws_sdk_scheduler::types::FlexibleTime
         .mode(aws_sdk_scheduler::types::FlexibleTimeWindowMode::Off)
         .build()
         .context("failed to build flexible time window")
+}
+
+/// Validate scale size — OAB services are single-instance (one bot token per service).
+/// Only 0 (off) or 1 (on) is valid.
+fn validate_size(size: i32) -> Result<()> {
+    if size != 0 && size != 1 {
+        anyhow::bail!(
+            "invalid size: {}. OAB services can only scale to 0 (off) or 1 (on) — \
+             each service runs a single bot token and scaling above 1 would cause duplicate responses.",
+            size
+        );
+    }
+    Ok(())
 }
 
 /// Validate schedule expression format.
@@ -155,6 +169,7 @@ pub async fn run_with_schedule(
     schedule_expression: &str,
     timezone: Option<&str>,
 ) -> Result<()> {
+    validate_size(size)?;
     // Basic input validation for schedule expression
     validate_schedule_expression(schedule_expression)?;
 
@@ -659,5 +674,38 @@ mod tests {
     fn test_build_flexible_time_window() {
         let ftw = build_flexible_time_window();
         assert!(ftw.is_ok());
+    }
+
+    #[test]
+    fn test_validate_size_zero() {
+        assert!(validate_size(0).is_ok());
+    }
+
+    #[test]
+    fn test_validate_size_one() {
+        assert!(validate_size(1).is_ok());
+    }
+
+    #[test]
+    fn test_validate_size_rejects_two() {
+        let result = validate_size(2);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid size: 2"));
+        assert!(err.contains("0 (off) or 1 (on)"));
+    }
+
+    #[test]
+    fn test_validate_size_rejects_negative() {
+        let result = validate_size(-1);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid size: -1"));
+    }
+
+    #[test]
+    fn test_validate_size_rejects_large() {
+        let result = validate_size(100);
+        assert!(result.is_err());
     }
 }
