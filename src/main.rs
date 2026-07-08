@@ -482,9 +482,8 @@ async fn main() -> anyhow::Result<()> {
     if cfg.slack.is_some() {
         configured_platforms.push("slack");
     }
-    if cfg!(feature = "telegram")
-        && (cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok())
-    {
+    #[cfg(feature = "telegram")]
+    if cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
         configured_platforms.push("telegram");
     }
     cron::validate_cronjobs(&cfg.cron.jobs, &configured_platforms)?;
@@ -870,14 +869,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref a) = shared_slack_adapter {
             cron_adapters.insert("slack".into(), a.clone() as Arc<dyn adapter::ChatAdapter>);
         }
-        #[cfg(any(
-            feature = "telegram",
-            feature = "line",
-            feature = "feishu",
-            feature = "googlechat",
-            feature = "wecom",
-            feature = "teams",
-        ))]
+        #[cfg(feature = "telegram")]
         if let Some(ref a) = shared_unified_adapter {
             cron_adapters.insert("telegram".into(), a.clone());
         }
