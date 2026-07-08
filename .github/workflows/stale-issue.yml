@@ -68,8 +68,8 @@ jobs:
                     `(labeled \`${CONTRIBUTOR}\` since ${labeledAt.toISOString().slice(0, 10)}).`,
                   '> It will be **automatically closed in 24 hours** if there is no update.',
                   '',
-                  `@${issue.user.login} — Please add a new comment to remove the \`closing-soon\` label ` +
-                    'and keep this issue open.'
+                  `@${issue.user.login} — You **must add a new comment** on this issue to remove the \`closing-soon\` label ` +
+                    'and keep it open.'
                 ].join('\n');
                 await github.rest.issues.createComment({
                   ...context.repo,
