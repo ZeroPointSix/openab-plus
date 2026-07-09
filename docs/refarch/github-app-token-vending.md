@@ -22,6 +22,15 @@ When CI/CD workflows (e.g. GitHub Actions) need to interact with GitHub across m
 
 **Core issue**: Any secret that a workflow can _read_ is a secret that a compromised workflow can _steal_.
 
+## Design Goals
+
+1. **OAB obtains short-lived PAT only** — The agent receives a 1-hour Installation Access Token, never a long-lived credential.
+2. **No OAuth device flow required** — No interactive browser login, no token refresh dance. Token vending is fully automated and headless.
+3. **No private key is ever exposed to the agent** — The PEM never leaves AWS. The agent cannot read, copy, or exfiltrate it.
+4. **Private key always stays in AWS** — Stored in Secrets Manager, accessed only by the Lambda function within the same AWS account.
+5. **Vending machine vends short-lived tokens only to OAB** — The Lambda is a controlled gate: it validates the caller and returns a scoped, time-limited token.
+6. **IAM control with scoped permissions** — Access to the vending function is governed by IAM policies (Task Role, IRSA, or OIDC trust). Only explicitly authorized workloads can invoke it.
+
 ## Solution: Lambda Token Vending Machine
 
 Move the PEM private key to AWS Secrets Manager and expose a Lambda "vending function" that:
