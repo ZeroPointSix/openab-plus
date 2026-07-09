@@ -99,6 +99,111 @@ Move the PEM private key to AWS Secrets Manager and expose a Lambda "vending fun
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### Variant: OpenAB on ECS Fargate / EKS Pod
+
+When OpenAB runs as a container on AWS (instead of inside GitHub Actions), it uses the native ECS Task Role or EKS IRSA to invoke the vending Lambda directly — no OIDC needed.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              AWS Cloud                                        │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │              ECS Fargate Task / EKS Pod                                 │  │
+│  │                                                                        │  │
+│  │  ┌─────────────────────────────────────┐                               │  │
+│  │  │          OpenAB Agent               │                               │  │
+│  │  │                                     │                               │  │
+│  │  │  • Discord bot (listens for cmds)   │                               │  │
+│  │  │  • Kiro CLI / coding agent          │                               │  │
+│  │  │  • PR review, code push, etc.       │                               │  │
+│  │  └──────────────┬──────────────────────┘                               │  │
+│  │                  │                                                     │  │
+│  │                  │ Needs GitHub token                                   │  │
+│  │                  │ (push code, create PR, post comments)               │  │
+│  │                  ▼                                                     │  │
+│  │  ┌─────────────────────────────────────┐                               │  │
+│  │  │    Token Vending Client             │                               │  │
+│  │  │                                     │                               │  │
+│  │  │  1. Use Task Role / Pod IAM Role    │                               │  │
+│  │  │  2. Invoke Lambda                   │                               │  │
+│  │  │  3. Receive short-lived token       │                               │  │
+│  │  └──────────────┬──────────────────────┘                               │  │
+│  │                  │                                                     │  │
+│  └──────────────────┼─────────────────────────────────────────────────────┘  │
+│                     │                                                        │
+│        ① lambda:InvokeFunction                                               │
+│           (via ECS Task Role / EKS IRSA)                                     │
+│                     │                                                        │
+│                     ▼                                                        │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │               AWS Lambda (Token Vending Function)                       │  │
+│  │                                                                        │  │
+│  │   ② GetSecretValue ──────────┐                                         │  │
+│  │                               ▼                                        │  │
+│  │                    ┌─────────────────────┐                             │  │
+│  │                    │  Secrets Manager     │                             │  │
+│  │                    │  ┌───────────────┐   │                             │  │
+│  │                    │  │ PEM 🔒        │   │                             │  │
+│  │                    │  │ Never exposed │   │                             │  │
+│  │                    │  └───────────────┘   │                             │  │
+│  │                    └─────────────────────┘                             │  │
+│  │                                                                        │  │
+│  │   ③ Sign JWT (RS256) → POST /installations/{id}/access_tokens          │  │
+│  └────────────────────────────────────┬───────────────────────────────────┘  │
+│                                       │                                      │
+└───────────────────────────────────────┼──────────────────────────────────────┘
+                                        │
+                               ④ JWT (10 min)
+                                        │
+                                        ▼
+                         ┌─────────────────────────────┐
+                         │         GitHub API           │
+                         │                             │
+                         │  Verify JWT                  │
+                         │  Issue Installation Token    │
+                         │  (ghs_xxx, 1 hour)          │
+                         └──────────────┬──────────────┘
+                                        │
+                           ⑤ Installation Access Token
+                                        │
+                                        ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              AWS Cloud                                        │
+│                                                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │              ECS Fargate Task / EKS Pod                                 │  │
+│  │                                                                        │  │
+│  │  ┌─────────────────────────────────────┐                               │  │
+│  │  │          OpenAB Agent               │                               │  │
+│  │  │                                     │    ⑥ Use token:               │  │
+│  │  │  gh pr create ...                   │───────────────────────┐       │  │
+│  │  │  git push                           │                       │       │  │
+│  │  │  gh api /repos/.../comments         │                       │       │  │
+│  │  └─────────────────────────────────────┘                       │       │  │
+│  └────────────────────────────────────────────────────────────────┼───────┘  │
+│                                                                   │          │
+└───────────────────────────────────────────────────────────────────┼──────────┘
+                                                                    │
+                                                                    ▼
+                                                     ┌──────────────────────────┐
+                                                     │    GitHub Repos           │
+                                                     │                          │
+                                                     │  • openabdev/openab      │
+                                                     │  • other-org/other-repo  │
+                                                     │  • (cross-org OK ✅)      │
+                                                     └──────────────────────────┘
+```
+
+| Step | What happens |
+|------|-------------|
+| ① | OAB container uses Task Role (ECS) or IRSA (EKS) to invoke Lambda |
+| ② | Lambda retrieves PEM from Secrets Manager |
+| ③ | Lambda signs JWT and calls GitHub API |
+| ④⑤ | GitHub verifies JWT → returns 1-hour Installation Token |
+| ⑥ | OAB uses token for git push / PR / comments (cross-org capable) |
+
+> **Note**: Unlike the GitHub Actions flow (which uses OIDC), ECS/EKS workloads use native AWS IAM (Task Role / IRSA) to authenticate with Lambda. No OIDC configuration needed — just grant `lambda:InvokeFunction` permission to the Task Role.
+
 ## Security Model
 
 | Layer | Protection |
