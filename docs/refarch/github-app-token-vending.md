@@ -289,6 +289,8 @@ aws iam create-open-id-connect-provider \
   --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 ```
 
+> **Note**: The `--thumbprint-list` value is a required CLI parameter but AWS no longer validates it for GitHub's OIDC provider (as of [July 2023](https://github.blog/changelog/2023-07-13-github-actions-oidc-token-thumbprint-no-longer-needs-to-be-verified/)). AWS automatically fetches and verifies the provider's current certificate. You can use any valid thumbprint placeholder here.
+
 ### 4. Create IAM Role with OIDC Trust
 
 ```bash
@@ -394,6 +396,7 @@ aws iam put-role-policy \
 ```python
 # lambda_function.py
 import json
+import os
 import time
 import urllib.request
 import boto3
@@ -404,7 +407,7 @@ secrets_client = boto3.client("secretsmanager")
 # Cache PEM in memory across warm invocations
 _cached_pem = None
 
-GITHUB_APP_ID = "YOUR_APP_ID"  # Or use env var
+GITHUB_APP_ID = os.environ["GITHUB_APP_ID"]  # Set via Lambda environment variable
 ALLOWED_INSTALLATION_IDS = ["INSTALLATION_ID_1"]  # Allowlist
 
 
@@ -464,7 +467,8 @@ def lambda_handler(event, context):
             }),
         }
     except Exception as e:
-        return {"statusCode": 500, "body": f"error: {str(e)}"}
+        print(f"Token vending error: {e}")  # Log to CloudWatch only
+        return {"statusCode": 500, "body": "internal error"}
 ```
 
 #### Package and deploy
