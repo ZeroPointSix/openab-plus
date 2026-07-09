@@ -35,31 +35,68 @@ Move the PEM private key to AWS Secrets Manager and expose a Lambda "vending fun
 ## Architecture
 
 ```
-GitHub Actions Workflow
-  │
-  │ 1. OIDC → AssumeRoleWithWebIdentity
-  ▼
-AWS IAM (OIDC Trust Policy)
-  │
-  │ 2. Temporary credentials (15 min)
-  ▼
-AWS Lambda (Token Vending Function)
-  │
-  │ 3. Retrieve PEM
-  ▼
-AWS Secrets Manager
-  │
-  │ 4. Sign JWT → POST /installations/{id}/access_tokens
-  ▼
-GitHub API
-  │
-  │ 5. Return Installation Access Token (1 hr)
-  ▼
-GitHub Actions Workflow
-  │
-  │ 6. Use token for git push / API calls
-  ▼
-GitHub Repositories (cross-org capable)
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        GitHub Actions Workflow                           │
+│                                                                         │
+│  permissions:                                                           │
+│    id-token: write    ← Enable OIDC                                     │
+└──────────────────────────────────┬──────────────────────────────────────┘
+                                   │
+                          ① OIDC Token (JWT)
+                          sts:AssumeRoleWithWebIdentity
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         AWS IAM (OIDC Trust)                             │
+│                                                                         │
+│  Condition:                                                             │
+│    sub = "repo:myorg/myrepo:ref:refs/heads/main"                        │
+│    aud = "sts.amazonaws.com"                                            │
+│                                                                         │
+│  → Only the specified repo + branch can assume this role                │
+└──────────────────────────────────┬──────────────────────────────────────┘
+                                   │
+                    ② Temporary AWS Credentials (15 min)
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    AWS Lambda (Token Vending Function)                   │
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  1. Validate installation_id against allowlist                     │  │
+│  │  2. Retrieve PEM from Secrets Manager                             │  │
+│  │  3. Sign JWT with PEM (RS256, valid 10 min)                       │  │
+│  │  4. Call GitHub API to exchange JWT for Installation Token         │  │
+│  │  5. Return token only — NEVER return PEM                          │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+└───────────┬─────────────────────────────────┬───────────────────────────┘
+            │                                 │
+   ③ GetSecretValue                  ④ POST /installations/{id}/
+            │                            access_tokens
+            ▼                                 ▼
+┌───────────────────────┐       ┌───────────────────────────┐
+│  AWS Secrets Manager  │       │        GitHub API          │
+│                       │       │                           │
+│  ┌─────────────────┐  │       │  Verify JWT → issue token │
+│  │  PEM Private Key │  │       │  (ghs_xxx, valid 1 hour)  │
+│  │  🔒 Never leaves │  │       │                           │
+│  │     AWS          │  │       └─────────────┬─────────────┘
+│  └─────────────────┘  │                     │
+└───────────────────────┘                     │
+                                              │
+                                 ⑤ Installation Access Token
+                                    (1 hour, scoped)
+                                              │
+                                              ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        GitHub Actions Workflow                           │
+│                                                                         │
+│  git clone https://x-access-token:TOKEN@github.com/org/repo.git        │
+│  curl -H "Authorization: Bearer TOKEN" https://api.github.com/...      │
+│                                                                         │
+│  ✅ Cross-org access (wherever the App is installed)                    │
+│  ✅ Workflow NEVER touches the PEM private key                          │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Security Model
