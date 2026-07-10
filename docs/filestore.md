@@ -2,9 +2,13 @@
 
 ## Problem
 
-When a user attaches a text file larger than 512 KB, OAB cannot inline it into
-the prompt (it would bloat the context window). Previously, these files were
-**silently dropped** — the agent never knew the file existed.
+When a user attaches a file that OAB cannot inline into the prompt — either
+because it's too large (text > 512 KB) or because it's an unsupported format
+(PDF, ZIP, binary, etc.) — the file was previously **silently dropped**.
+The agent never knew the file existed.
+
+This affected all 7 platforms: Discord, Slack, Telegram, Feishu, Google Chat,
+WeCom, and LINE.
 
 PR #1346 proposed returning the platform's raw URL as a hint, but this has
 fundamental limitations:
@@ -128,14 +132,15 @@ The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1
 
 ### Platform-Specific Behavior
 
-| Platform | Download Method | Upload Method |
-|----------|----------------|---------------|
-| Discord / Slack | Streaming download → streaming multipart upload (~16 MB memory) |
-| Gateway (Telegram, Feishu, etc.) | File already on local disk → single PUT upload (bytes in memory) |
+| Platform | Download Method | Upload Method | File Types |
+|----------|----------------|---------------|------------|
+| Discord | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
+| Slack | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
+| Gateway (Telegram, Feishu, Google Chat, WeCom, LINE) | File on local disk → single PUT | All: when `store_all_files` enabled |
 
-Gateway files are already downloaded to `~/.openab/media/inbound/` by the Gateway
-service before reaching Core, so streaming is unnecessary — the bytes are already
-available.
+Gateway adapters download **all** file types when filestore is configured
+(`store_all_files = true`). Previously they only downloaded text files with
+whitelisted extensions.
 
 ### Timeouts
 
@@ -177,17 +182,19 @@ after 24 hours (no configuration needed).
 
 ## Behavior
 
-> **Platform scope:** Filestore is supported across **all platforms** —
-> Discord, Slack, and all Gateway adapters (Telegram, Feishu, Google Chat,
-> WeCom, LINE). Any text file exceeding 512 KB on any platform will be
-> uploaded to the configured filestore.
+> **Platform scope:** Filestore is supported across **all 7 platforms** —
+> Discord, Slack, Telegram, Feishu, Google Chat, WeCom, and LINE.
+> When `[filestore]` is configured, Gateway adapters download **all** file
+> types (not just text), allowing any attachment to be uploaded to S3/R2.
 
 | File size | Filestore configured | Result |
 |-----------|---------------------|--------|
-| ≤ 512 KB | any | Inlined into prompt (unchanged) |
-| > 512 KB, ≤ max_file_size_mb | ✅ yes | Uploaded → presigned URL returned |
+| Text ≤ 512 KB | any | Inlined into prompt (unchanged) |
+| Text > 512 KB | ✅ yes | Uploaded → presigned URL returned |
+| PDF, ZIP, DOCX, binary (any size) | ✅ yes | Uploaded → presigned URL returned |
+| Text > 512 KB | ❌ no | Silently dropped (legacy behavior) |
+| PDF, ZIP, DOCX, binary | ❌ no | Silently dropped (legacy behavior) |
 | > max_file_size_mb (default 250 MB, max 500 MB) | ✅ yes | Dropped (configurable cap) |
-| > 512 KB | ❌ no | Silently dropped (legacy behavior) |
 
 ## What the Agent Sees
 
