@@ -570,7 +570,7 @@ async fn download_text_file_inner(
                 let stream = Box::pin(resp.bytes_stream());
                 let upload_result = tokio::time::timeout(
                     STREAM_TIMEOUT,
-                    fs.stream_upload_and_presign(filename, stream, content_length),
+                    fs.stream_upload_and_presign(filename, stream, content_length, Some("text/plain; charset=utf-8")),
                 )
                 .await;
                 return match upload_result {
@@ -776,7 +776,7 @@ async fn download_and_upload_to_filestore(
 
     let upload_result = tokio::time::timeout(
         STREAM_TIMEOUT,
-        filestore.stream_upload_and_presign(filename, stream, size),
+        filestore.stream_upload_and_presign(filename, stream, size, Some("text/plain; charset=utf-8")),
     )
     .await;
 
@@ -879,7 +879,7 @@ pub async fn download_and_upload_any_file(
 
     let upload_result = tokio::time::timeout(
         STREAM_TIMEOUT,
-        filestore.stream_upload_and_presign(filename, stream, size),
+        filestore.stream_upload_and_presign(filename, stream, size, content_type),
     )
     .await;
 

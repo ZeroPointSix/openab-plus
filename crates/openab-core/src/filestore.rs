@@ -168,6 +168,7 @@ impl Filestore {
         filename: &str,
         mut stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
         reported_size: u64,
+        content_type: Option<&str>,
     ) -> anyhow::Result<(String, u64)> {
         use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
         use futures_util::StreamExt;
@@ -201,7 +202,7 @@ impl Filestore {
             .create_multipart_upload()
             .bucket(&self.bucket)
             .key(&key)
-            .content_type("text/plain; charset=utf-8")
+            .content_type(content_type.unwrap_or("application/octet-stream"))
             .send()
             .await
             .map_err(|e| {

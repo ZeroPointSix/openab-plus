@@ -124,7 +124,7 @@ Files are uploaded using S3 multipart upload with streaming:
 - **Part count:** max ~32 parts for a 500 MB file (well below S3's 10,000 limit)
 - **Timeout:** 10 minutes total for the streaming upload operation
 
-The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1 MB file.
+The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1 MB file on the Discord/Slack streaming path. Gateway adapters use buffered single PUT (see Platform-Specific Behavior below).
 
 ### Platform-Specific Behavior
 
