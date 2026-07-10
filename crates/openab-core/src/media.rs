@@ -715,6 +715,20 @@ async fn upload_bytes_to_filestore(
     filestore: &crate::filestore::Filestore,
 ) -> Option<(ContentBlock, u64)> {
     let actual_size = bytes.len() as u64;
+
+    // Centralized 50 MB cap — defense-in-depth regardless of which caller
+    // invokes this function (download_and_upload_to_filestore or the
+    // post-download fallback in download_text_file_inner).
+    const FILESTORE_MAX_SIZE: u64 = 50 * 1024 * 1024;
+    if actual_size > FILESTORE_MAX_SIZE {
+        tracing::warn!(
+            filename,
+            size = actual_size,
+            "file exceeds 50MB filestore limit, skipping upload"
+        );
+        return None;
+    }
+
     match filestore.upload_and_presign(filename, bytes).await {
         Ok(presigned_url) => {
             let hint = crate::filestore::format_filestore_hint(
