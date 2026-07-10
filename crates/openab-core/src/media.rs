@@ -670,7 +670,7 @@ async fn download_and_upload_to_filestore(
     auth_token: Option<&str>,
     filestore: &crate::filestore::Filestore,
 ) -> Option<(ContentBlock, u64)> {
-    // Cap file size to prevent abuse (configurable, default 250 MB, max 1 GB).
+    // Cap file size to prevent abuse (configurable, default 250 MB, max 500 MB).
     let max_size = filestore.max_file_size();
     if size > max_size {
         tracing::warn!(filename, size, max = max_size, "text file exceeds filestore size limit, skipping");

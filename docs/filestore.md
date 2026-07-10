@@ -108,9 +108,71 @@ presigned_ttl = 7200
 | `region` | ✅ | — | AWS region (`"auto"` for R2) |
 | `endpoint` | ❌ | AWS default | Custom S3-compatible endpoint URL |
 | `prefix` | ❌ | `"incoming/"` | Object key prefix |
-| `presigned_ttl` | ❌ | `3600` | Presigned URL lifetime in seconds |
+| `presigned_ttl` | ❌ | `3600` | Presigned URL lifetime in seconds (max 7 days / 604800) |
+| `max_file_size_mb` | ❌ | `250` | Maximum file size for upload in MB (max 500) |
 | `access_key_id` | ❌ | provider chain | Explicit access key |
 | `secret_access_key` | ❌ | provider chain | Explicit secret key |
+
+## Technical Details
+
+### Streaming Multipart Upload
+
+Files are uploaded using S3 multipart upload with streaming:
+
+- **Chunk size:** 16 MB per part (above S3 minimum of 5 MB)
+- **Memory usage:** ~16 MB per concurrent upload (fixed, regardless of file size)
+- **Part count:** max ~32 parts for a 500 MB file (well below S3's 10,000 limit)
+- **Timeout:** 5 minutes total for the streaming upload operation
+
+The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1 MB file.
+
+### Platform-Specific Behavior
+
+| Platform | Download Method | Upload Method |
+|----------|----------------|---------------|
+| Discord / Slack | Streaming download → streaming multipart upload (~16 MB memory) |
+| Gateway (Telegram, Feishu, etc.) | File already on local disk → single PUT upload (bytes in memory) |
+
+Gateway files are already downloaded to `~/.openab/media/inbound/` by the Gateway
+service before reaching Core, so streaming is unnecessary — the bytes are already
+available.
+
+### Timeouts
+
+| Operation | Timeout | Notes |
+|-----------|---------|-------|
+| Download from platform | 3 minutes | Per-request (Discord/Slack CDN) |
+| Streaming upload to S3 | 5 minutes | Total for all parts |
+| Individual part upload | SDK default | Per upload_part call |
+
+### Incomplete Multipart Upload Cleanup
+
+If a streaming upload is interrupted (timeout, OAB crash, network failure),
+S3 may retain incomplete multipart upload parts. These consume storage until
+cleaned up.
+
+**Required:** Configure an `AbortIncompleteMultipartUpload` lifecycle rule:
+
+```json
+{
+  "Rules": [{
+    "ID": "abort-incomplete-uploads",
+    "Filter": { "Prefix": "incoming/" },
+    "Status": "Enabled",
+    "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 1 }
+  }]
+}
+```
+
+```bash
+# Apply alongside your expiry rule
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket my-oab-files \
+  --lifecycle-configuration file://lifecycle.json
+```
+
+For Cloudflare R2, incomplete multipart uploads are automatically cleaned up
+after 24 hours (no configuration needed).
 
 ## Behavior
 
@@ -310,5 +372,5 @@ For typical usage (a few large files per day, auto-expired after 24h):
 
 - **Structured `ContentBlock::File`** in ACP for richer metadata (mime, size, TTL)
 - **Metrics** — upload success rate, latency, file size distribution
-- **Chunked download** — for extremely large files, stream to S3 in parts
+- **URL hint fallback** — when filestore is not configured, fall back to platform URL hint (PR #1346 pattern)
 - **Multi-modal** — extend filestore to images/audio when inline is too large
