@@ -1416,7 +1416,22 @@ async fn handle_message(
                         debug!(filename, "adding image attachment");
                         extra_blocks.push(block);
                     }
-                    Err(media::MediaFetchError::NotAnImage) => {}
+                    Err(media::MediaFetchError::NotAnImage) => {
+                        // Upload unsupported file types to filestore if available
+                        #[cfg(feature = "filestore")]
+                        if let Some(fs) = filestore {
+                            if let Some((block, _)) = media::download_and_upload_any_file(
+                                url,
+                                filename,
+                                size,
+                                Some(mimetype),
+                                Some(bot_token),
+                                fs,
+                            ).await {
+                                extra_blocks.push(block);
+                            }
+                        }
+                    }
                     Err(media::MediaFetchError::SizeExceeded { actual, limit }) => {
                         warn!(filename, actual, limit, "image exceeds size limit");
                         failed_image_files.push(filename.to_string());

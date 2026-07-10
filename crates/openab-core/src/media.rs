@@ -826,6 +826,103 @@ pub async fn upload_bytes_to_filestore_public(
     upload_bytes_to_filestore(filename, bytes, filestore).await
 }
 
+/// Download any file (binary, PDF, video, zip, etc.) and upload to filestore.
+/// Returns a hint block with the presigned URL so the agent can fetch the file.
+///
+/// This is used for file types that were previously silently dropped (not text,
+/// not image, not audio). With filestore configured, the agent gets a URL to
+/// access any attachment.
+#[cfg(feature = "filestore")]
+pub async fn download_and_upload_any_file(
+    url: &str,
+    filename: &str,
+    size: u64,
+    content_type: Option<&str>,
+    auth_token: Option<&str>,
+    filestore: &crate::filestore::Filestore,
+) -> Option<(ContentBlock, u64)> {
+    let max_size = filestore.max_file_size();
+    if size > max_size {
+        tracing::warn!(filename, size, max = max_size, "file exceeds filestore size limit, skipping");
+        return None;
+    }
+
+    const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    let mut req = HTTP_CLIENT.get(url).timeout(HTTP_TIMEOUT);
+    if let Some(token) = auth_token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "file download failed (filestore any-file path)");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(url, status = %resp.status(), "file download failed (filestore any-file path)");
+        return None;
+    }
+
+    // Content-Length pre-check
+    if let Some(content_length) = resp.content_length() {
+        if content_length > max_size {
+            tracing::warn!(filename, content_length, max = max_size, "Content-Length exceeds filestore limit");
+            return None;
+        }
+    }
+
+    // Stream to S3 multipart upload
+    const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    let stream = Box::pin(resp.bytes_stream());
+
+    let upload_result = tokio::time::timeout(
+        STREAM_TIMEOUT,
+        filestore.stream_upload_and_presign(filename, stream, size),
+    )
+    .await;
+
+    let mime = content_type.unwrap_or("application/octet-stream");
+    match upload_result {
+        Ok(Ok((presigned_url, actual_bytes))) => {
+            let size_kb = actual_bytes / 1024;
+            let hint = format!(
+                "[File: {filename}]\n\
+                 Type: {mime}\n\
+                 Size: {size_kb} KB\n\
+                 This file has been uploaded to temporary storage. \
+                 Fetch the contents using the URL below:\n\
+                 {presigned_url}\n\
+                 Note: this URL expires in {} minutes.",
+                filestore.presigned_ttl_secs() / 60
+            );
+            tracing::info!(filename, mime, size = actual_bytes, "file uploaded to filestore (any-file path)");
+            Some((ContentBlock::Text { text: hint }, 0))
+        }
+        Ok(Err(e)) => {
+            tracing::error!(filename, error = %e, "filestore upload failed (any-file path)");
+            let size_kb = size / 1024;
+            let hint = format!(
+                "[File: {filename}]\n\
+                 Type: {mime}\n\
+                 This file ({size_kb} KB) could not be uploaded to temporary storage. \
+                 The file content is unavailable."
+            );
+            Some((ContentBlock::Text { text: hint }, 0))
+        }
+        Err(_) => {
+            tracing::error!(filename, "filestore upload timed out (any-file path)");
+            let hint = format!(
+                "[File: {filename}]\n\
+                 Type: {mime}\n\
+                 This file upload timed out. The file content is unavailable."
+            );
+            Some((ContentBlock::Text { text: hint }, 0))
+        }
+    }
+}
+
 /// Upload already-downloaded bytes to the filestore and return the hint block.
 #[cfg(feature = "filestore")]
 async fn upload_bytes_to_filestore(

@@ -963,6 +963,26 @@ impl EventHandler for Handler {
                                 &attachment.url,
                             ));
                         }
+                        // For all other unsupported formats (PDF, ZIP, binary, etc.):
+                        // upload to filestore if available so the agent gets a presigned URL.
+                        #[cfg(feature = "filestore")]
+                        if !media::is_video_file(
+                            &attachment.filename,
+                            attachment.content_type.as_deref(),
+                        ) {
+                            if let Some(ref fs) = self.filestore {
+                                if let Some((block, _)) = media::download_and_upload_any_file(
+                                    &attachment.url,
+                                    &attachment.filename,
+                                    u64::from(attachment.size),
+                                    attachment.content_type.as_deref(),
+                                    None,
+                                    fs,
+                                ).await {
+                                    extra_blocks.push(block);
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
