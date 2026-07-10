@@ -451,8 +451,10 @@ impl Filestore {
 pub fn format_filestore_hint(filename: &str, size_bytes: u64, presigned_url: &str, ttl_secs: u64) -> String {
     let size_kb = size_bytes / 1024;
     let ttl_minutes = ttl_secs / 60;
+    // Sanitize filename for prompt safety — strip control characters
+    let safe_filename: String = filename.chars().filter(|c| !c.is_control()).take(200).collect();
     format!(
-        "[File: {filename}]\n\
+        "[File: {safe_filename}]\n\
          This file ({size_kb} KB) exceeds the 512 KB inline limit. \
          It has been uploaded to temporary storage. \
          Fetch the contents using the URL below:\n\
