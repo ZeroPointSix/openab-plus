@@ -555,8 +555,7 @@ presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
 - MinIO
 - Any S3-compatible object store
 
-**Build requirement:** Requires the `filestore` feature flag (enabled by default in
-standard builds). When built without it, `[filestore]` config is ignored.
+**Build requirement:** The filestore feature is opt-in and requires the `filestore` Cargo feature flag (add `--features filestore` to your build command or include it in your Cargo.toml feature selection). When built without it, `[filestore]` config is ignored.
 
 **Minimum IAM policy:**
 

@@ -689,6 +689,17 @@ async fn download_and_upload_to_filestore(
         }
     };
 
+    // Defense-in-depth: verify actual download size (platform may underreport)
+    if bytes.len() as u64 > FILESTORE_MAX_SIZE {
+        tracing::warn!(
+            filename,
+            reported = size,
+            actual = bytes.len(),
+            "downloaded text file exceeds 50MB filestore limit, skipping"
+        );
+        return None;
+    }
+
     upload_bytes_to_filestore(filename, &bytes, filestore).await
 }
 
@@ -715,8 +726,15 @@ async fn upload_bytes_to_filestore(
             Some((ContentBlock::Text { text: hint }, 0))
         }
         Err(e) => {
-            tracing::warn!(filename, error = %e, "filestore upload failed, dropping file");
-            None
+            tracing::error!(filename, error = %e, "filestore upload failed");
+            // Return a degraded hint so the agent knows the file exists
+            let size_kb = actual_size / 1024;
+            let hint = format!(
+                "[File: {filename}]\n\
+                 This file ({size_kb} KB) could not be uploaded to temporary storage \
+                 (upload failed). The file content is unavailable."
+            );
+            Some((ContentBlock::Text { text: hint }, 0))
         }
     }
 }

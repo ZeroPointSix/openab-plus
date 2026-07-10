@@ -39,20 +39,34 @@ impl Filestore {
 
         let sdk_config = sdk_config_loader.load().await;
 
-        let mut s3_config_builder =
-            aws_sdk_s3::config::Builder::from(&sdk_config).force_path_style(true);
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&sdk_config);
 
         if let Some(endpoint) = &config.endpoint {
-            s3_config_builder = s3_config_builder.endpoint_url(endpoint.clone());
+            // Path-style access is required for most S3-compatible services
+            // (R2, MinIO) but deprecated by AWS S3 itself.
+            s3_config_builder = s3_config_builder
+                .endpoint_url(endpoint.clone())
+                .force_path_style(true);
         }
 
         let client = aws_sdk_s3::Client::from_conf(s3_config_builder.build());
+
+        // Cap presigned TTL at 7 days to prevent excessively long-lived URLs.
+        const MAX_PRESIGNED_TTL: u64 = 7 * 24 * 60 * 60; // 7 days
+        let ttl_secs = config.presigned_ttl.min(MAX_PRESIGNED_TTL);
+        if config.presigned_ttl > MAX_PRESIGNED_TTL {
+            tracing::warn!(
+                configured = config.presigned_ttl,
+                capped = MAX_PRESIGNED_TTL,
+                "presigned_ttl exceeds 7-day maximum, capping"
+            );
+        }
 
         Self {
             client,
             bucket: config.bucket.clone(),
             prefix: config.prefix.clone(),
-            presigned_ttl: Duration::from_secs(config.presigned_ttl),
+            presigned_ttl: Duration::from_secs(ttl_secs),
         }
     }
 
@@ -65,11 +79,21 @@ impl Filestore {
         filename: &str,
         data: &[u8],
     ) -> anyhow::Result<String> {
+        // Sanitize filename: strip path separators, traversal sequences, and
+        // non-ASCII chars. Limit length to prevent excessively long S3 keys.
+        let safe_name: String = filename
+            .replace(['/', '\\', '\0'], "_")
+            .replace("..", "_")
+            .chars()
+            .filter(|c| c.is_ascii_graphic() || *c == ' ')
+            .take(200)
+            .collect();
+        let safe_name = if safe_name.is_empty() { "unnamed" } else { &safe_name };
         let key = format!(
             "{}{}_{}",
             self.prefix,
             uuid::Uuid::new_v4(),
-            filename
+            safe_name
         );
 
         // Upload the object
@@ -77,6 +101,7 @@ impl Filestore {
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
+            .content_type("text/plain; charset=utf-8")
             .body(aws_sdk_s3::primitives::ByteStream::from(data.to_vec()))
             .send()
             .await
