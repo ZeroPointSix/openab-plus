@@ -517,7 +517,7 @@ region = "us-west-2"
 # endpoint = "http://localhost:9000"                           # MinIO
 prefix = "incoming/"       # object key prefix (default: "incoming/")
 presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
-# max_file_size = 262144000  # max upload size in bytes (default: 250 MB, max: 1 GB)
+# max_file_size_mb = 250   # max upload size in MB (default: 250, max: 500)
 # access_key_id = "${secrets.filestore_key}"         # recommended: use secret refs
 # secret_access_key = "${secrets.filestore_secret}"  # recommended: use secret refs
 ```
@@ -534,7 +534,7 @@ presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
 | `endpoint` | ❌ | AWS default | Custom S3-compatible endpoint URL (R2, MinIO, etc.) |
 | `prefix` | ❌ | `"incoming/"` | Object key prefix for uploaded files |
 | `presigned_ttl` | ❌ | `3600` | Presigned URL expiry in seconds |
-| `max_file_size` | ❌ | `262144000` (250 MB) | Maximum file size for upload in bytes (hard cap: 1 GB) |
+| `max_file_size_mb` | ❌ | `250` | Maximum file size for upload in MB (hard cap: 500) |
 | `access_key_id` | ❌ | provider chain | Explicit access key (falls back to IRSA/env/config) |
 | `secret_access_key` | ❌ | provider chain | Explicit secret key |
 

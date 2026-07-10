@@ -68,14 +68,14 @@ impl Filestore {
             );
         }
 
-        // Cap max_file_size at 1 GB absolute maximum.
-        const ABSOLUTE_MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
-        let max_file_size = config.max_file_size.min(ABSOLUTE_MAX_FILE_SIZE);
-        if config.max_file_size > ABSOLUTE_MAX_FILE_SIZE {
+        // Cap max_file_size_mb at 500 MB absolute maximum.
+        const ABSOLUTE_MAX_FILE_SIZE_MB: u64 = 500;
+        let max_file_size_mb = config.max_file_size_mb.min(ABSOLUTE_MAX_FILE_SIZE_MB);
+        if config.max_file_size_mb > ABSOLUTE_MAX_FILE_SIZE_MB {
             tracing::warn!(
-                configured = config.max_file_size,
-                capped = ABSOLUTE_MAX_FILE_SIZE,
-                "max_file_size exceeds 1 GB maximum, capping"
+                configured = config.max_file_size_mb,
+                capped = ABSOLUTE_MAX_FILE_SIZE_MB,
+                "max_file_size_mb exceeds 500 MB maximum, capping"
             );
         }
 
@@ -84,7 +84,7 @@ impl Filestore {
             bucket: config.bucket.clone(),
             prefix: config.prefix.clone(),
             presigned_ttl: Duration::from_secs(ttl_secs),
-            max_file_size,
+            max_file_size: max_file_size_mb * 1024 * 1024,
         }
     }
 
