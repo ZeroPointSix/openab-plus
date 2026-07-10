@@ -665,10 +665,10 @@ async fn download_and_upload_to_filestore(
     auth_token: Option<&str>,
     filestore: &crate::filestore::Filestore,
 ) -> Option<(ContentBlock, u64)> {
-    // Cap at 500 MB to prevent abuse even when uploading to S3.
-    const FILESTORE_MAX_SIZE: u64 = 500 * 1024 * 1024;
-    if size > FILESTORE_MAX_SIZE {
-        tracing::warn!(filename, size, "text file exceeds 500MB filestore limit, skipping");
+    // Cap file size to prevent abuse (configurable, default 250 MB, max 1 GB).
+    let max_size = filestore.max_file_size();
+    if size > max_size {
+        tracing::warn!(filename, size, max = max_size, "text file exceeds filestore size limit, skipping");
         return None;
     }
 
@@ -701,12 +701,13 @@ async fn download_and_upload_to_filestore(
     };
 
     // Defense-in-depth: verify actual download size (platform may underreport)
-    if bytes.len() as u64 > FILESTORE_MAX_SIZE {
+    if bytes.len() as u64 > max_size {
         tracing::warn!(
             filename,
             reported = size,
             actual = bytes.len(),
-            "downloaded text file exceeds 500MB filestore limit, skipping"
+            max = max_size,
+            "downloaded text file exceeds filestore size limit, skipping"
         );
         return None;
     }
@@ -735,15 +736,16 @@ async fn upload_bytes_to_filestore(
 ) -> Option<(ContentBlock, u64)> {
     let actual_size = bytes.len() as u64;
 
-    // Centralized 500 MB cap — defense-in-depth regardless of which caller
+    // Centralized size cap — defense-in-depth regardless of which caller
     // invokes this function (download_and_upload_to_filestore or the
     // post-download fallback in download_text_file_inner).
-    const FILESTORE_MAX_SIZE: u64 = 500 * 1024 * 1024;
-    if actual_size > FILESTORE_MAX_SIZE {
+    let max_size = filestore.max_file_size();
+    if actual_size > max_size {
         tracing::warn!(
             filename,
             size = actual_size,
-            "file exceeds 500MB filestore limit, skipping upload"
+            max = max_size,
+            "file exceeds filestore size limit, skipping upload"
         );
         return None;
     }

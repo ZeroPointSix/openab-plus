@@ -12,6 +12,7 @@ pub struct Filestore {
     bucket: String,
     prefix: String,
     presigned_ttl: Duration,
+    max_file_size: u64,
 }
 
 impl Filestore {
@@ -67,11 +68,23 @@ impl Filestore {
             );
         }
 
+        // Cap max_file_size at 1 GB absolute maximum.
+        const ABSOLUTE_MAX_FILE_SIZE: u64 = 1024 * 1024 * 1024; // 1 GB
+        let max_file_size = config.max_file_size.min(ABSOLUTE_MAX_FILE_SIZE);
+        if config.max_file_size > ABSOLUTE_MAX_FILE_SIZE {
+            tracing::warn!(
+                configured = config.max_file_size,
+                capped = ABSOLUTE_MAX_FILE_SIZE,
+                "max_file_size exceeds 1 GB maximum, capping"
+            );
+        }
+
         Self {
             client,
             bucket: config.bucket.clone(),
             prefix: config.prefix.clone(),
             presigned_ttl: Duration::from_secs(ttl_secs),
+            max_file_size,
         }
     }
 
@@ -148,6 +161,11 @@ impl Filestore {
     /// Return the configured presigned TTL in seconds.
     pub fn presigned_ttl_secs(&self) -> u64 {
         self.presigned_ttl.as_secs()
+    }
+
+    /// Return the configured maximum file size in bytes.
+    pub fn max_file_size(&self) -> u64 {
+        self.max_file_size
     }
 }
 

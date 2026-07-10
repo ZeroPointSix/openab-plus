@@ -141,6 +141,10 @@ pub struct FilestoreConfig {
     /// Presigned URL TTL in seconds. Default: 3600 (1 hour).
     #[serde(default = "default_filestore_presigned_ttl")]
     pub presigned_ttl: u64,
+    /// Maximum file size in bytes for filestore uploads. Default: 250 MB.
+    /// Cannot exceed 1 GB.
+    #[serde(default = "default_filestore_max_file_size")]
+    pub max_file_size: u64,
     /// Optional access key ID (falls back to AWS provider chain if unset).
     pub access_key_id: Option<String>,
     /// Optional secret access key (falls back to AWS provider chain if unset).
@@ -155,6 +159,11 @@ fn default_filestore_prefix() -> String {
 #[cfg(feature = "filestore")]
 fn default_filestore_presigned_ttl() -> u64 {
     3600
+}
+
+#[cfg(feature = "filestore")]
+fn default_filestore_max_file_size() -> u64 {
+    250 * 1024 * 1024 // 250 MB
 }
 
 #[derive(Debug, Deserialize)]

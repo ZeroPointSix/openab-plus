@@ -122,8 +122,8 @@ presigned_ttl = 7200
 | File size | Filestore configured | Result |
 |-----------|---------------------|--------|
 | ≤ 512 KB | any | Inlined into prompt (unchanged) |
-| > 512 KB, ≤ 500 MB | ✅ yes | Uploaded → presigned URL returned |
-| > 500 MB | ✅ yes | Dropped (defense-in-depth cap) |
+| > 512 KB, ≤ max_file_size | ✅ yes | Uploaded → presigned URL returned |
+| > max_file_size (default 250 MB) | ✅ yes | Dropped (configurable cap, max 1 GB) |
 | > 512 KB | ❌ no | Silently dropped (legacy behavior) |
 
 ## What the Agent Sees
@@ -157,7 +157,7 @@ readability in S3 console but is not security-critical.
 
 ### Size Limits
 
-- Per-file cap: 500 MB (defense-in-depth)
+- Per-file cap: configurable via `max_file_size` (default 250 MB, max 1 GB)
 - File count cap: 5 text files per message (unchanged)
 - Aggregate inline cap: 1 MB for inlined files (filestore uploads bypass this)
 
