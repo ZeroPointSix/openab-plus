@@ -330,10 +330,10 @@ mc ilm rule add myminio/oab-uploads \
 | Failure | Behavior |
 |---------|----------|
 | S3 upload fails | Agent receives degraded hint: "file could not be uploaded to temporary storage" |
-| S3 upload times out (>3 min) | Same as upload failure — degraded hint returned |
+| S3 upload times out (>10 min) | Same as upload failure — degraded hint returned |
 | Download from platform fails | File is dropped (warn log), agent not notified |
-| Download times out (>3 min) | Same as download failure — file dropped |
-| File exceeds 500 MB | File is dropped (warn log) |
+| Download times out (>10 min) | Same as download failure — file dropped |
+| File exceeds max_file_size_mb | File is dropped (warn log) |
 | Presigned URL generation fails | Agent receives degraded hint |
 | Filestore not configured | Legacy behavior (>512KB files silently dropped) |
 
