@@ -122,7 +122,7 @@ Files are uploaded using S3 multipart upload with streaming:
 - **Chunk size:** 16 MB per part (above S3 minimum of 5 MB)
 - **Memory usage:** ~16 MB per concurrent upload (fixed, regardless of file size)
 - **Part count:** max ~32 parts for a 500 MB file (well below S3's 10,000 limit)
-- **Timeout:** 5 minutes total for the streaming upload operation
+- **Timeout:** 10 minutes total for the streaming upload operation
 
 The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1 MB file.
 
