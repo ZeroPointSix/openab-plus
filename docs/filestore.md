@@ -114,6 +114,11 @@ presigned_ttl = 7200
 
 ## Behavior
 
+> **Platform scope:** Filestore currently applies to **Discord** and **Slack**
+> adapters only. The Gateway adapter (Telegram, Feishu, Google Chat, etc.)
+> uses its own local store (`~/.openab/media/inbound/`) and is not yet
+> integrated with filestore. This will be addressed in a future PR.
+
 | File size | Filestore configured | Result |
 |-----------|---------------------|--------|
 | ≤ 512 KB | any | Inlined into prompt (unchanged) |
@@ -196,15 +201,17 @@ For Cloudflare R2, set an equivalent object lifecycle rule in the dashboard.
 
 | Failure | Behavior |
 |---------|----------|
-| S3 upload fails | File is dropped (warn log), agent not notified |
-| Download from platform fails | File is dropped (warn log) |
+| S3 upload fails | Agent receives degraded hint: "file could not be uploaded to temporary storage" |
+| S3 upload times out (>3 min) | Same as upload failure — degraded hint returned |
+| Download from platform fails | File is dropped (warn log), agent not notified |
+| Download times out (>3 min) | Same as download failure — file dropped |
 | File exceeds 50 MB | File is dropped (warn log) |
-| Presigned URL generation fails | File is dropped (error log) |
+| Presigned URL generation fails | Agent receives degraded hint |
 | Filestore not configured | Legacy behavior (>512KB files silently dropped) |
 
-In all failure cases, the file is not inlined and the agent receives no hint.
-This is a deliberate "fail-closed" approach — a broken filestore should not
-degrade the core prompt pipeline.
+When filestore is configured but upload fails, the agent always receives a
+hint indicating the file exists but content is unavailable. This ensures
+the agent can inform the user, even if it cannot retrieve the content.
 
 ## Build Requirement
 

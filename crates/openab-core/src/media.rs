@@ -530,7 +530,14 @@ async fn download_text_file_inner(
 ) -> Option<(ContentBlock, u64)> {
     const MAX_SIZE: u64 = 512 * 1024;
 
-    let mut req = HTTP_CLIENT.get(url);
+    // Use extended timeout when filestore is available — the defense-in-depth
+    // path may encounter files larger than expected (size=0 or underreported).
+    let timeout = if filestore.is_some() {
+        std::time::Duration::from_secs(180)
+    } else {
+        std::time::Duration::from_secs(30)
+    };
+    let mut req = HTTP_CLIENT.get(url).timeout(timeout);
     if let Some(token) = auth_token {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
