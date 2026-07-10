@@ -555,19 +555,57 @@ async fn download_text_file_inner(
     }
 
     // Mitigation for underreported size: if Content-Length reveals the file
-    // is much larger than the inline limit, avoid buffering a huge file.
+    // is larger than the inline limit (512 KB), route to streaming upload
+    // instead of buffering the entire file in memory.
     if let Some(fs) = filestore {
         if let Some(content_length) = resp.content_length() {
-            if content_length > fs.max_file_size() {
-                tracing::warn!(
+            if content_length > MAX_SIZE {
+                tracing::info!(
                     url,
                     content_length,
-                    "Content-Length exceeds filestore max in inline path, skipping"
+                    "Content-Length exceeds inline limit, routing to streaming upload"
                 );
-                return None;
+                // Stream directly to S3 multipart upload
+                const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+                let stream = Box::pin(resp.bytes_stream());
+                let upload_result = tokio::time::timeout(
+                    STREAM_TIMEOUT,
+                    fs.stream_upload_and_presign(filename, stream, content_length),
+                )
+                .await;
+                return match upload_result {
+                    Ok(Ok((presigned_url, actual_bytes))) => {
+                        let hint = crate::filestore::format_filestore_hint(
+                            filename, actual_bytes, &presigned_url, fs.presigned_ttl_secs(),
+                        );
+                        tracing::info!(filename, size = actual_bytes, "text file streamed to filestore (inline fallback)");
+                        Some((ContentBlock::Text { text: hint }, 0))
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(filename, error = %e, "filestore stream upload failed (inline fallback)");
+                        let size_kb = content_length / 1024;
+                        let hint = format!(
+                            "[File: {filename}]\n\
+                             This file ({size_kb} KB) could not be uploaded to temporary storage \
+                             (upload failed). The file content is unavailable."
+                        );
+                        Some((ContentBlock::Text { text: hint }, 0))
+                    }
+                    Err(_) => {
+                        tracing::error!(filename, "filestore stream upload timed out (inline fallback)");
+                        let size_kb = content_length / 1024;
+                        let hint = format!(
+                            "[File: {filename}]\n\
+                             This file ({size_kb} KB) upload timed out. \
+                             The file content is unavailable."
+                        );
+                        Some((ContentBlock::Text { text: hint }, 0))
+                    }
+                };
             }
         }
     }
+
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
