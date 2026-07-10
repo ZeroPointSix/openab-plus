@@ -45,6 +45,25 @@ presigned_ttl = 3600       # URL expiry in seconds (default: 1 hour)
 
 ### With Cloudflare R2
 
+**Recommended: use secret refs** (credentials resolved from AWS Secrets Manager
+or exec provider at boot time — never stored in plaintext config):
+
+```toml
+[filestore]
+bucket = "my-oab-files"
+region = "auto"
+endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+presigned_ttl = 3600
+access_key_id = "${secrets.r2_access_key}"
+secret_access_key = "${secrets.r2_secret_key}"
+
+[secrets.refs]
+r2_access_key = "aws-sm://openab/prod#R2_ACCESS_KEY_ID"
+r2_secret_key = "aws-sm://openab/prod#R2_SECRET_ACCESS_KEY"
+```
+
+Alternative (env vars — acceptable for development, not recommended for production):
+
 ```toml
 [filestore]
 bucket = "my-oab-files"
@@ -54,6 +73,10 @@ presigned_ttl = 3600
 access_key_id = "${R2_ACCESS_KEY_ID}"
 secret_access_key = "${R2_SECRET_ACCESS_KEY}"
 ```
+
+> **Security note:** Always prefer `[secrets.refs]` over env vars for R2/S3
+> credentials. Secret refs support rotation, audit trails, and are never
+> exposed in process listings or environment dumps.
 
 ### With AWS S3
 

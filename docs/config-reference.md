@@ -517,9 +517,14 @@ region = "us-west-2"
 # endpoint = "http://localhost:9000"                           # MinIO
 prefix = "incoming/"       # object key prefix (default: "incoming/")
 presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
-# access_key_id = "${FILESTORE_ACCESS_KEY}"      # optional, falls back to AWS provider chain
-# secret_access_key = "${FILESTORE_SECRET_KEY}"  # optional, falls back to AWS provider chain
+# access_key_id = "${secrets.filestore_key}"         # recommended: use secret refs
+# secret_access_key = "${secrets.filestore_secret}"  # recommended: use secret refs
 ```
+
+> **Credentials best practice:** For R2 and explicit S3 credentials, always use
+> `[secrets.refs]` to resolve credentials from AWS Secrets Manager or an exec
+> provider. Avoid hardcoding credentials or relying solely on env vars in production.
+> For AWS S3 with IRSA/Pod Identity/instance roles, omit both fields entirely.
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
