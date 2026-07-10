@@ -697,6 +697,20 @@ async fn download_and_upload_to_filestore(
         return None;
     }
 
+    // Defense-in-depth: check Content-Length header if available (catches
+    // underreported platform size when the server provides the real size).
+    if let Some(content_length) = resp.content_length() {
+        if content_length > max_size {
+            tracing::warn!(
+                filename,
+                content_length,
+                max = max_size,
+                "Content-Length exceeds filestore size limit, skipping download"
+            );
+            return None;
+        }
+    }
+
     // Stream directly to S3 multipart upload (5-minute total timeout for streaming)
     const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     let stream = Box::pin(resp.bytes_stream());

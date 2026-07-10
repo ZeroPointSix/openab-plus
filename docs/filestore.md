@@ -313,7 +313,12 @@ mc ilm rule add myminio/oab-uploads \
   "Version": "2012-10-17",
   "Statement": [{
     "Effect": "Allow",
-    "Action": ["s3:PutObject", "s3:GetObject"],
+    "Action": [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:AbortMultipartUpload",
+      "s3:ListMultipartUploadParts"
+    ],
     "Resource": "arn:aws:s3:::my-oab-files/incoming/*"
   }]
 }

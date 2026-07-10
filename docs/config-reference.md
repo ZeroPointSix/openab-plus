@@ -564,7 +564,12 @@ presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
 ```json
 {
   "Effect": "Allow",
-  "Action": ["s3:PutObject", "s3:GetObject"],
+  "Action": [
+    "s3:PutObject",
+    "s3:GetObject",
+    "s3:AbortMultipartUpload",
+    "s3:ListMultipartUploadParts"
+  ],
   "Resource": "arn:aws:s3:::my-oab-files/incoming/*"
 }
 ```

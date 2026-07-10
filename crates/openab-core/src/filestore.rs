@@ -360,7 +360,7 @@ impl Filestore {
             .set_parts(Some(parts))
             .build();
 
-        self.client
+        if let Err(e) = self.client
             .complete_multipart_upload()
             .bucket(&self.bucket)
             .key(&key)
@@ -368,10 +368,18 @@ impl Filestore {
             .multipart_upload(completed_upload)
             .send()
             .await
-            .map_err(|e| {
-                error!(bucket = %self.bucket, key = %key, error = %e, "complete_multipart_upload failed");
-                anyhow::anyhow!("complete_multipart_upload failed: {e}")
-            })?;
+        {
+            error!(bucket = %self.bucket, key = %key, error = %e, "complete_multipart_upload failed, aborting");
+            // Abort the multipart upload to clean up orphaned parts
+            let _ = self.client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            return Err(anyhow::anyhow!("complete_multipart_upload failed: {e}"));
+        }
 
         info!(
             bucket = %self.bucket,
