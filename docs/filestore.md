@@ -163,13 +163,17 @@ readability in S3 console but is not security-critical.
 
 ### Recommended: S3 Lifecycle Rules
 
-OAB does not delete uploaded objects. Configure a lifecycle rule on your bucket
-to auto-expire objects after a reasonable period:
+OAB does not delete uploaded objects. **You must configure lifecycle rules
+on your bucket** to auto-expire objects, otherwise storage will grow unbounded.
 
 > **Important:** Set your lifecycle expiry **longer** than `presigned_ttl`.
 > If objects are deleted before the presigned URL expires, agents will get 404
 > errors when fetching. Example: if `presigned_ttl = 3600` (1 hour), set
 > lifecycle expiry to at least 24 hours.
+
+#### AWS S3 — via CLI
+
+Create a `lifecycle.json` file:
 
 ```json
 {
@@ -182,7 +186,63 @@ to auto-expire objects after a reasonable period:
 }
 ```
 
-For Cloudflare R2, set an equivalent object lifecycle rule in the dashboard.
+Apply it:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket my-oab-files \
+  --lifecycle-configuration file://lifecycle.json
+```
+
+To verify:
+
+```bash
+aws s3api get-bucket-lifecycle-configuration --bucket my-oab-files
+```
+
+For longer retention (e.g. 30 days), change `"Days": 30`.
+
+📖 Reference: [AWS S3 Lifecycle Configuration](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html)
+
+#### AWS S3 — via Console
+
+1. Go to **S3 → your bucket → Management → Lifecycle rules**
+2. Click **Create lifecycle rule**
+3. Rule name: `expire-filestore-uploads`
+4. Filter: Prefix `incoming/`
+5. Actions: **Expire current versions of objects** → Days: `1` (or `30`)
+6. Save
+
+#### Cloudflare R2
+
+R2 supports object lifecycle rules via the dashboard:
+
+1. Go to **R2 → your bucket → Settings → Object lifecycle rules**
+2. Click **Add rule**
+3. Condition: Prefix matches `incoming/`
+4. Action: **Delete objects** after `1 day` (or `30 days`)
+5. Save
+
+📖 Reference: [Cloudflare R2 Object Lifecycle Rules](https://developers.cloudflare.com/r2/buckets/object-lifecycles/)
+
+#### MinIO
+
+```bash
+# Set lifecycle to expire objects in incoming/ after 1 day
+mc ilm rule add myminio/oab-uploads \
+  --prefix "incoming/" \
+  --expiry-days 1
+```
+
+📖 Reference: [MinIO Object Lifecycle Management](https://min.io/docs/minio/linux/administration/object-management/object-lifecycle-management.html)
+
+#### Recommended Expiry Settings
+
+| Use case | Expiry | Rationale |
+|----------|--------|-----------|
+| Most deployments | 1 day | Agent fetches within minutes; 24h covers retries |
+| Long-running sessions | 7 days | For agents that may revisit conversations later |
+| Compliance/audit | 30 days | Keep files available for review |
 
 ### Minimum IAM Policy
 
