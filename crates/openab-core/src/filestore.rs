@@ -96,15 +96,23 @@ impl Filestore {
             safe_name
         );
 
-        // Upload the object
-        self.client
+        // Upload the object (3-minute timeout to prevent indefinite hangs)
+        const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+        let upload_fut = self
+            .client
             .put_object()
             .bucket(&self.bucket)
             .key(&key)
             .content_type("text/plain; charset=utf-8")
             .body(aws_sdk_s3::primitives::ByteStream::from(data.to_vec()))
-            .send()
+            .send();
+
+        tokio::time::timeout(UPLOAD_TIMEOUT, upload_fut)
             .await
+            .map_err(|_| {
+                error!(bucket = %self.bucket, key = %key, "filestore upload timed out (180s)");
+                anyhow::anyhow!("filestore upload timed out")
+            })?
             .map_err(|e| {
                 error!(bucket = %self.bucket, key = %key, error = %e, "filestore upload failed");
                 anyhow::anyhow!("filestore upload failed: {e}")

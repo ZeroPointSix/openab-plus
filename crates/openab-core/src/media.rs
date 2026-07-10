@@ -665,7 +665,11 @@ async fn download_and_upload_to_filestore(
         return None;
     }
 
-    let mut req = HTTP_CLIENT.get(url);
+    // 3-minute timeout for the entire download (connect + transfer).
+    // Large files on slow connections should not block the message pipeline indefinitely.
+    const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+    let mut req = HTTP_CLIENT.get(url).timeout(DOWNLOAD_TIMEOUT);
     if let Some(token) = auth_token {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
