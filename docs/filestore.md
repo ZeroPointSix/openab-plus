@@ -114,10 +114,10 @@ presigned_ttl = 7200
 
 ## Behavior
 
-> **Platform scope:** Filestore currently applies to **Discord** and **Slack**
-> adapters only. The Gateway adapter (Telegram, Feishu, Google Chat, etc.)
-> uses its own local store (`~/.openab/media/inbound/`) and is not yet
-> integrated with filestore. This will be addressed in a future PR.
+> **Platform scope:** Filestore is supported across **all platforms** —
+> Discord, Slack, and all Gateway adapters (Telegram, Feishu, Google Chat,
+> WeCom, LINE). Any text file exceeding 512 KB on any platform will be
+> uploaded to the configured filestore.
 
 | File size | Filestore configured | Result |
 |-----------|---------------------|--------|

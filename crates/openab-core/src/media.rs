@@ -715,6 +715,18 @@ async fn download_and_upload_to_filestore(
 }
 
 /// Upload already-downloaded bytes to the filestore and return the hint block.
+/// Public entry point for other modules (e.g. gateway) that already have the
+/// file bytes in memory and need to upload to filestore.
+#[cfg(feature = "filestore")]
+pub async fn upload_bytes_to_filestore_public(
+    filename: &str,
+    bytes: &[u8],
+    filestore: &crate::filestore::Filestore,
+) -> Option<(ContentBlock, u64)> {
+    upload_bytes_to_filestore(filename, bytes, filestore).await
+}
+
+/// Upload already-downloaded bytes to the filestore and return the hint block.
 #[cfg(feature = "filestore")]
 async fn upload_bytes_to_filestore(
     filename: &str,

@@ -616,9 +616,18 @@ async fn main() -> anyhow::Result<()> {
             stt: cfg.stt.clone(),
         };
         let gw_router = router.clone();
+        #[cfg(feature = "filestore")]
+        let gw_filestore = filestore.clone();
         Some(tokio::spawn(async move {
             if let Err(e) =
-                gateway::run_gateway_adapter(params, shutdown_rx, gw_dispatcher, gw_router).await
+                gateway::run_gateway_adapter(
+                    params,
+                    shutdown_rx,
+                    gw_dispatcher,
+                    gw_router,
+                    #[cfg(feature = "filestore")]
+                    gw_filestore,
+                ).await
             {
                 error!("gateway adapter error: {e}");
             }
@@ -817,6 +826,8 @@ async fn main() -> anyhow::Result<()> {
                 trusted_bot_ids: gw_trusted_bot_ids,
                 bot_username: gw_bot_username,
                 stt_config: cfg.stt.clone(),
+                #[cfg(feature = "filestore")]
+                filestore: filestore.clone(),
             });
 
             // Spawn the event bridge (event_tx → process_gateway_event)
