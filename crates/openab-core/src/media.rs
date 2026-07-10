@@ -692,10 +692,13 @@ async fn download_and_upload_to_filestore(
         return None;
     }
 
-    // 3-minute timeout for establishing the download connection.
-    const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+    // Timeout for the entire HTTP response (including body streaming).
+    // Must be >= STREAM_TIMEOUT since reqwest's timeout covers body consumption
+    // via bytes_stream(). Set to 10 minutes to allow for large file downloads
+    // on moderate connections (250 MB at ~0.5 MB/s).
+    const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-    let mut req = HTTP_CLIENT.get(url).timeout(DOWNLOAD_TIMEOUT);
+    let mut req = HTTP_CLIENT.get(url).timeout(HTTP_TIMEOUT);
     if let Some(token) = auth_token {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
@@ -726,8 +729,11 @@ async fn download_and_upload_to_filestore(
         }
     }
 
-    // Stream directly to S3 multipart upload (5-minute total timeout for streaming)
-    const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    // Stream directly to S3 multipart upload.
+    // 10-minute total timeout for the entire download+upload operation.
+    // 250 MB at 1 MB/s = ~250s; 500 MB at 1 MB/s = ~500s.
+    // 10 min (600s) provides headroom for moderate connections.
+    const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
     let stream = Box::pin(resp.bytes_stream());
 
     let upload_result = tokio::time::timeout(

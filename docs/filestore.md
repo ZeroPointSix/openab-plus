@@ -141,8 +141,9 @@ available.
 
 | Operation | Timeout | Notes |
 |-----------|---------|-------|
-| Download from platform | 3 minutes | Per-request (Discord/Slack CDN) |
-| Streaming upload to S3 | 5 minutes | Total for all parts |
+| Download from platform (streaming path) | 10 minutes | HTTP request including body streaming |
+| Streaming upload to S3 | 10 minutes | Total for download + all parts + complete |
+| Download from platform (inline path) | 3 minutes | For files expected ≤512 KB |
 | Individual part upload | SDK default | Per upload_part call |
 
 ### Incomplete Multipart Upload Cleanup
