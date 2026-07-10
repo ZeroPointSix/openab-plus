@@ -348,7 +348,7 @@ impl Filestore {
         // If buffer has remaining data but no parts yet (file < 16 MB), upload as single part
         if parts.is_empty() {
             let part_data = buffer;
-            let resp = self
+            match self
                 .client
                 .upload_part()
                 .bucket(&self.bucket)
@@ -358,16 +358,27 @@ impl Filestore {
                 .body(aws_sdk_s3::primitives::ByteStream::from(part_data))
                 .send()
                 .await
-                .map_err(|e| {
-                    error!(bucket = %self.bucket, key = %key, error = %e, "upload single part failed");
-                    anyhow::anyhow!("upload single part failed: {e}")
-                })?;
-            parts.push(
-                CompletedPart::builder()
-                    .part_number(1)
-                    .e_tag(resp.e_tag.unwrap_or_default())
-                    .build(),
-            );
+            {
+                Ok(resp) => {
+                    parts.push(
+                        CompletedPart::builder()
+                            .part_number(1)
+                            .e_tag(resp.e_tag.unwrap_or_default())
+                            .build(),
+                    );
+                }
+                Err(e) => {
+                    error!(bucket = %self.bucket, key = %key, error = %e, "upload single part failed, aborting");
+                    let _ = self.client
+                        .abort_multipart_upload()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .upload_id(&upload_id)
+                        .send()
+                        .await;
+                    return Err(anyhow::anyhow!("upload single part failed: {e}"));
+                }
+            }
         }
 
         // Complete multipart upload
