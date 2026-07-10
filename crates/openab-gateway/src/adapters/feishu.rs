@@ -929,6 +929,7 @@ pub async fn start_websocket(
     adapter: &FeishuAdapter,
     event_tx: broadcast::Sender<String>,
     mut shutdown_rx: watch::Receiver<bool>,
+    store_all_files: bool,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let token_cache = adapter.token_cache.clone();
     let bot_open_id_store = adapter.bot_open_id.clone();
@@ -955,6 +956,7 @@ pub async fn start_websocket(
                 &bot_turns,
                 &participated_threads,
                 &multibot_threads,
+                store_all_files,
             )
             .await;
 
@@ -998,6 +1000,7 @@ async fn ws_connect_loop(
     bot_turns: &Arc<parking_lot::Mutex<HashMap<String, u32>>>,
     participated_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
     multibot_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
+    store_all_files: bool,
 ) -> anyhow::Result<()> {
     let api_base = config.api_base();
 
@@ -1026,6 +1029,7 @@ async fn ws_connect_loop(
                         handle_ws_message(
                             &text, bot_open_id_store, dedupe, config, event_tx,
                             name_cache, token_cache, client, bot_turns, participated_threads, multibot_threads,
+                            store_all_files,
                         ).await;
                     }
                     Some(Ok(tokio_tungstenite::tungstenite::Message::Ping(data))) => {
@@ -1047,6 +1051,7 @@ async fn ws_connect_loop(
                                             handle_ws_message(
                                                 &text, bot_open_id_store, dedupe, config, event_tx,
                                                 name_cache, token_cache, client, bot_turns, participated_threads, multibot_threads,
+                                                store_all_files,
                                             ).await;
                                         }
                                     }
@@ -1089,6 +1094,7 @@ async fn handle_ws_message(
     bot_turns: &Arc<parking_lot::Mutex<HashMap<String, u32>>>,
     participated_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
     multibot_threads: &Arc<parking_lot::Mutex<HashMap<String, Instant>>>,
+    store_all_files: bool,
 ) {
     let envelope: FeishuEventEnvelope = match serde_json::from_str(text) {
         Ok(e) => e,
@@ -1180,7 +1186,7 @@ async fn handle_ws_message(
                             download_feishu_image(client, &api_base, &token, message_id, image_key).await
                         }
                         MediaRef::File { message_id, file_key, file_name } => {
-                            download_feishu_file(client, &api_base, &token, message_id, file_key, file_name).await
+                            download_feishu_file(client, &api_base, &token, message_id, file_key, file_name, store_all_files).await
                         }
                         MediaRef::Audio { message_id, file_key } => {
                             download_feishu_audio(client, &api_base, &token, message_id, file_key).await
@@ -1937,6 +1943,7 @@ pub async fn download_feishu_file(
     message_id: &str,
     file_key: &str,
     file_name: &str,
+    store_all_files: bool,
 ) -> crate::schema::Attachment {
     // Only download text-like files
     let ext = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -1945,7 +1952,7 @@ pub async fn download_feishu_file(
         "rs", "py", "js", "ts", "jsx", "tsx", "go", "java", "c", "cpp", "h", "hpp",
         "rb", "sh", "bash", "sql", "html", "css", "ini", "cfg", "conf", "env",
     ];
-    if !TEXT_EXTS.contains(&ext.as_str()) {
+    if !store_all_files && !TEXT_EXTS.contains(&ext.as_str()) {
         tracing::debug!(file_name, "skipping non-text file attachment");
         return crate::schema::Attachment::rejected(
             "text_file",
@@ -3448,7 +3455,7 @@ pub async fn webhook(
                                 download_feishu_image(&feishu.client, &api_base, &token, message_id, image_key).await
                             }
                             MediaRef::File { message_id, file_key, file_name } => {
-                                download_feishu_file(&feishu.client, &api_base, &token, message_id, file_key, file_name).await
+                                download_feishu_file(&feishu.client, &api_base, &token, message_id, file_key, file_name, state.store_all_files).await
                             }
                             MediaRef::Audio { message_id, file_key } => {
                                 download_feishu_audio(&feishu.client, &api_base, &token, message_id, file_key).await
@@ -4700,6 +4707,7 @@ mod tests {
             "msg_id",
             "file_key",
             "report.pdf",
+            false,
         )
         .await;
         assert!(att.status.is_some(), "non-text extension must have status set");

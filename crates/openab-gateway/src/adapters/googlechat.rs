@@ -620,6 +620,7 @@ pub async fn webhook(
                                 resource_name,
                                 content_name,
                                 remaining,
+                                state.store_all_files,
                             )
                             .await;
                             if att.status.is_none() {
@@ -1351,9 +1352,10 @@ pub async fn download_googlechat_file(
     resource_name: &str,
     content_name: &str,
     remaining_budget: u64,
+    store_all_files: bool,
 ) -> crate::schema::Attachment {
     let ext = content_name.rsplit('.').next().unwrap_or("").to_lowercase();
-    if !TEXT_EXTS.contains(&ext.as_str()) {
+    if !store_all_files && !TEXT_EXTS.contains(&ext.as_str()) {
         tracing::debug!(content_name, "skipping non-text googlechat file attachment");
         return crate::schema::Attachment::rejected(
             "text_file",
@@ -2509,6 +2511,7 @@ mod tests {
             "AATT",
             "binary.exe",
             TEXT_TOTAL_CAP,
+            false,
         )
         .await;
         let att = result;
@@ -2539,6 +2542,7 @@ mod tests {
             "AATT",
             "notes.txt",
             TEXT_TOTAL_CAP,
+            false,
         )
         .await;
         let att = result;

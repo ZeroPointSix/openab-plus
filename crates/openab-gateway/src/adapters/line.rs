@@ -160,6 +160,7 @@ async fn process_line_webhook_events(
             &state.client,
             state.line_access_token.as_deref(),
             LINE_DATA_API_BASE,
+            state.store_all_files,
         )
         .await
         else {
@@ -206,6 +207,7 @@ async fn build_gateway_event_from_line_event(
     client: &reqwest::Client,
     line_access_token: Option<&str>,
     data_api_base: &str,
+    store_all_files: bool,
 ) -> Option<GatewayEvent> {
     if event.event_type != "message" {
         return None;
@@ -231,20 +233,31 @@ async fn build_gateway_event_from_line_event(
                     .as_ref()
                     .and_then(|provider| provider.original_content_url.as_deref())
                     .unwrap_or("unknown");
-                warn!(
-                    message_id = %msg.id,
-                    external_content_host = %sanitize_line_external_url_for_log(original),
-                    "LINE external image content is not supported yet"
-                );
-                attachments.push(Attachment {
-                    attachment_type: "image".into(),
-                    filename: format!("line_{}.jpg", msg.id),
-                    mime_type: "image/jpeg".into(),
-                    data: String::new(),
-                    size: 0,
-                    path: None,
-                    status: Some("unsupported format: external content not supported".into()),
-                });
+                if !store_all_files {
+                    warn!(
+                        message_id = %msg.id,
+                        external_content_host = %sanitize_line_external_url_for_log(original),
+                        "LINE external image content is not supported yet"
+                    );
+                    attachments.push(Attachment {
+                        attachment_type: "image".into(),
+                        filename: format!("line_{}.jpg", msg.id),
+                        mime_type: "image/jpeg".into(),
+                        data: String::new(),
+                        size: 0,
+                        path: None,
+                        status: Some("unsupported format: external content not supported".into()),
+                    });
+                } else {
+                    info!(
+                        message_id = %msg.id,
+                        external_content_host = %sanitize_line_external_url_for_log(original),
+                        "LINE external image: store_all_files enabled, downloading"
+                    );
+                    attachments.push(
+                        download_line_external_content(client, original, &format!("line_{}.jpg", msg.id), "image/jpeg", "image").await,
+                    );
+                }
             }
             _ => {
                 if let Some(access_token) = line_access_token {
@@ -279,20 +292,31 @@ async fn build_gateway_event_from_line_event(
                     .as_ref()
                     .and_then(|provider| provider.original_content_url.as_deref())
                     .unwrap_or("unknown");
-                warn!(
-                    message_id = %msg.id,
-                    external_content_host = %sanitize_line_external_url_for_log(original),
-                    "LINE external audio content is not supported yet"
-                );
-                attachments.push(Attachment {
-                    attachment_type: "audio".into(),
-                    filename: format!("line_{}.audio", msg.id),
-                    mime_type: "audio/ogg".into(),
-                    data: String::new(),
-                    size: 0,
-                    path: None,
-                    status: Some("unsupported format: external content not supported".into()),
-                });
+                if !store_all_files {
+                    warn!(
+                        message_id = %msg.id,
+                        external_content_host = %sanitize_line_external_url_for_log(original),
+                        "LINE external audio content is not supported yet"
+                    );
+                    attachments.push(Attachment {
+                        attachment_type: "audio".into(),
+                        filename: format!("line_{}.audio", msg.id),
+                        mime_type: "audio/ogg".into(),
+                        data: String::new(),
+                        size: 0,
+                        path: None,
+                        status: Some("unsupported format: external content not supported".into()),
+                    });
+                } else {
+                    info!(
+                        message_id = %msg.id,
+                        external_content_host = %sanitize_line_external_url_for_log(original),
+                        "LINE external audio: store_all_files enabled, downloading"
+                    );
+                    attachments.push(
+                        download_line_external_content(client, original, &format!("line_{}.audio", msg.id), "audio/ogg", "audio").await,
+                    );
+                }
             }
             _ => {
                 if let Some(access_token) = line_access_token {
@@ -396,6 +420,58 @@ async fn build_gateway_event_from_line_event(
     );
     gateway_event.content.attachments = attachments;
     Some(gateway_event)
+}
+
+/// Download external content (image/audio) from an external URL when store_all_files is enabled.
+async fn download_line_external_content(
+    client: &reqwest::Client,
+    url: &str,
+    filename: &str,
+    mime_type: &str,
+    attachment_type: &str,
+) -> Attachment {
+    let rejected = |size: u64, reason: String| Attachment {
+        attachment_type: attachment_type.to_string(),
+        filename: filename.to_string(),
+        mime_type: mime_type.to_string(),
+        data: String::new(),
+        size,
+        path: None,
+        status: Some(reason),
+    };
+
+    let resp = match client.get(url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(url, error = %e, "LINE external content download failed");
+            return rejected(0, "download failed: network error".into());
+        }
+    };
+
+    if !resp.status().is_success() {
+        warn!(url, status = %resp.status(), "LINE external content download non-2xx");
+        return rejected(0, format!("download failed: HTTP {}", resp.status()));
+    }
+
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(url, error = %e, "LINE external content body read failed");
+            return rejected(0, "download failed: body read error".into());
+        }
+    };
+
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Attachment {
+        attachment_type: attachment_type.to_string(),
+        filename: filename.to_string(),
+        mime_type: mime_type.to_string(),
+        data: encoded,
+        size: bytes.len() as u64,
+        path: None,
+        status: None,
+    }
 }
 
 pub async fn download_line_image(
@@ -829,6 +905,7 @@ mod tests {
             &reqwest::Client::new(),
             Some("line_token"),
             &server.uri(),
+            false,
         )
         .await
         .expect("image event should produce a gateway event");
@@ -879,6 +956,7 @@ mod tests {
             &reqwest::Client::new(),
             Some("line_token"),
             &server.uri(),
+            false,
         )
         .await
         .expect("audio event should produce a gateway event");
@@ -934,6 +1012,7 @@ mod tests {
             &reqwest::Client::new(),
             Some("line_token"),
             &server.uri(),
+            false,
         )
         .await
         .expect("audio event should produce a gateway event");
@@ -1047,6 +1126,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
 
@@ -1083,6 +1163,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
 
@@ -1117,6 +1198,7 @@ mod tests {
             &reqwest::Client::new(),
             None, // no access token
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
 
@@ -1146,6 +1228,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
 
@@ -1227,6 +1310,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
         assert!(result.is_some());
@@ -1242,6 +1326,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
         assert!(result.is_none());
@@ -1260,6 +1345,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
         assert!(result.is_none());
@@ -1278,6 +1364,7 @@ mod tests {
             &reqwest::Client::new(),
             None,
             LINE_DATA_API_BASE,
+            false,
         )
         .await;
         assert!(result.is_some());
