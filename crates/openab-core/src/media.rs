@@ -553,6 +553,21 @@ async fn download_text_file_inner(
         tracing::warn!(url, status = %resp.status(), "text file download failed");
         return None;
     }
+
+    // Mitigation for underreported size: if Content-Length reveals the file
+    // is much larger than the inline limit, avoid buffering a huge file.
+    if let Some(fs) = filestore {
+        if let Some(content_length) = resp.content_length() {
+            if content_length > fs.max_file_size() {
+                tracing::warn!(
+                    url,
+                    content_length,
+                    "Content-Length exceeds filestore max in inline path, skipping"
+                );
+                return None;
+            }
+        }
+    }
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
