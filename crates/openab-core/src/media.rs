@@ -656,7 +656,12 @@ async fn download_text_file_inner(
     ))
 }
 
-/// Download an oversized file and upload it to the filestore, returning a hint block.
+/// Download an oversized file and upload it to the filestore using streaming
+/// multipart upload, returning a hint block.
+///
+/// Instead of buffering the entire file in memory, this streams download chunks
+/// directly to S3 multipart upload parts (~16 MB each), keeping memory usage
+/// bounded regardless of file size.
 #[cfg(feature = "filestore")]
 async fn download_and_upload_to_filestore(
     url: &str,
@@ -672,8 +677,7 @@ async fn download_and_upload_to_filestore(
         return None;
     }
 
-    // 3-minute timeout for the entire download (connect + transfer).
-    // Large files on slow connections should not block the message pipeline indefinitely.
+    // 3-minute timeout for establishing the download connection.
     const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
     let mut req = HTTP_CLIENT.get(url).timeout(DOWNLOAD_TIMEOUT);
@@ -692,27 +696,49 @@ async fn download_and_upload_to_filestore(
         tracing::warn!(url, status = %resp.status(), "text file download failed (filestore path)");
         return None;
     }
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(url, error = %e, "text file body read failed (filestore path)");
-            return None;
+
+    // Stream directly to S3 multipart upload (5-minute total timeout for streaming)
+    const STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    let stream = Box::pin(resp.bytes_stream());
+
+    let upload_result = tokio::time::timeout(
+        STREAM_TIMEOUT,
+        filestore.stream_upload_and_presign(filename, stream, size),
+    )
+    .await;
+
+    match upload_result {
+        Ok(Ok((presigned_url, actual_bytes))) => {
+            let hint = crate::filestore::format_filestore_hint(
+                filename,
+                actual_bytes,
+                &presigned_url,
+                filestore.presigned_ttl_secs(),
+            );
+            tracing::info!(filename, size = actual_bytes, "text file streamed to filestore");
+            Some((ContentBlock::Text { text: hint }, 0))
         }
-    };
-
-    // Defense-in-depth: verify actual download size (platform may underreport)
-    if bytes.len() as u64 > max_size {
-        tracing::warn!(
-            filename,
-            reported = size,
-            actual = bytes.len(),
-            max = max_size,
-            "downloaded text file exceeds filestore size limit, skipping"
-        );
-        return None;
+        Ok(Err(e)) => {
+            tracing::error!(filename, error = %e, "filestore stream upload failed");
+            let size_kb = size / 1024;
+            let hint = format!(
+                "[File: {filename}]\n\
+                 This file ({size_kb} KB) could not be uploaded to temporary storage \
+                 (upload failed). The file content is unavailable."
+            );
+            Some((ContentBlock::Text { text: hint }, 0))
+        }
+        Err(_) => {
+            tracing::error!(filename, "filestore stream upload timed out (300s)");
+            let size_kb = size / 1024;
+            let hint = format!(
+                "[File: {filename}]\n\
+                 This file ({size_kb} KB) could not be uploaded to temporary storage \
+                 (upload timed out). The file content is unavailable."
+            );
+            Some((ContentBlock::Text { text: hint }, 0))
+        }
     }
-
-    upload_bytes_to_filestore(filename, &bytes, filestore).await
 }
 
 /// Upload already-downloaded bytes to the filestore and return the hint block.

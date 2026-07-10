@@ -158,6 +158,248 @@ impl Filestore {
         Ok(presigned.uri().to_string())
     }
 
+    /// Upload a file to S3 using multipart upload (streaming) and return a presigned GET URL.
+    ///
+    /// This method streams data in chunks to minimize memory usage.
+    /// Each part is ~16 MB. Total file size is checked against max_file_size.
+    /// Returns `(presigned_url, actual_bytes_uploaded)`.
+    pub async fn stream_upload_and_presign(
+        &self,
+        filename: &str,
+        mut stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin,
+        reported_size: u64,
+    ) -> anyhow::Result<(String, u64)> {
+        use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+        use futures_util::StreamExt;
+
+        // Sanitize filename (same logic as upload_and_presign)
+        let safe_name: String = filename
+            .replace(['/', '\\', '\0'], "_")
+            .replace("..", "_")
+            .chars()
+            .filter(|c| c.is_ascii_graphic() || *c == ' ')
+            .take(200)
+            .collect();
+        let safe_name = if safe_name.is_empty() {
+            "unnamed"
+        } else {
+            &safe_name
+        };
+        let key = format!("{}{}_{}",self.prefix, uuid::Uuid::new_v4(), safe_name);
+
+        // Pre-check reported size
+        if reported_size > self.max_file_size {
+            return Err(anyhow::anyhow!(
+                "reported file size ({reported_size}) exceeds max ({})",
+                self.max_file_size
+            ));
+        }
+
+        // Initiate multipart upload
+        let create_resp = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&key)
+            .content_type("text/plain; charset=utf-8")
+            .send()
+            .await
+            .map_err(|e| {
+                error!(bucket = %self.bucket, key = %key, error = %e, "create_multipart_upload failed");
+                anyhow::anyhow!("create_multipart_upload failed: {e}")
+            })?;
+
+        let upload_id = create_resp
+            .upload_id()
+            .ok_or_else(|| anyhow::anyhow!("create_multipart_upload returned no upload_id"))?
+            .to_string();
+
+        // Stream in 16 MB chunks
+        const PART_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+        let mut buffer = Vec::with_capacity(PART_SIZE);
+        let mut total_bytes: u64 = 0;
+        let mut parts: Vec<CompletedPart> = Vec::new();
+        let mut part_number: i32 = 1;
+        let mut upload_error: Option<anyhow::Error> = None;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(e) => {
+                    upload_error = Some(anyhow::anyhow!("stream read error: {e}"));
+                    break;
+                }
+            };
+            total_bytes += chunk.len() as u64;
+
+            if total_bytes > self.max_file_size {
+                upload_error = Some(anyhow::anyhow!(
+                    "file exceeds max size ({} > {})",
+                    total_bytes,
+                    self.max_file_size
+                ));
+                break;
+            }
+
+            buffer.extend_from_slice(&chunk);
+
+            if buffer.len() >= PART_SIZE {
+                let part_data: Vec<u8> = buffer.drain(..).collect();
+                match self
+                    .client
+                    .upload_part()
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .upload_id(&upload_id)
+                    .part_number(part_number)
+                    .body(aws_sdk_s3::primitives::ByteStream::from(part_data))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => {
+                        parts.push(
+                            CompletedPart::builder()
+                                .part_number(part_number)
+                                .e_tag(resp.e_tag.unwrap_or_default())
+                                .build(),
+                        );
+                        part_number += 1;
+                    }
+                    Err(e) => {
+                        upload_error = Some(anyhow::anyhow!("upload_part {part_number} failed: {e}"));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Upload remaining buffer as the final part (if no error so far)
+        if upload_error.is_none() && !buffer.is_empty() {
+            match self
+                .client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .part_number(part_number)
+                .body(aws_sdk_s3::primitives::ByteStream::from(buffer))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    parts.push(
+                        CompletedPart::builder()
+                            .part_number(part_number)
+                            .e_tag(resp.e_tag.unwrap_or_default())
+                            .build(),
+                    );
+                }
+                Err(e) => {
+                    upload_error = Some(anyhow::anyhow!("upload_part {part_number} (final) failed: {e}"));
+                }
+            }
+        }
+
+        // On error, abort the multipart upload to clean up
+        if let Some(e) = upload_error {
+            error!(
+                bucket = %self.bucket,
+                key = %key,
+                upload_id = %upload_id,
+                error = %e,
+                "streaming upload failed, aborting multipart upload"
+            );
+            if let Err(abort_err) = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await
+            {
+                error!(
+                    bucket = %self.bucket,
+                    key = %key,
+                    upload_id = %upload_id,
+                    error = %abort_err,
+                    "abort_multipart_upload also failed"
+                );
+            }
+            return Err(e);
+        }
+
+        // Edge case: empty file (no parts uploaded). S3 requires at least one part.
+        if parts.is_empty() {
+            // Upload an empty part
+            let resp = self
+                .client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .part_number(1)
+                .body(aws_sdk_s3::primitives::ByteStream::from(Vec::new()))
+                .send()
+                .await
+                .map_err(|e| {
+                    error!(bucket = %self.bucket, key = %key, error = %e, "upload empty part failed");
+                    anyhow::anyhow!("upload empty part failed: {e}")
+                })?;
+
+            parts.push(
+                CompletedPart::builder()
+                    .part_number(1)
+                    .e_tag(resp.e_tag.unwrap_or_default())
+                    .build(),
+            );
+        }
+
+        // Complete multipart upload
+        let completed_upload = CompletedMultipartUpload::builder()
+            .set_parts(Some(parts))
+            .build();
+
+        self.client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&key)
+            .upload_id(&upload_id)
+            .multipart_upload(completed_upload)
+            .send()
+            .await
+            .map_err(|e| {
+                error!(bucket = %self.bucket, key = %key, error = %e, "complete_multipart_upload failed");
+                anyhow::anyhow!("complete_multipart_upload failed: {e}")
+            })?;
+
+        info!(
+            bucket = %self.bucket,
+            key = %key,
+            size = total_bytes,
+            "filestore streaming upload complete"
+        );
+
+        // Generate presigned GET URL
+        let presigning_config =
+            aws_sdk_s3::presigning::PresigningConfig::expires_in(self.presigned_ttl)
+                .map_err(|e| anyhow::anyhow!("presigning config error: {e}"))?;
+
+        let presigned = self
+            .client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .presigned(presigning_config)
+            .await
+            .map_err(|e| {
+                error!(bucket = %self.bucket, key = %key, error = %e, "presigned URL generation failed");
+                anyhow::anyhow!("presigned URL generation failed: {e}")
+            })?;
+
+        Ok((presigned.uri().to_string(), total_bytes))
+    }
+
     /// Return the configured presigned TTL in seconds.
     pub fn presigned_ttl_secs(&self) -> u64 {
         self.presigned_ttl.as_secs()

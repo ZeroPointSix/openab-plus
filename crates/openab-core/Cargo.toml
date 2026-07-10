@@ -21,7 +21,8 @@ futures-util = "0.3"
 rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking", "stream"] }
+bytes = "1"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 unicode-width = "0.2"
