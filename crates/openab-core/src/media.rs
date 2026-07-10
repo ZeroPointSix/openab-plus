@@ -530,10 +530,10 @@ async fn download_text_file_inner(
 ) -> Option<(ContentBlock, u64)> {
     const MAX_SIZE: u64 = 512 * 1024;
 
-    // Use extended timeout when filestore is available — the defense-in-depth
-    // path may encounter files larger than expected (size=0 or underreported).
+    // Use extended timeout when filestore is available — Content-Length > 512KB
+    // may trigger streaming upload which needs the full 10-minute window.
     let timeout = if filestore.is_some() {
-        std::time::Duration::from_secs(180)
+        std::time::Duration::from_secs(600)
     } else {
         std::time::Duration::from_secs(30)
     };
@@ -802,7 +802,7 @@ async fn download_and_upload_to_filestore(
             Some((ContentBlock::Text { text: hint }, 0))
         }
         Err(_) => {
-            tracing::error!(filename, "filestore stream upload timed out (300s)");
+            tracing::error!(filename, "filestore stream upload timed out (600s)");
             let size_kb = size / 1024;
             let hint = format!(
                 "[File: {filename}]\n\
