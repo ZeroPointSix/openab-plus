@@ -39,6 +39,7 @@ secrets-aws = ["openab-core/secrets-aws"]
 agentcore = ["openab-core/agentcore"]
 config-s3 = ["openab-core/config-s3"]
 pre-seed = ["openab-core/pre-seed"]
+filestore = ["openab-core/filestore"]
 
 # Gateway adapters (each pulls in the gateway crate + axum for embedded server)
 telegram = ["dep:openab-gateway", "dep:axum", "openab-gateway/telegram"]

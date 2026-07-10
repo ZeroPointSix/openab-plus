@@ -729,6 +729,7 @@ pub async fn run_slack_adapter(
     stt_config: SttConfig,
     mut shutdown_rx: watch::Receiver<bool>,
     dispatcher: Arc<crate::dispatch::Dispatcher>,
+    #[cfg(feature = "filestore")] filestore: Option<Arc<crate::filestore::Filestore>>,
 ) -> Result<()> {
     let bot_token = adapter.bot_token().to_string();
     let bot_turns = Arc::new(tokio::sync::Mutex::new(BotTurnTracker::new(max_bot_turns)));
@@ -838,6 +839,8 @@ pub async fn run_slack_adapter(
                                                 let allowed_users = allowed_users.clone();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
+                                                #[cfg(feature = "filestore")]
+                                                let filestore = filestore.clone();
                                                 let team_id = envelope["payload"]["team_id"]
                                                     .as_str()
                                                     .unwrap_or("")
@@ -854,6 +857,8 @@ pub async fn run_slack_adapter(
                                                         &allowed_users,
                                                         &stt_config,
                                                         &dispatcher,
+                                                        #[cfg(feature = "filestore")]
+                                                        filestore.as_deref(),
                                                     )
                                                     .await;
                                                 });
@@ -1089,6 +1094,8 @@ pub async fn run_slack_adapter(
                                                 let allowed_users = allowed_users.clone();
                                                 let stt_config = stt_config.clone();
                                                 let dispatcher = dispatcher.clone();
+                                                #[cfg(feature = "filestore")]
+                                                let filestore = filestore.clone();
                                                 tokio::spawn(async move {
                                                     handle_message(
                                                         &event,
@@ -1101,6 +1108,8 @@ pub async fn run_slack_adapter(
                                                         &allowed_users,
                                                         &stt_config,
                                                         &dispatcher,
+                                                        #[cfg(feature = "filestore")]
+                                                        filestore.as_deref(),
                                                     )
                                                     .await;
                                                 });
@@ -1193,6 +1202,7 @@ async fn handle_message(
     allowed_users: &HashSet<String>,
     stt_config: &SttConfig,
     dispatcher: &Arc<crate::dispatch::Dispatcher>,
+    #[cfg(feature = "filestore")] filestore: Option<&crate::filestore::Filestore>,
 ) {
     let channel_id = match event["channel"].as_str() {
         Some(ch) => ch.to_string(),
@@ -1348,7 +1358,13 @@ async fn handle_message(
                 // externally-backed files, so this is advisory only — the
                 // authoritative cap check happens after download using
                 // `actual_bytes`.
-                if size > 0 && text_file_bytes + size > TEXT_TOTAL_CAP {
+                // When filestore is configured, skip the cap for files > 512KB (they'll
+                // be uploaded to S3, not inlined).
+                #[cfg(feature = "filestore")]
+                let skip_cap = filestore.is_some() && size > 512 * 1024;
+                #[cfg(not(feature = "filestore"))]
+                let skip_cap = false;
+                if !skip_cap && size > 0 && text_file_bytes + size > TEXT_TOTAL_CAP {
                     debug!(
                         filename,
                         total = text_file_bytes,
@@ -1356,9 +1372,22 @@ async fn handle_message(
                     );
                     continue;
                 }
-                if let Some((block, actual_bytes)) =
-                    media::download_and_read_text_file(url, filename, size, Some(bot_token)).await
-                {
+                #[cfg(feature = "filestore")]
+                let text_file_result = media::download_and_read_text_file(
+                    url,
+                    filename,
+                    size,
+                    Some(bot_token),
+                    filestore,
+                ).await;
+                #[cfg(not(feature = "filestore"))]
+                let text_file_result = media::download_and_read_text_file(
+                    url,
+                    filename,
+                    size,
+                    Some(bot_token),
+                ).await;
+                if let Some((block, actual_bytes)) = text_file_result {
                     if text_file_bytes + actual_bytes > TEXT_TOTAL_CAP {
                         debug!(
                             filename,

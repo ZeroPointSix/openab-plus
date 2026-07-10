@@ -124,6 +124,39 @@ fn default_agentcore_cancel_strategy() -> AgentCoreCancelStrategy {
     AgentCoreCancelStrategy::Stop
 }
 
+/// Configuration for the S3/R2-compatible object store used to upload large
+/// text file attachments (>512 KB) and return presigned GET URLs.
+#[derive(Debug, Clone, Deserialize)]
+#[cfg(feature = "filestore")]
+pub struct FilestoreConfig {
+    /// S3 bucket name.
+    pub bucket: String,
+    /// AWS region (e.g. "us-west-2").
+    pub region: String,
+    /// Optional custom endpoint URL (for Cloudflare R2 or MinIO).
+    pub endpoint: Option<String>,
+    /// Object key prefix. Default: "incoming/".
+    #[serde(default = "default_filestore_prefix")]
+    pub prefix: String,
+    /// Presigned URL TTL in seconds. Default: 3600 (1 hour).
+    #[serde(default = "default_filestore_presigned_ttl")]
+    pub presigned_ttl: u64,
+    /// Optional access key ID (falls back to AWS provider chain if unset).
+    pub access_key_id: Option<String>,
+    /// Optional secret access key (falls back to AWS provider chain if unset).
+    pub secret_access_key: Option<String>,
+}
+
+#[cfg(feature = "filestore")]
+fn default_filestore_prefix() -> String {
+    "incoming/".to_string()
+}
+
+#[cfg(feature = "filestore")]
+fn default_filestore_presigned_ttl() -> u64 {
+    3600
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub discord: Option<DiscordConfig>,
@@ -151,6 +184,9 @@ pub struct Config {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub ambient: AmbientConfig,
+    /// Optional filestore configuration for uploading large text attachments.
+    #[cfg(feature = "filestore")]
+    pub filestore: Option<FilestoreConfig>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

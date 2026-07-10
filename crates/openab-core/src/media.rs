@@ -465,9 +465,44 @@ pub fn is_text_file(filename: &str, content_type: Option<&str>) -> bool {
 ///
 /// Pass `auth_token` for platforms that require authentication (e.g. Slack private files).
 ///
+/// When a `filestore` is provided and the file exceeds 512 KB, the file is
+/// uploaded to the object store and a hint block with a presigned URL is
+/// returned instead of the file contents.
+///
 /// Note: the caller already guards total size via a total cap; the per-file
 /// MAX_SIZE check here is intentional defense-in-depth so this function remains
 /// self-contained and safe when called from other contexts.
+#[cfg(feature = "filestore")]
+pub async fn download_and_read_text_file(
+    url: &str,
+    filename: &str,
+    size: u64,
+    auth_token: Option<&str>,
+    filestore: Option<&crate::filestore::Filestore>,
+) -> Option<(ContentBlock, u64)> {
+    const MAX_SIZE: u64 = 512 * 1024; // 512 KB
+
+    if size > MAX_SIZE {
+        // When filestore is available, download the oversized file and upload it.
+        if let Some(fs) = filestore {
+            return download_and_upload_to_filestore(url, filename, size, auth_token, fs).await;
+        }
+        tracing::warn!(filename, size, "text file exceeds 512KB limit, skipping");
+        return None;
+    }
+
+    download_text_file_inner(url, filename, size, auth_token, filestore).await
+}
+
+/// Download a text-based file and return it as a ContentBlock::Text.
+/// Files larger than 512 KB are skipped to avoid bloating the prompt.
+///
+/// Pass `auth_token` for platforms that require authentication (e.g. Slack private files).
+///
+/// Note: the caller already guards total size via a total cap; the per-file
+/// MAX_SIZE check here is intentional defense-in-depth so this function remains
+/// self-contained and safe when called from other contexts.
+#[cfg(not(feature = "filestore"))]
 pub async fn download_and_read_text_file(
     url: &str,
     filename: &str,
@@ -480,6 +515,86 @@ pub async fn download_and_read_text_file(
         tracing::warn!(filename, size, "text file exceeds 512KB limit, skipping");
         return None;
     }
+
+    download_text_file_inner(url, filename, auth_token).await
+}
+
+/// Shared implementation for downloading text files that are within the size limit.
+#[cfg(feature = "filestore")]
+async fn download_text_file_inner(
+    url: &str,
+    filename: &str,
+    _size: u64,
+    auth_token: Option<&str>,
+    filestore: Option<&crate::filestore::Filestore>,
+) -> Option<(ContentBlock, u64)> {
+    const MAX_SIZE: u64 = 512 * 1024;
+
+    let mut req = HTTP_CLIENT.get(url);
+    if let Some(token) = auth_token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "text file download failed");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(url, status = %resp.status(), "text file download failed");
+        return None;
+    }
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "text file body read failed");
+            return None;
+        }
+    };
+    let actual_size = bytes.len() as u64;
+
+    // Defense-in-depth: verify actual download size
+    if actual_size > MAX_SIZE {
+        // When filestore is available, upload the oversized download.
+        if let Some(fs) = filestore {
+            return upload_bytes_to_filestore(filename, &bytes, fs).await;
+        }
+        tracing::warn!(
+            filename,
+            size = actual_size,
+            "downloaded text file exceeds 512KB limit, skipping"
+        );
+        return None;
+    }
+
+    // from_utf8_lossy returns Cow::Borrowed for valid UTF-8 (zero-copy)
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+
+    // Dynamic fence: keep adding backticks until the fence doesn't appear in content
+    let mut fence = "```".to_string();
+    while text.contains(fence.as_str()) {
+        fence.push('`');
+    }
+
+    debug!(filename, bytes = text.len(), "text file inlined");
+    Some((
+        ContentBlock::Text {
+            text: format!("[File: {filename}]\n{fence}\n{text}\n{fence}"),
+        },
+        actual_size,
+    ))
+}
+
+/// Shared implementation for downloading text files that are within the size limit.
+#[cfg(not(feature = "filestore"))]
+async fn download_text_file_inner(
+    url: &str,
+    filename: &str,
+    auth_token: Option<&str>,
+) -> Option<(ContentBlock, u64)> {
+    const MAX_SIZE: u64 = 512 * 1024;
 
     let mut req = HTTP_CLIENT.get(url);
     if let Some(token) = auth_token {
@@ -532,6 +647,78 @@ pub async fn download_and_read_text_file(
         },
         actual_size,
     ))
+}
+
+/// Download an oversized file and upload it to the filestore, returning a hint block.
+#[cfg(feature = "filestore")]
+async fn download_and_upload_to_filestore(
+    url: &str,
+    filename: &str,
+    size: u64,
+    auth_token: Option<&str>,
+    filestore: &crate::filestore::Filestore,
+) -> Option<(ContentBlock, u64)> {
+    // Cap at 50 MB to prevent abuse even when uploading to S3.
+    const FILESTORE_MAX_SIZE: u64 = 50 * 1024 * 1024;
+    if size > FILESTORE_MAX_SIZE {
+        tracing::warn!(filename, size, "text file exceeds 50MB filestore limit, skipping");
+        return None;
+    }
+
+    let mut req = HTTP_CLIENT.get(url);
+    if let Some(token) = auth_token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "text file download failed (filestore path)");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        tracing::warn!(url, status = %resp.status(), "text file download failed (filestore path)");
+        return None;
+    }
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(url, error = %e, "text file body read failed (filestore path)");
+            return None;
+        }
+    };
+
+    upload_bytes_to_filestore(filename, &bytes, filestore).await
+}
+
+/// Upload already-downloaded bytes to the filestore and return the hint block.
+#[cfg(feature = "filestore")]
+async fn upload_bytes_to_filestore(
+    filename: &str,
+    bytes: &[u8],
+    filestore: &crate::filestore::Filestore,
+) -> Option<(ContentBlock, u64)> {
+    let actual_size = bytes.len() as u64;
+    match filestore.upload_and_presign(filename, bytes).await {
+        Ok(presigned_url) => {
+            let hint = crate::filestore::format_filestore_hint(
+                filename,
+                actual_size,
+                &presigned_url,
+                filestore.presigned_ttl_secs(),
+            );
+            tracing::info!(filename, size = actual_size, "text file uploaded to filestore");
+            // Return 0 inline bytes — the file is stored externally, not inlined
+            // into the prompt. This prevents it from counting against the
+            // caller's aggregate size cap.
+            Some((ContentBlock::Text { text: hint }, 0))
+        }
+        Err(e) => {
+            tracing::warn!(filename, error = %e, "filestore upload failed, dropping file");
+            None
+        }
+    }
 }
 
 #[cfg(test)]

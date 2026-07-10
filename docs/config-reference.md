@@ -500,6 +500,74 @@ allow_bot_messages = true
 
 ---
 
+## `[filestore]`
+
+Optional S3/R2-compatible object store for handling large text file attachments.
+
+When configured, text files exceeding the 512 KB inline limit are uploaded to the
+object store and a presigned GET URL is returned to the agent. This eliminates
+the silent-drop behavior for large files and works with any agent that can perform
+HTTP GET (no platform auth tokens required).
+
+```toml
+[filestore]
+bucket = "my-oab-files"
+region = "us-west-2"
+# endpoint = "https://<account_id>.r2.cloudflarestorage.com"  # Cloudflare R2
+# endpoint = "http://localhost:9000"                           # MinIO
+prefix = "incoming/"       # object key prefix (default: "incoming/")
+presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
+# access_key_id = "${FILESTORE_ACCESS_KEY}"      # optional, falls back to AWS provider chain
+# secret_access_key = "${FILESTORE_SECRET_KEY}"  # optional, falls back to AWS provider chain
+```
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `bucket` | ✅ | — | S3 bucket name |
+| `region` | ✅ | — | AWS region (use `"auto"` for Cloudflare R2) |
+| `endpoint` | ❌ | AWS default | Custom S3-compatible endpoint URL (R2, MinIO, etc.) |
+| `prefix` | ❌ | `"incoming/"` | Object key prefix for uploaded files |
+| `presigned_ttl` | ❌ | `3600` | Presigned URL expiry in seconds |
+| `access_key_id` | ❌ | provider chain | Explicit access key (falls back to IRSA/env/config) |
+| `secret_access_key` | ❌ | provider chain | Explicit secret key |
+
+**Behavior when configured:**
+
+- Text files ≤ 512 KB: inlined into the prompt as before (unchanged)
+- Text files > 512 KB: downloaded by OAB, uploaded to S3/R2, presigned URL returned
+- The presigned URL requires no authentication — any HTTP GET works
+- File count cap (5 files) still applies
+- Aggregate 1 MB cap only applies to inlined files; filestore uploads bypass it
+
+**Behavior when NOT configured (default):**
+
+- Text files > 512 KB are silently dropped (existing behavior)
+
+**Supported backends:**
+
+- AWS S3
+- Cloudflare R2 (S3-compatible, zero egress fees)
+- MinIO
+- Any S3-compatible object store
+
+**Build requirement:** Requires the `filestore` feature flag (enabled by default in
+standard builds). When built without it, `[filestore]` config is ignored.
+
+**Minimum IAM policy:**
+
+```json
+{
+  "Effect": "Allow",
+  "Action": ["s3:PutObject", "s3:GetObject"],
+  "Resource": "arn:aws:s3:::my-oab-files/incoming/*"
+}
+```
+
+For Cloudflare R2, use the equivalent R2 API token with Object Read & Write
+permissions scoped to the bucket.
+
+---
+
 ## `[cron]`
 
 Everything cron-related lives under `[cron]`.
