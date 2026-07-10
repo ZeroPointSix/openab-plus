@@ -122,8 +122,8 @@ presigned_ttl = 7200
 | File size | Filestore configured | Result |
 |-----------|---------------------|--------|
 | ≤ 512 KB | any | Inlined into prompt (unchanged) |
-| > 512 KB, ≤ 50 MB | ✅ yes | Uploaded → presigned URL returned |
-| > 50 MB | ✅ yes | Dropped (defense-in-depth cap) |
+| > 512 KB, ≤ 500 MB | ✅ yes | Uploaded → presigned URL returned |
+| > 500 MB | ✅ yes | Dropped (defense-in-depth cap) |
 | > 512 KB | ❌ no | Silently dropped (legacy behavior) |
 
 ## What the Agent Sees
@@ -157,7 +157,7 @@ readability in S3 console but is not security-critical.
 
 ### Size Limits
 
-- Per-file cap: 50 MB (configurable in code, defense-in-depth)
+- Per-file cap: 500 MB (defense-in-depth)
 - File count cap: 5 text files per message (unchanged)
 - Aggregate inline cap: 1 MB for inlined files (filestore uploads bypass this)
 
@@ -205,7 +205,7 @@ For Cloudflare R2, set an equivalent object lifecycle rule in the dashboard.
 | S3 upload times out (>3 min) | Same as upload failure — degraded hint returned |
 | Download from platform fails | File is dropped (warn log), agent not notified |
 | Download times out (>3 min) | Same as download failure — file dropped |
-| File exceeds 50 MB | File is dropped (warn log) |
+| File exceeds 500 MB | File is dropped (warn log) |
 | Presigned URL generation fails | Agent receives degraded hint |
 | Filestore not configured | Legacy behavior (>512KB files silently dropped) |
 
@@ -215,10 +215,11 @@ the agent can inform the user, even if it cannot retrieve the content.
 
 ## Build Requirement
 
-The filestore feature requires the `filestore` Cargo feature flag:
+The filestore feature is **enabled by default** in standard builds. No extra
+flags needed. If you need to disable it:
 
 ```bash
-cargo build --features filestore
+cargo build --no-default-features --features "discord,slack,..."
 ```
 
 When built without it, the `[filestore]` config section is ignored and all
