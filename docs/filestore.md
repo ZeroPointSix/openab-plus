@@ -1,4 +1,4 @@
-# Filestore — S3/R2-Compatible Object Store for Large Attachments
+# Filestore — S3/R2-Compatible Object Store for File Attachments
 
 ## Problem
 

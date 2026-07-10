@@ -884,12 +884,24 @@ pub async fn download_and_upload_any_file(
     .await;
 
     let mime = content_type.unwrap_or("application/octet-stream");
+    // Sanitize filename and MIME for prompt safety — strip control characters,
+    // newlines, and other injection vectors before embedding in hint text.
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    let safe_mime: String = mime
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "/-+.;= ".contains(*c))
+        .take(100)
+        .collect();
     match upload_result {
         Ok(Ok((presigned_url, actual_bytes))) => {
             let size_kb = actual_bytes / 1024;
             let hint = format!(
-                "[File: {filename}]\n\
-                 Type: {mime}\n\
+                "[File: {safe_filename}]\n\
+                 Type: {safe_mime}\n\
                  Size: {size_kb} KB\n\
                  This file has been uploaded to temporary storage. \
                  Fetch the contents using the URL below:\n\
@@ -904,8 +916,8 @@ pub async fn download_and_upload_any_file(
             tracing::error!(filename, error = %e, "filestore upload failed (any-file path)");
             let size_kb = size / 1024;
             let hint = format!(
-                "[File: {filename}]\n\
-                 Type: {mime}\n\
+                "[File: {safe_filename}]\n\
+                 Type: {safe_mime}\n\
                  This file ({size_kb} KB) could not be uploaded to temporary storage. \
                  The file content is unavailable."
             );
@@ -914,8 +926,8 @@ pub async fn download_and_upload_any_file(
         Err(_) => {
             tracing::error!(filename, "filestore upload timed out (any-file path)");
             let hint = format!(
-                "[File: {filename}]\n\
-                 Type: {mime}\n\
+                "[File: {safe_filename}]\n\
+                 Type: {safe_mime}\n\
                  This file upload timed out. The file content is unavailable."
             );
             Some((ContentBlock::Text { text: hint }, 0))
