@@ -329,9 +329,25 @@ impl Filestore {
             return Err(e);
         }
 
-        // Edge case: empty file (no parts uploaded). S3 requires at least one part.
+        // Edge case: stream produced no data. This should not happen for files
+        // reported > 512 KB — it indicates a download failure or protocol error.
+        // R2 and MinIO reject 0-byte UploadPart, so treat this as an error.
+        if parts.is_empty() && total_bytes == 0 {
+            error!(bucket = %self.bucket, key = %key, "stream produced no data, aborting");
+            let _ = self
+                .client
+                .abort_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&key)
+                .upload_id(&upload_id)
+                .send()
+                .await;
+            return Err(anyhow::anyhow!("stream produced no data — file may be empty or download failed"));
+        }
+
+        // If buffer has remaining data but no parts yet (file < 16 MB), upload as single part
         if parts.is_empty() {
-            // Upload an empty part
+            let part_data = buffer;
             let resp = self
                 .client
                 .upload_part()
@@ -339,14 +355,13 @@ impl Filestore {
                 .key(&key)
                 .upload_id(&upload_id)
                 .part_number(1)
-                .body(aws_sdk_s3::primitives::ByteStream::from(Vec::new()))
+                .body(aws_sdk_s3::primitives::ByteStream::from(part_data))
                 .send()
                 .await
                 .map_err(|e| {
-                    error!(bucket = %self.bucket, key = %key, error = %e, "upload empty part failed");
-                    anyhow::anyhow!("upload empty part failed: {e}")
+                    error!(bucket = %self.bucket, key = %key, error = %e, "upload single part failed");
+                    anyhow::anyhow!("upload single part failed: {e}")
                 })?;
-
             parts.push(
                 CompletedPart::builder()
                     .part_number(1)
