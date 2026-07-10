@@ -27,14 +27,19 @@ impl Filestore {
         if let (Some(access_key), Some(secret_key)) =
             (&config.access_key_id, &config.secret_access_key)
         {
-            let creds = aws_sdk_s3::config::Credentials::new(
-                access_key.clone(),
-                secret_key.clone(),
-                None,
-                None,
-                "filestore-config",
-            );
-            sdk_config_loader = sdk_config_loader.credentials_provider(creds);
+            // Only use explicit credentials if non-empty. When env var expansion
+            // produces an empty string (e.g. ${UNSET_VAR} → ""), fall back to
+            // the standard AWS provider chain (IRSA, instance role, env, etc.).
+            if !access_key.is_empty() && !secret_key.is_empty() {
+                let creds = aws_sdk_s3::config::Credentials::new(
+                    access_key.clone(),
+                    secret_key.clone(),
+                    None,
+                    None,
+                    "filestore-config",
+                );
+                sdk_config_loader = sdk_config_loader.credentials_provider(creds);
+            }
         }
 
         let sdk_config = sdk_config_loader.load().await;

@@ -161,6 +161,11 @@ readability in S3 console but is not security-critical.
 OAB does not delete uploaded objects. Configure a lifecycle rule on your bucket
 to auto-expire objects after a reasonable period:
 
+> **Important:** Set your lifecycle expiry **longer** than `presigned_ttl`.
+> If objects are deleted before the presigned URL expires, agents will get 404
+> errors when fetching. Example: if `presigned_ttl = 3600` (1 hour), set
+> lifecycle expiry to at least 24 hours.
+
 ```json
 {
   "Rules": [{
