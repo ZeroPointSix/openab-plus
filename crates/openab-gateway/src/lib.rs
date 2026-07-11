@@ -47,10 +47,6 @@ pub struct AppState {
     pub reply_token_cache: ReplyTokenCache,
     pub line_webhook_semaphore: Arc<Semaphore>,
     pub client: reqwest::Client,
-    /// When true, download all file types (including unsupported formats)
-    /// instead of rejecting them. Set when filestore is configured so that
-    /// Core can upload them to S3/R2.
-    pub store_all_files: bool,
 }
 
 
@@ -87,7 +83,6 @@ impl AppState {
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
             client: reqwest::Client::new(),
-            store_all_files: false,
         }
     }
 
@@ -194,7 +189,6 @@ impl AppState {
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
             client,
-            store_all_files: false,
         }
     }
 
@@ -456,7 +450,6 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         reply_token_cache,
         line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
         client,
-        store_all_files: false,
     });
 
     // Background: sweep expired reply tokens
@@ -510,7 +503,6 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
                 feishu,
                 state.event_tx.clone(),
                 feishu_shutdown_rx,
-                state.store_all_files,
             )
             .await
             {

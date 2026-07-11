@@ -1047,7 +1047,6 @@ pub async fn webhook(
             &wecom.config.secret,
             &msg.media_id,
             &msg.file_name,
-            state.store_all_files,
         )
         .await;
         attachments.push(att);
@@ -1292,7 +1291,6 @@ async fn download_wecom_file(
     secret: &str,
     media_id: &str,
     filename: &str,
-    store_all_files: bool,
 ) -> crate::schema::Attachment {
     info!(filename, media_id, "wecom: downloading file");
     let resp = match fetch_media_with_retry(client, token_cache, corp_id, secret, media_id).await {
@@ -1357,7 +1355,7 @@ async fn download_wecom_file(
         );
     }
 
-    if !store_all_files && !is_text_file(filename) {
+    if !is_text_file(filename) {
         info!(filename, "wecom: skipping non-text file");
         let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
         return crate::schema::Attachment::rejected(

@@ -675,12 +675,6 @@ async fn main() -> anyhow::Result<()> {
             // Build gateway AppState from env vars (shared factory with standalone gateway)
             let mut gw_state_inner = openab_gateway::AppState::from_env(event_tx.clone(), None);
 
-            // When filestore is configured, tell gateway adapters to download
-            // all file types (including unsupported formats) so Core can upload them.
-            #[cfg(feature = "filestore")]
-            if filestore.is_some() {
-                gw_state_inner.store_all_files = true;
-            }
 
             // First-class `[telegram]` config overrides env-derived values
             // (config-authoritative + ${} expansion + TELEGRAM_* env fallback).

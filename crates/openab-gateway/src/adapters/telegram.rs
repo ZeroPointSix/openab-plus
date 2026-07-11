@@ -165,7 +165,7 @@ pub async fn webhook(
             } else if let Some(doc) = msg.document {
                 let file_name = doc.file_name.unwrap_or_else(|| "unknown.txt".to_string());
                 let mime_type = doc.mime_type.unwrap_or_else(|| "text/plain".to_string());
-                let att = download_telegram_document(client, token, &doc.file_id, &file_name, &mime_type, state.store_all_files).await;
+                let att = download_telegram_document(client, token, &doc.file_id, &file_name, &mime_type).await;
                 attachments.push(att);
             } else if let Some(voice) = msg.voice {
                 let att = download_telegram_media(client, token, &voice.file_id, MediaKind::Audio).await;
@@ -805,9 +805,8 @@ async fn download_telegram_document(
     file_id: &str,
     file_name: &str,
     mime_type: &str,
-    store_all_files: bool,
 ) -> Attachment {
-    if !store_all_files && !crate::media::is_text_extension(file_name) {
+    if !crate::media::is_text_extension(file_name) {
         tracing::debug!(file_name, "skipping non-text file attachment");
         let ext = file_name.rsplit('.').next().unwrap_or("").to_lowercase();
         return Attachment::rejected(
@@ -940,7 +939,6 @@ mod tests {
             "file123",
             "report.pdf",
             "application/pdf",
-            false,
         )
         .await;
         assert!(att.status.is_some(), "non-text extension must have status set");
