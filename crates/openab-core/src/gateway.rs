@@ -1011,10 +1011,14 @@ pub async fn run_gateway_adapter(
                                                             if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
                                                                 extra_blocks.push(block);
                                                             } else {
-                                                                // Upload failed or size exceeded — fall back to inline
-                                                                let text = String::from_utf8_lossy(&bytes);
+                                                                // Upload refused (size cap) — emit degraded hint, don't inline oversized body
+                                                                let size_kb = bytes.len() / 1024;
+                                                                tracing::warn!(filename = %att.filename, size = bytes.len(), "filestore upload refused; emitting degraded hint");
                                                                 extra_blocks.push(ContentBlock::Text {
-                                                                    text: format!("```{}\n{}\n```", att.filename, text),
+                                                                    text: format!(
+                                                                        "[File: {}]\nThis file ({} KB) exceeds the configured upload limit and could not be stored.",
+                                                                        att.filename, size_kb
+                                                                    ),
                                                                 });
                                                             }
                                                         } else {
@@ -1426,10 +1430,14 @@ pub async fn process_gateway_event(
                                 if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
                                     extra_blocks.push(block);
                                 } else {
-                                    // Upload failed or size exceeded — fall back to inline
-                                    let text = String::from_utf8_lossy(&bytes);
+                                    // Upload refused (size cap) — emit degraded hint, don't inline oversized body
+                                    let size_kb = bytes.len() / 1024;
+                                    tracing::warn!(filename = %att.filename, size = bytes.len(), "filestore upload refused; emitting degraded hint");
                                     extra_blocks.push(ContentBlock::Text {
-                                        text: format!("```{}\n{}\n```", att.filename, text),
+                                        text: format!(
+                                            "[File: {}]\nThis file ({} KB) exceeds the configured upload limit and could not be stored.",
+                                            att.filename, size_kb
+                                        ),
                                     });
                                 }
                             } else {
