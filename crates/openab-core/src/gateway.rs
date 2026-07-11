@@ -1010,6 +1010,12 @@ pub async fn run_gateway_adapter(
                                                         if let Some(ref fs) = filestore {
                                                             if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
                                                                 extra_blocks.push(block);
+                                                            } else {
+                                                                // Upload failed or size exceeded — fall back to inline
+                                                                let text = String::from_utf8_lossy(&bytes);
+                                                                extra_blocks.push(ContentBlock::Text {
+                                                                    text: format!("```{}\n{}\n```", att.filename, text),
+                                                                });
                                                             }
                                                         } else {
                                                             // No filestore configured — fall back to inline (original behavior)
@@ -1419,6 +1425,12 @@ pub async fn process_gateway_event(
                             if let Some(ref fs) = ctx.filestore {
                                 if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
                                     extra_blocks.push(block);
+                                } else {
+                                    // Upload failed or size exceeded — fall back to inline
+                                    let text = String::from_utf8_lossy(&bytes);
+                                    extra_blocks.push(ContentBlock::Text {
+                                        text: format!("```{}\n{}\n```", att.filename, text),
+                                    });
                                 }
                             } else {
                                 // No filestore configured — fall back to inline (original behavior)
