@@ -366,6 +366,11 @@ struct defined in a shared types crate or serialized as JSON over the WS).
 /// Contains the minimum fields needed for trust evaluation.
 pub struct InboundEvent {
     pub platform: String,           // "discord", "telegram", "line", etc.
+                                    // INVARIANT: always lowercase. Receivers MUST
+                                    // normalize to lowercase before constructing.
+                                    // This ensures gate_event's `== "cron"` check
+                                    // and PlatformTrustConfigs::get()'s to_lowercase()
+                                    // are consistent.
     pub sender_id: String,          // platform-specific sender identifier
     pub channel_id: String,         // conversation surface
     pub workspace_id: Option<String>, // workspace/team context (Slack Enterprise Grid: team_id)
