@@ -136,11 +136,12 @@ The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1
 |----------|----------------|---------------|------------|
 | Discord | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
 | Slack | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
-| Gateway (Telegram, Feishu, Google Chat, WeCom, LINE) | File on local disk → single PUT | All: when `store_all_files` enabled |
+| Gateway (Telegram, Feishu, Google Chat, WeCom, LINE) | File on local disk → single PUT | Text files delivered by adapter pipeline; binary limited by adapter validation |
 
-Gateway adapters download **all** file types when filestore is configured
-(`store_all_files = true`). Previously they only downloaded text files with
-whitelisted extensions.
+Gateway adapters bypass extension whitelists when filestore is configured
+(`store_all_files = true`), but pre-existing adapter limitations remain
+(UTF-8 validation in Telegram/WeCom, size caps in Feishu/Google Chat).
+Full generic binary support requires a gateway schema change (tracked in #1349).
 
 ### Timeouts
 
@@ -195,7 +196,7 @@ after 24 hours (no configuration needed).
 |-----------|---------------------|--------|
 | Text ≤ 512 KB | any | Inlined into prompt (unchanged) |
 | Text > 512 KB | ✅ yes | Uploaded → presigned URL returned |
-| PDF, ZIP, DOCX, binary (any size) | ✅ yes | Uploaded → presigned URL returned |
+| PDF, ZIP, DOCX, binary (Discord/Slack only) | ✅ yes | Uploaded → presigned URL returned |
 | Text > 512 KB | ❌ no | Silently dropped (legacy behavior) |
 | PDF, ZIP, DOCX, binary | ❌ no | Silently dropped (legacy behavior) |
 | > max_file_size_mb (default 250 MB, max 500 MB) | ✅ yes | Dropped (configurable cap) |
