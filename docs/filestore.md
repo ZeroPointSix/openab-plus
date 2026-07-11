@@ -134,9 +134,9 @@ The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1
 
 | Platform | Download Method | Upload Method | File Types |
 |----------|----------------|---------------|------------|
-| Discord | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
-| Slack | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
-| Gateway (Telegram, Feishu, Google Chat, WeCom, LINE) | File on local disk → single PUT | Text files delivered by adapter pipeline; binary limited by adapter validation |
+| Discord | Streaming download | Streaming multipart (~16 MB chunks) | Text > 512KB + PDF/ZIP/binary (videos excluded — see Behavior) |
+| Slack | Streaming download | Streaming multipart (~16 MB chunks) | Text > 512KB + PDF/ZIP/binary (videos excluded — see Behavior) |
+| Gateway (Telegram, Feishu, Google Chat, WeCom, LINE) | File on local disk | Single PUT | Text files delivered by adapter pipeline; binary limited by adapter validation |
 
 Gateway adapters use their existing text-file pipeline (extension whitelist).
 When filestore is configured, large text files (>512 KB) that pass through
@@ -198,9 +198,10 @@ after 24 hours (no configuration needed).
 | Text ≤ 512 KB | any | Inlined into prompt (unchanged) |
 | Text > 512 KB | ✅ yes | Uploaded → presigned URL returned |
 | PDF, ZIP, DOCX, binary (Discord/Slack only) | ✅ yes | Uploaded → presigned URL returned |
+| Video (`video/*` MIME or `.mp4/.mov/.m4v/.webm/.mkv/.avi`) | any | **Never uploaded** — agent receives a `[Video attachment]` metadata block (filename, type, size, platform URL) |
 | Text > 512 KB | ❌ no | Silently dropped (legacy behavior) |
 | PDF, ZIP, DOCX, binary | ❌ no | Silently dropped (legacy behavior) |
-| > max_file_size_mb (default 250 MB, max 500 MB) | ✅ yes | Dropped (configurable cap) |
+| > max_file_size_mb (default 250 MB, max 500 MB) | ✅ yes | Dropped on Discord/Slack; degraded hint on gateway (see Error Handling) |
 
 ## What the Agent Sees
 
@@ -228,8 +229,21 @@ the file — no authentication headers required.
 ### Object Keys
 
 Object keys are server-generated: `{prefix}{uuid}_{filename}`. The UUID
-prevents collision and enumeration. The filename is appended for human
-readability in S3 console but is not security-critical.
+prevents collision and enumeration. The filename portion is sanitized before
+being embedded in the key: path separators (`/`, `\`), traversal sequences
+(`..`), double quotes, and non-ASCII characters are replaced or stripped,
+and the name is capped at 200 characters.
+
+### Filename Sanitization & Content-Disposition
+
+- **S3 objects** are uploaded with `Content-Disposition: attachment` so
+  browsers download the file instead of rendering it inline — this prevents
+  HTML/JS content from executing in the bucket's origin when a presigned URL
+  is opened in a browser. Double quotes are stripped from filenames so the
+  header cannot be broken out of.
+- **Agent-visible text** (inline file blocks and error/degraded hints) strips
+  control characters from filenames and caps them at 200 characters,
+  preventing prompt injection via crafted attachment filenames.
 
 ### Size Limits
 
@@ -346,7 +360,8 @@ mc ilm rule add myminio/oab-uploads \
 | S3 upload times out (>10 min) | Same as upload failure — degraded hint returned |
 | Download from platform fails | File is dropped (warn log), agent not notified |
 | Download times out (>10 min) | Same as download failure — file dropped |
-| File exceeds max_file_size_mb | File is dropped (warn log) |
+| File exceeds max_file_size_mb (Discord/Slack) | File is dropped (warn log), agent not notified |
+| File exceeds max_file_size_mb (gateway) | Agent receives degraded hint: "exceeds the configured upload limit and could not be stored" |
 | Presigned URL generation fails | Agent receives degraded hint |
 | Filestore not configured | Legacy behavior (>512KB files silently dropped) |
 
