@@ -504,15 +504,31 @@ impl PlatformTrustConfigs {
         sender_id: &str,
         workspace_id: Option<&str>,
     ) -> Decision {
+        let default = PlatformTrustConfig::Base(Self::default_config());
         let config = self.configs
             .get(&platform.to_lowercase())
-            .unwrap_or(&PlatformTrustConfig::Base(Self::default_config()));
+            .unwrap_or(&default);
 
         match config {
             PlatformTrustConfig::Base(c) => c.decide(channel_id, is_dm, sender_id),
             PlatformTrustConfig::Line(c) => c.decide(channel_id, is_dm, sender_id),
             PlatformTrustConfig::Slack(c) => c.decide(channel_id, is_dm, sender_id, workspace_id),
         }
+    }
+
+    /// Lookup helper for gate_event — returns the config for a platform.
+    pub fn get(&self, platform: &str) -> &PlatformTrustConfig {
+        static DEFAULT: std::sync::LazyLock<PlatformTrustConfig> =
+            std::sync::LazyLock::new(|| PlatformTrustConfig::Base(TrustConfig {
+                allow_all_channels: true,
+                allowed_channels: HashSet::new(),
+                allow_dm: true,
+                allow_all_users: false,
+                allowed_users: HashSet::new(),
+            }));
+        self.configs
+            .get(&platform.to_lowercase())
+            .unwrap_or(&DEFAULT)
     }
 
     fn default_config() -> TrustConfig {
@@ -523,6 +539,17 @@ impl PlatformTrustConfigs {
             allow_dm: true,
             allow_all_users: false,
             allowed_users: HashSet::new(),
+        }
+    }
+}
+
+impl PlatformTrustConfig {
+    /// Delegating method — dispatches surface_allowed to the inner TrustConfig.
+    pub fn surface_allowed(&self, channel_id: &str, is_dm: bool) -> bool {
+        match self {
+            PlatformTrustConfig::Base(c) => c.surface_allowed(channel_id, is_dm),
+            PlatformTrustConfig::Line(c) => c.base.surface_allowed(channel_id, is_dm),
+            PlatformTrustConfig::Slack(c) => c.base.surface_allowed(channel_id, is_dm),
         }
     }
 }
@@ -637,6 +664,9 @@ Handler. The Trust Gate only evaluates human sender identity.
 | LINE | Always `false` | LINE has no bot-to-bot webhook delivery; bot-bypass is a no-op |
 | Feishu | `trusted_bot_ids.contains(sender_open_id)` | Feishu marks other bots as `sender_type="user"` — unreliable; must match against known bot IDs |
 | Telegram | `message.from.is_bot` flag | Native field from Telegram API |
+| WeCom | `msgtype == "event"` and `event == "enter_agent"`, or `trusted_bot_ids.contains(userid)` | WeCom bot-to-bot uses app callback events; regular messages from bots carry the bot's UserID — match against `trusted_bot_ids` |
+| Google Chat | `message.sender.type == "BOT"` | Native field from Chat API event payload |
+| MS Teams | `activity.from.role == "bot"` or `trusted_bot_ids.contains(activity.from.id)` | Bot Framework marks bot senders with role field; verify against known bot IDs for reliability |
 
 **`trusted_bot_ids` is shared config (NOT Handler-only):**
 
@@ -662,7 +692,11 @@ async fn gate_event(event: InboundEvent, configs: &PlatformTrustConfigs) -> Opti
     // Cron is internal — it has no external sender and targets arbitrary
     // platform channels. Gating it against platform L2 scope would incorrectly
     // block scheduled jobs to channels not in the human-facing allowlist.
-    if event.platform == "cron" || event.sender_id == "openab-cron" {
+    // Only `platform` is checked — the Cron Receiver is the sole producer of
+    // events with platform == "cron", so both fields are trustworthy by construction.
+    // sender_id is NOT checked here to avoid spoofing: some platforms (e.g. WeCom)
+    // allow freeform UserIDs that could match any synthetic value.
+    if event.platform == "cron" {
         return Some(seal(event));  // fully trusted, no L2/L3
     }
 
@@ -699,11 +733,14 @@ On `Deny`, the event is dropped. This avoids deep-cloning `RawPlatformEvent`
 (which may contain the full platform payload) on the hot path.
 
 **Cron bypass rationale:** Cron tasks are system-initiated (no external sender).
-They use `platform = "cron"` and `sender_id = "openab-cron"` — a reserved
-synthetic identity that cannot collide with any real platform sender ID (real
-platform IDs are alphanumeric, never prefixed with `openab-`). The Cron Receiver
-sets these fields; the Trust Gate recognizes them and short-circuits. The CronHandler
-then routes the dispatched event to the appropriate target platform/channel.
+They use `platform = "cron"` and `sender_id = "openab-cron"`. The Trust Gate
+recognizes them by **`platform == "cron"` only** — the `sender_id` field is not
+part of the bypass condition. This is critical because some platforms (notably
+WeCom) allow tenant-admin-assigned freeform UserIDs that could match any string,
+including `"openab-cron"`. Since the Cron Receiver is the sole code path that
+produces events with `platform = "cron"`, checking the platform field alone is
+both necessary and sufficient. The CronHandler then routes the dispatched event
+to the appropriate target platform/channel.
 
 ### Echo reply on deny
 
@@ -742,6 +779,9 @@ calls platform APIs directly.
 | LINE | Reply API only; silent drop if token expired | **Never** use Push API for deny-echo (prevents attackers from burning paid Push quota) |
 | Telegram | Reply in-chat | Standard reply |
 | Feishu | Reply in-chat | Standard reply |
+| WeCom | Reply in-chat via `message.send` API | Uses the application's send-message endpoint; targets the source conversation |
+| Google Chat | Reply in-space via `spaces.messages.create` | Replies in the same space; for DMs uses the DM space with the user |
+| MS Teams | Reply in-conversation via Bot Framework `sendToConversation` | Uses the Bot Framework connector to reply in the originating conversation |
 
 **Echo content by scope (leak-safe):**
 - **DM / 1:1 context:** echo includes sender UID (self-serve — user forwards to admin to request access)
