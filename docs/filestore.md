@@ -182,10 +182,14 @@ after 24 hours (no configuration needed).
 
 ## Behavior
 
-> **Platform scope:** Filestore is supported across **all 7 platforms** —
-> Discord, Slack, Telegram, Feishu, Google Chat, WeCom, and LINE.
-> When `[filestore]` is configured, Gateway adapters download **all** file
-> types (not just text), allowing any attachment to be uploaded to S3/R2.
+> **Platform scope:**
+> - **Discord / Slack:** All file types supported — text > 512KB, PDF, ZIP, binary,
+>   and any unsupported format are uploaded to filestore via streaming multipart.
+> - **Gateway (Telegram, Feishu, Google Chat, WeCom, LINE):** Filestore is wired for
+>   files delivered by existing adapter pipelines. Large text files (>512KB) that pass
+>   through the adapter are uploaded. Binary/generic-file support remains limited by
+>   current gateway adapter validation (UTF-8 checks, platform-specific size limits).
+>   Full binary support requires a gateway schema change tracked in follow-up #1349.
 
 | File size | Filestore configured | Result |
 |-----------|---------------------|--------|
