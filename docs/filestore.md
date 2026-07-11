@@ -138,10 +138,11 @@ The streaming approach means a 500 MB file uses the same ~16 MB of memory as a 1
 | Slack | Streaming download → streaming multipart (~16 MB) | All: text > 512KB + PDF/ZIP/binary |
 | Gateway (Telegram, Feishu, Google Chat, WeCom, LINE) | File on local disk → single PUT | Text files delivered by adapter pipeline; binary limited by adapter validation |
 
-Gateway adapters bypass extension whitelists when filestore is configured
-(`store_all_files = true`), but pre-existing adapter limitations remain
-(UTF-8 validation in Telegram/WeCom, size caps in Feishu/Google Chat).
-Full generic binary support requires a gateway schema change (tracked in #1349).
+Gateway adapters use their existing text-file pipeline (extension whitelist).
+When filestore is configured, large text files (>512 KB) that pass through
+the adapter are uploaded to S3/R2 instead of being inlined. Without filestore,
+all text files are inlined regardless of size (original behavior preserved).
+Full binary support requires a gateway schema change (tracked in #1349).
 
 ### Timeouts
 

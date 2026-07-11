@@ -1011,10 +1011,20 @@ pub async fn run_gateway_adapter(
                                                             if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
                                                                 extra_blocks.push(block);
                                                             }
+                                                        } else {
+                                                            // No filestore configured — fall back to inline (original behavior)
+                                                            let text = String::from_utf8_lossy(&bytes);
+                                                            extra_blocks.push(ContentBlock::Text {
+                                                                text: format!("```{}\n{}\n```", att.filename, text),
+                                                            });
                                                         }
                                                         #[cfg(not(feature = "filestore"))]
                                                         {
-                                                            tracing::warn!(filename = %att.filename, size, "gateway text_file exceeds 512KB inline limit, skipping");
+                                                            // Feature not compiled — inline as before
+                                                            let text = String::from_utf8_lossy(&bytes);
+                                                            extra_blocks.push(ContentBlock::Text {
+                                                                text: format!("```{}\n{}\n```", att.filename, text),
+                                                            });
                                                         }
                                                     }
                                                 }
@@ -1410,10 +1420,20 @@ pub async fn process_gateway_event(
                                 if let Some((block, _)) = crate::media::upload_bytes_to_filestore_public(&att.filename, &bytes, fs).await {
                                     extra_blocks.push(block);
                                 }
+                            } else {
+                                // No filestore configured — fall back to inline (original behavior)
+                                let text = String::from_utf8_lossy(&bytes);
+                                extra_blocks.push(ContentBlock::Text {
+                                    text: format!("```{}\n{}\n```", att.filename, text),
+                                });
                             }
                             #[cfg(not(feature = "filestore"))]
                             {
-                                tracing::warn!(filename = %att.filename, size, "gateway text_file exceeds 512KB inline limit, skipping");
+                                // Feature not compiled — inline as before
+                                let text = String::from_utf8_lossy(&bytes);
+                                extra_blocks.push(ContentBlock::Text {
+                                    text: format!("```{}\n{}\n```", att.filename, text),
+                                });
                             }
                         }
                     }
