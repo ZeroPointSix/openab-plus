@@ -547,6 +547,8 @@ async fn main() -> anyhow::Result<()> {
         dispatchers.lock().unwrap().push(slack_dispatcher.clone());
         let slack_allowed_users: std::collections::HashSet<String> =
             slack_cfg.allowed_users.into_iter().collect();
+        #[cfg(feature = "filestore")]
+        let slack_filestore = filestore.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = slack::run_slack_adapter(
                 adapter,
@@ -563,7 +565,7 @@ async fn main() -> anyhow::Result<()> {
                 slack_shutdown_rx,
                 slack_dispatcher,
                 #[cfg(feature = "filestore")]
-                filestore.clone(),
+                slack_filestore,
             )
             .await
             {
