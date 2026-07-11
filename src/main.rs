@@ -457,6 +457,11 @@ async fn main() -> anyhow::Result<()> {
         // gateway model yet (group policy is a follow-up), so it stays on the
         // shared GATEWAY_* values set above.
         //
+        // NOTE: deliberately NOT routed through platform_trust_override —
+        // LineConfig is a bespoke type that grows group-policy fields next
+        // (#1355 follow-up), unlike the shared PlatformTrustConfig used by
+        // wecom/googlechat/teams below.
+        //
         // Also resolves when running env-only (no [line] section but
         // LINE_ALLOW_ALL_USERS / LINE_ALLOWED_USERS set), matching the
         // Telegram pattern.

@@ -139,6 +139,8 @@ Custom Gateway adapter for platforms like Telegram, LINE, Feishu/Lark, and Googl
 
 First-class L3 identity trust for the LINE adapter (identity-trust-none ADR, Phase 1). Replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for LINE — relying on those for LINE is deprecated and warns at startup. Channel credentials remain on the `LINE_CHANNEL_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN` env vars.
 
+> **Mode scoping:** takes effect on the **embedded/unified adapter path** (see the note under `[wecom]` / `[googlechat]` / `[teams]` below — the same applies here).
+
 Each field resolves: config value → `LINE_*` env var → default (deny-all).
 
 | Key | Type | Default | Description |
@@ -157,6 +159,8 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
 ## `[wecom]` / `[googlechat]` / `[teams]`
 
 First-class L3 identity trust for the remaining gateway platforms — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`WECOM_CORP_ID`/`WECOM_SECRET`, `GOOGLE_CHAT_*`, `TEAMS_APP_ID`/`TEAMS_APP_SECRET`).
+
+> **Mode scoping:** these sections (like `[line]`) take effect on the **embedded/unified adapter path**, where events pass the shared ingress trust gate. Deployments using the standalone `openab-gateway` companion over WebSocket enforce trust via `[gateway].allow_all_users` / `allowed_users` instead; Phase 1c consolidates the two paths.
 
 Each field resolves: config value → `{PREFIX}_*` env var → default (deny-all). Env prefixes: `WECOM`, `GOOGLE_CHAT`, `TEAMS`.
 

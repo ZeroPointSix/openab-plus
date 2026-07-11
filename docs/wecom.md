@@ -131,6 +131,8 @@ max_sessions = 10
 
 ### User Trust (`[wecom]` section)
 
+> **Mode scoping:** the `[wecom]` section applies when the WeCom adapter is **embedded in the OAB binary** (unified mode, `WECOM_CORP_ID` env set on the OAB container). In the standalone-gateway mode shown above, trust is enforced by `[gateway].allow_all_users` / `allowed_users` instead — the `[wecom]` section has no effect on that path yet (Phase 1c consolidates the two).
+
 Identity trust defaults to **deny-all** (identity-trust-none ADR): unknown senders are rejected until explicitly admitted. Configure trust with a first-class `[wecom]` section:
 
 ```toml
