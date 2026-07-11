@@ -283,7 +283,7 @@ impl Filestore {
                 .key(&key)
                 .upload_id(&upload_id)
                 .part_number(part_number)
-                .body(aws_sdk_s3::primitives::ByteStream::from(buffer))
+                .body(aws_sdk_s3::primitives::ByteStream::from(buffer.drain(..).collect::<Vec<u8>>()))
                 .send()
                 .await
             {

@@ -456,6 +456,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         reply_token_cache,
         line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
         client,
+        store_all_files: false,
     });
 
     // Background: sweep expired reply tokens
