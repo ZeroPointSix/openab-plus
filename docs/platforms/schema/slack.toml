@@ -184,9 +184,9 @@ pr      = ""
 
 [[openab_features]]
 feature = "trust_gate"
-status  = "partial"
-note    = "Native adapter does NOT use the shared AdapterRouter::gate_incoming (L3 identity trust) — that's wired only for gateway and discord. Slack enforces inline allowlists: allowed_channels and allowed_users, plus trusted_bot_ids resolution (B…→U… via bots.info) for bot senders."
-source  = ["crates/openab-core/src/slack.rs#allowed_channels", "crates/openab-core/src/slack.rs#trusted_bot_ids_contains"]
+status  = "implemented"
+note    = "Two layers, mirroring Discord Phase 1 (#1270): adapter-level inline allowlists (allowed_channels, allowed_users, plus trusted_bot_ids resolution B…→U… via bots.info for bot senders) + shared L3 identity gate router.gate_incoming after the inline check (redundant-but-matching; humans only — bots bypass via trust::l3_gate_applies; is_dm from the D… conversation-ID prefix). Registry entry seeded from resolved [slack] config (L2 open, L3 mirrors allow_all_users/allowed_users)."
+source  = ["crates/openab-core/src/slack.rs#l3_gate_applies", "crates/openab-core/src/slack.rs#is_dm_channel", "crates/openab-core/src/adapter.rs#gate_incoming", "crates/openab-core/src/trust.rs#l3_gate_applies"]
 pr      = ""
 
 [[openab_features]]
@@ -273,7 +273,7 @@ source = "crates/openab-core/src/slack.rs#bot_participated_in_thread"
 [[quirks]]
 date   = "2026-07-04"
 title  = "Native trust divergence"
-note   = "Unlike the gateway/Discord paths (which call AdapterRouter::gate_incoming), the Slack adapter predates the unified trust gate and enforces access with inline allowed_channels/allowed_users/trusted_bot_ids checks. Deny UX is a 🚫 reaction, not the gateway's DenyIdentity identity-echo. A future consolidation onto AdapterRouter::with_trust would unify this."
+note   = "The Slack adapter predates the unified trust gate and enforced access only with inline allowed_channels/allowed_users/trusted_bot_ids checks. Since the Slack Phase 1 wiring (#1361/#1363), the shared AdapterRouter::gate_incoming also runs after the inline user check (redundant-but-matching, non-regressive). Deny UX remains the adapter's 🚫 reaction, not the gateway's DenyIdentity identity-echo. Phase 1c makes the shared gate authoritative and removes the inline checks."
 kind   = "openab_decision"
 source = "crates/openab-core/src/adapter.rs#with_trust"
 
