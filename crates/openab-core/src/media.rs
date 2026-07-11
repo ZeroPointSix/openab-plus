@@ -490,7 +490,7 @@ pub async fn download_and_read_text_file(
         if let Some(fs) = filestore {
             return download_and_upload_to_filestore(url, filename, size, auth_token, fs).await;
         }
-        tracing::warn!(filename, size, "text file exceeds 512KB limit, skipping");
+        tracing::warn!(filename, size, "text file exceeds inline limit, skipping");
         return None;
     }
 
@@ -513,7 +513,7 @@ pub async fn download_and_read_text_file(
     auth_token: Option<&str>,
 ) -> Option<(ContentBlock, u64)> {
     if size > TEXT_INLINE_LIMIT {
-        tracing::warn!(filename, size, "text file exceeds 512KB limit, skipping");
+        tracing::warn!(filename, size, "text file exceeds inline limit, skipping");
         return None;
     }
 
@@ -628,7 +628,7 @@ async fn download_text_file_inner(
         tracing::warn!(
             filename,
             size = actual_size,
-            "downloaded text file exceeds 512KB limit, skipping"
+            "downloaded text file exceeds inline limit, skipping"
         );
         return None;
     }
@@ -694,7 +694,7 @@ async fn download_text_file_inner(
         tracing::warn!(
             filename,
             size = actual_size,
-            "downloaded text file exceeds 512KB limit, skipping"
+            "downloaded text file exceeds inline limit, skipping"
         );
         return None;
     }
