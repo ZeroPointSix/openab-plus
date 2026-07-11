@@ -3,6 +3,7 @@ use crate::adapter::{ChannelRef, ChatAdapter, MessageRef, SenderContext};
 use crate::bot_turns::{BotTurnTracker, TurnAction, TurnSeverity};
 use crate::config::{AllowBots, AllowUsers, SttConfig};
 use crate::media;
+use crate::trust::l3_gate_applies;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
@@ -1368,17 +1369,6 @@ async fn get_socket_mode_url_with_timeout(
         get_socket_mode_url(client, app_token),
     )
     .await
-}
-
-/// Whether the shared L3 identity gate (`AdapterRouter::gate_incoming`) should run
-/// for this sender. Bots bypass L3 — mirroring the inline user check's
-/// `!is_bot_msg` bypass — because bot admission is a separate concern
-/// (`allow_bot_messages` + `trusted_bot_ids`), and L3 (`allowed_users`) is a
-/// human-identity allowlist. Running L3 on bots would wrongly deny
-/// mode-admitted/trusted bots when `allow_all_users=false` (multi-agent).
-/// Same rationale as Discord's bypass (PR #1270 review).
-fn l3_gate_applies(is_bot: bool) -> bool {
-    !is_bot
 }
 
 /// Whether a Slack conversation ID denotes a DM. Slack conversation IDs are
