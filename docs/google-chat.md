@@ -152,6 +152,20 @@ allow_all_users = true
 [agent]
 ```
 
+### User Trust (`[googlechat]` section)
+
+Identity trust defaults to **deny-all** (identity-trust-none ADR): unknown senders are rejected until explicitly admitted. Configure trust with a first-class `[googlechat]` section:
+
+```toml
+[googlechat]
+allowed_users = ["users/123456789"]  # Chat user resource names (users/<id>)
+# allow_all_users = true   # explicit opt-in only — any user can drive the agent
+```
+
+Each field falls back to its `GOOGLE_CHAT_ALLOW_ALL_USERS` / `GOOGLE_CHAT_ALLOWED_USERS` env var when unset.
+
+> ⚠️ **Deprecated:** driving Google Chat trust through the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars still works but logs a startup warning; it will become a startup error in a later phase. Migrate to `[googlechat]` (or `GOOGLE_CHAT_*` env vars).
+
 ## Features
 
 ### Supported

@@ -154,6 +154,39 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
 
 ---
 
+## `[wecom]` / `[googlechat]` / `[teams]`
+
+First-class L3 identity trust for the remaining gateway platforms — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`WECOM_CORP_ID`/`WECOM_SECRET`, `GOOGLE_CHAT_*`, `TEAMS_APP_ID`/`TEAMS_APP_SECRET`).
+
+Each field resolves: config value → `{PREFIX}_*` env var → default (deny-all). Env prefixes: `WECOM`, `GOOGLE_CHAT`, `TEAMS`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `allow_all_users` | bool \| omit | `false` (deny-all) | `true` = any user may interact (bypasses `allowed_users` entirely). Env fallback: `{PREFIX}_ALLOW_ALL_USERS`. |
+| `allowed_users` | string[] | `[]` | Platform user IDs allowed to interact. Only checked when `allow_all_users` resolves to false. Env fallback: `{PREFIX}_ALLOWED_USERS` (comma-separated). |
+
+Sender ID formats per platform:
+
+| Platform | Sender ID format | Example |
+|----------|-----------------|---------|
+| WeCom | Tenant-assigned UserID (freeform string) | `"zhangsan"` |
+| Google Chat | User resource name | `"users/123456789"` |
+| MS Teams | Bot Framework `activity.from.id` | `"29:1abc..."` |
+
+```toml
+[wecom]
+allowed_users = ["zhangsan", "lisi"]
+
+[googlechat]
+allowed_users = ["users/123456789"]
+
+[teams]
+allowed_users = ["29:1abc..."]
+# allow_all_users = true   # explicit opt-in only
+```
+
+---
+
 ## `[agent]`
 
 The AI agent subprocess that OpenAB spawns to handle messages via ACP.
