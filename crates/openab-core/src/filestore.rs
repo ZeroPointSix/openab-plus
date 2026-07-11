@@ -245,7 +245,7 @@ impl Filestore {
             buffer.extend_from_slice(&chunk);
 
             if buffer.len() >= PART_SIZE {
-                let part_data: Vec<u8> = buffer.drain(..).collect();
+                let part_data: Vec<u8> = std::mem::take(&mut buffer);
                 match self
                     .client
                     .upload_part()
@@ -283,7 +283,7 @@ impl Filestore {
                 .key(&key)
                 .upload_id(&upload_id)
                 .part_number(part_number)
-                .body(aws_sdk_s3::primitives::ByteStream::from(buffer.drain(..).collect::<Vec<u8>>()))
+                .body(aws_sdk_s3::primitives::ByteStream::from(std::mem::take(&mut buffer)))
                 .send()
                 .await
             {
