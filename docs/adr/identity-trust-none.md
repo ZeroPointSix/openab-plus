@@ -957,6 +957,9 @@ async fn run_gateway_platforms(
         let gw_event: GatewayEvent = ws.recv().await;
 
         // Normalize GatewayEvent → InboundEvent
+        // Note: gw_event.platform is assigned by gateway routing config (based on
+        // which webhook endpoint received the request), NOT copied from the platform
+        // webhook payload body. This satisfies the reserved platform invariant.
         let event = InboundEvent {
             platform: gw_event.platform.clone(),
             sender_id: gw_event.sender_id.clone(),
