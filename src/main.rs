@@ -336,6 +336,30 @@ async fn main() -> anyhow::Result<()> {
             );
         }
 
+        // Slack: gate L3 (identity) only via the shared gate, mirroring the
+        // Discord entry above. Slack's L2 (channel allowlist) stays in the
+        // adapter — its registry entry is L2-open — and L3 mirrors the resolved
+        // [slack].allow_all_users/allowed_users, so the gate agrees with
+        // Slack's existing user check (behavior-preserving). Without this
+        // entry, Slack was the only configured platform absent from the
+        // registry, falling back to the deny-all default if the gate ever ran
+        // for it (#1361).
+        if let Some(s) = &cfg.slack {
+            reg.insert(
+                "slack",
+                TrustConfig::new(
+                    Some(true), // L2 open — Slack's own channel check still applies
+                    Vec::<String>::new(),
+                    Some(true),
+                    Some(config::resolve_allow_all(
+                        s.allow_all_users,
+                        &s.allowed_users,
+                    )),
+                    s.allowed_users.clone(),
+                ),
+            );
+        }
+
         // Telegram: L3 (identity) mirrors the resolved
         // [telegram].allow_all_users/allowed_users, so config.toml can
         // restrict who can message the bot without needing
@@ -547,11 +571,13 @@ async fn main() -> anyhow::Result<()> {
         dispatchers.lock().unwrap().push(slack_dispatcher.clone());
         let slack_allowed_users: std::collections::HashSet<String> =
             slack_cfg.allowed_users.into_iter().collect();
+        let slack_router = router.clone();
         #[cfg(feature = "filestore")]
         let slack_filestore = filestore.clone();
         Some(tokio::spawn(async move {
             if let Err(e) = slack::run_slack_adapter(
                 adapter,
+                slack_router,
                 slack_cfg.app_token,
                 allow_all_channels,
                 allow_all_users,
