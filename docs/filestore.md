@@ -150,7 +150,7 @@ Full binary support requires a gateway schema change (tracked in #1349).
 |-----------|---------|-------|
 | Download from platform (streaming path) | 10 minutes | HTTP request including body streaming |
 | Streaming upload to S3 | 10 minutes | Total for download + all parts + complete |
-| Download from platform (inline path) | 3 minutes | For files expected ≤512 KB |
+| Download from platform (inline path) | 30 seconds | For files expected ≤512 KB |
 | Individual part upload | SDK default | Per upload_part call |
 
 ### Incomplete Multipart Upload Cleanup

@@ -1536,7 +1536,7 @@ async fn handle_message(
                 // When filestore is configured, skip the cap for files > 512KB (they'll
                 // be uploaded to S3, not inlined).
                 #[cfg(feature = "filestore")]
-                let skip_cap = filestore.is_some() && size > 512 * 1024;
+                let skip_cap = filestore.is_some() && size > crate::media::TEXT_INLINE_LIMIT;
                 #[cfg(not(feature = "filestore"))]
                 let skip_cap = false;
                 if !skip_cap && size > 0 && text_file_bytes + size > TEXT_TOTAL_CAP {
@@ -1592,18 +1592,27 @@ async fn handle_message(
                         extra_blocks.push(block);
                     }
                     Err(media::MediaFetchError::NotAnImage) => {
-                        // Upload unsupported file types to filestore if available
-                        #[cfg(feature = "filestore")]
-                        if let Some(fs) = filestore {
-                            if let Some((block, _)) = media::download_and_upload_any_file(
-                                url,
-                                filename,
-                                size,
-                                Some(mimetype),
-                                Some(bot_token),
-                                fs,
-                            ).await {
-                                extra_blocks.push(block);
+                        if media::is_video_file(filename, Some(mimetype)) {
+                            extra_blocks.push(ContentBlock::Text {
+                                text: format!(
+                                    "[Video attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {}",
+                                    filename, mimetype, size, url
+                                ),
+                            });
+                        } else {
+                            // Upload unsupported file types to filestore if available
+                            #[cfg(feature = "filestore")]
+                            if let Some(fs) = filestore {
+                                if let Some((block, _)) = media::download_and_upload_any_file(
+                                    url,
+                                    filename,
+                                    size,
+                                    Some(mimetype),
+                                    Some(bot_token),
+                                    fs,
+                                ).await {
+                                    extra_blocks.push(block);
+                                }
                             }
                         }
                     }

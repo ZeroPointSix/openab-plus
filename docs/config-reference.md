@@ -502,7 +502,7 @@ allow_bot_messages = true
 
 ## `[filestore]`
 
-Optional S3/R2-compatible object store for handling large text file attachments.
+Optional S3/R2-compatible object store for handling file attachments.
 
 When configured, text files exceeding the 512 KB inline limit are uploaded to the
 object store and a presigned GET URL is returned to the agent. This eliminates
@@ -542,13 +542,14 @@ presigned_ttl = 3600       # URL expiry in seconds (default: 3600 = 1 hour)
 
 - Text files ≤ 512 KB: inlined into the prompt as before (unchanged)
 - Text files > 512 KB: downloaded by OAB, uploaded to S3/R2, presigned URL returned
+- PDF, ZIP, binary, and other unsupported formats (Discord/Slack): uploaded to S3/R2, presigned URL returned
 - The presigned URL requires no authentication — any HTTP GET works
 - File count cap (5 files) still applies
 - Aggregate 1 MB cap only applies to inlined files; filestore uploads bypass it
 
 **Behavior when NOT configured (default):**
 
-- Text files > 512 KB are silently dropped (existing behavior)
+- Text files > 512 KB and unsupported formats are silently dropped (existing behavior)
 
 **Supported backends:**
 

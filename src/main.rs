@@ -429,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
         .join("threads.json");
     let multibot_cache = multibot_cache::MultibotCache::load(multibot_cache_path);
 
-    // Initialize filestore (for uploading large text file attachments to S3/R2).
+    // Initialize filestore (for uploading file attachments to S3/R2).
     #[cfg(feature = "filestore")]
     let filestore: Option<Arc<openab_core::filestore::Filestore>> = if let Some(ref fs_cfg) =
         cfg.filestore

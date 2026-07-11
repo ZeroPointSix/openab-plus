@@ -124,8 +124,8 @@ fn default_agentcore_cancel_strategy() -> AgentCoreCancelStrategy {
     AgentCoreCancelStrategy::Stop
 }
 
-/// Configuration for the S3/R2-compatible object store used to upload large
-/// text file attachments (>512 KB) and return presigned GET URLs.
+/// Configuration for the S3/R2-compatible object store used to upload
+/// file attachments and return presigned GET URLs.
 #[derive(Debug, Clone, Deserialize)]
 #[cfg(feature = "filestore")]
 pub struct FilestoreConfig {

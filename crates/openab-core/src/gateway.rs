@@ -997,9 +997,8 @@ pub async fn run_gateway_adapter(
                                             }
                                             "text_file" => {
                                                 if let Ok(bytes) = bytes_result {
-                                                    const INLINE_LIMIT: u64 = 512 * 1024;
                                                     let size = bytes.len() as u64;
-                                                    if size <= INLINE_LIMIT {
+                                                    if size <= crate::media::TEXT_INLINE_LIMIT {
                                                         let text = String::from_utf8_lossy(&bytes);
                                                         extra_blocks.push(ContentBlock::Text {
                                                             text: format!("```{}\n{}\n```", att.filename, text),
@@ -1416,9 +1415,8 @@ pub async fn process_gateway_event(
             "text_file" => {
                 match bytes_result {
                     Ok(bytes) => {
-                        const INLINE_LIMIT: u64 = 512 * 1024;
                         let size = bytes.len() as u64;
-                        if size <= INLINE_LIMIT {
+                        if size <= crate::media::TEXT_INLINE_LIMIT {
                             let text = String::from_utf8_lossy(&bytes);
                             extra_blocks.push(ContentBlock::Text {
                                 text: format!("```{}\n{}\n```", att.filename, text),

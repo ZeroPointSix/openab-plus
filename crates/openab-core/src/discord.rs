@@ -213,7 +213,7 @@ pub struct Handler {
     pub allowed_users: HashSet<u64>,
     pub stt_config: SttConfig,
     pub adapter: OnceLock<Arc<dyn ChatAdapter>>,
-    /// Optional filestore for uploading large text file attachments.
+    /// Optional filestore for uploading file attachments.
     #[cfg(feature = "filestore")]
     pub filestore: Option<Arc<crate::filestore::Filestore>>,
     pub allow_bot_messages: AllowBots,
@@ -897,7 +897,7 @@ impl EventHandler for Handler {
                 // be uploaded to S3, not inlined).
                 let attachment_size = u64::from(attachment.size);
                 #[cfg(feature = "filestore")]
-                let skip_cap = self.filestore.is_some() && attachment_size > 512 * 1024;
+                let skip_cap = self.filestore.is_some() && attachment_size > crate::media::TEXT_INLINE_LIMIT;
                 #[cfg(not(feature = "filestore"))]
                 let skip_cap = false;
                 if !skip_cap && text_file_bytes + attachment_size > TEXT_TOTAL_CAP {

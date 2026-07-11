@@ -1,4 +1,4 @@
-//! S3/R2-compatible object store for uploading large text file attachments
+//! S3/R2-compatible object store for uploading file attachments
 //! and returning presigned GET URLs.
 
 use crate::config::FilestoreConfig;
@@ -97,10 +97,11 @@ impl Filestore {
         filename: &str,
         data: &[u8],
     ) -> anyhow::Result<String> {
-        // Sanitize filename: strip path separators, traversal sequences, and
+        // Sanitize filename: strip path separators, traversal sequences,
+        // double quotes (breaks Content-Disposition header parsing), and
         // non-ASCII chars. Limit length to prevent excessively long S3 keys.
         let safe_name: String = filename
-            .replace(['/', '\\', '\0'], "_")
+            .replace(['/', '\\', '\0', '"'], "_")
             .replace("..", "_")
             .chars()
             .filter(|c| c.is_ascii_graphic() || *c == ' ')
@@ -122,6 +123,7 @@ impl Filestore {
             .bucket(&self.bucket)
             .key(&key)
             .content_type("text/plain; charset=utf-8")
+            .content_disposition(format!("attachment; filename=\"{safe_name}\""))
             .body(aws_sdk_s3::primitives::ByteStream::from(data.to_vec()))
             .send();
 
@@ -175,7 +177,7 @@ impl Filestore {
 
         // Sanitize filename (same logic as upload_and_presign)
         let safe_name: String = filename
-            .replace(['/', '\\', '\0'], "_")
+            .replace(['/', '\\', '\0', '"'], "_")
             .replace("..", "_")
             .chars()
             .filter(|c| c.is_ascii_graphic() || *c == ' ')
@@ -203,6 +205,7 @@ impl Filestore {
             .bucket(&self.bucket)
             .key(&key)
             .content_type(content_type.unwrap_or("application/octet-stream"))
+            .content_disposition(format!("attachment; filename=\"{safe_name}\""))
             .send()
             .await
             .map_err(|e| {
@@ -258,13 +261,21 @@ impl Filestore {
                     .await
                 {
                     Ok(resp) => {
-                        parts.push(
-                            CompletedPart::builder()
-                                .part_number(part_number)
-                                .e_tag(resp.e_tag.unwrap_or_default())
-                                .build(),
-                        );
-                        part_number += 1;
+                        match resp.e_tag {
+                            Some(tag) => {
+                                parts.push(
+                                    CompletedPart::builder()
+                                        .part_number(part_number)
+                                        .e_tag(tag)
+                                        .build(),
+                                );
+                                part_number += 1;
+                            }
+                            None => {
+                                upload_error = Some(anyhow::anyhow!("upload_part {part_number} returned no ETag"));
+                                break;
+                            }
+                        }
                     }
                     Err(e) => {
                         upload_error = Some(anyhow::anyhow!("upload_part {part_number} failed: {e}"));
@@ -288,12 +299,19 @@ impl Filestore {
                 .await
             {
                 Ok(resp) => {
-                    parts.push(
-                        CompletedPart::builder()
-                            .part_number(part_number)
-                            .e_tag(resp.e_tag.unwrap_or_default())
-                            .build(),
-                    );
+                    match resp.e_tag {
+                        Some(tag) => {
+                            parts.push(
+                                CompletedPart::builder()
+                                    .part_number(part_number)
+                                    .e_tag(tag)
+                                    .build(),
+                            );
+                        }
+                        None => {
+                            upload_error = Some(anyhow::anyhow!("upload_part {part_number} (final) returned no ETag"));
+                        }
+                    }
                 }
                 Err(e) => {
                     upload_error = Some(anyhow::anyhow!("upload_part {part_number} (final) failed: {e}"));
@@ -361,10 +379,24 @@ impl Filestore {
                 .await
             {
                 Ok(resp) => {
+                    let e_tag = match resp.e_tag {
+                        Some(tag) => tag,
+                        None => {
+                            error!(bucket = %self.bucket, key = %key, "upload single part returned no ETag, aborting");
+                            let _ = self.client
+                                .abort_multipart_upload()
+                                .bucket(&self.bucket)
+                                .key(&key)
+                                .upload_id(&upload_id)
+                                .send()
+                                .await;
+                            return Err(anyhow::anyhow!("upload single part returned no ETag"));
+                        }
+                    };
                     parts.push(
                         CompletedPart::builder()
                             .part_number(1)
-                            .e_tag(resp.e_tag.unwrap_or_default())
+                            .e_tag(e_tag)
                             .build(),
                     );
                 }
