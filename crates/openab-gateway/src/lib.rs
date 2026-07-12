@@ -24,6 +24,13 @@ pub const LINE_WEBHOOK_CONCURRENCY_MAX: usize = 8;
 
 // --- App state (shared across all adapters) ---
 
+/// Whether a webhook platform's L1 (transport authentication) is unenforceable:
+/// the platform is active (configured to receive traffic) but its verification
+/// secret is not configured, so it accepts unauthenticated POSTs. See #1356.
+fn l1_unenforceable(active: bool, l1_configured: bool) -> bool {
+    active && !l1_configured
+}
+
 pub struct AppState {
     pub telegram_bot_token: Option<String>,
     pub telegram_secret_token: Option<String>,
@@ -189,6 +196,70 @@ impl AppState {
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
             client,
+        }
+    }
+
+    /// Phase 1 L1 audit (#1356): warn loudly for each **active** webhook
+    /// platform whose transport authentication (L1) secret is unconfigured.
+    ///
+    /// When L1 is skipped, the webhook accepts unauthenticated POSTs, so the
+    /// per-platform `allowed_users` (L3) allowlist is forgeable — an attacker
+    /// can POST an envelope with an allowlisted sender id and pass the trust
+    /// gate. Phase 1 only warns (backward-compatible: existing no-secret
+    /// deployments keep running); a later phase may escalate to a hard error.
+    ///
+    /// Call this once at startup **after** all config overrides are applied
+    /// (e.g. after `apply_telegram_config`), so a config-supplied secret is not
+    /// falsely reported as missing. WeCom and MS Teams are intentionally
+    /// omitted: their adapters treat the L1 secret as a construction
+    /// precondition (`from_env` returns `None` without it), so they cannot be
+    /// active-but-unconfigured.
+    pub fn warn_unenforceable_l1(&self) {
+        use tracing::warn;
+        // (platform, active, l1_configured)
+        #[allow(unused_mut)]
+        let mut checks: Vec<(&str, bool, bool)> = vec![
+            (
+                "telegram",
+                self.telegram_bot_token.is_some(),
+                self.telegram_secret_token.is_some(),
+            ),
+            (
+                "line",
+                self.line_channel_secret.is_some() || self.line_access_token.is_some(),
+                self.line_channel_secret.is_some(),
+            ),
+        ];
+        #[cfg(feature = "feishu")]
+        checks.push((
+            "feishu",
+            self.feishu.is_some(),
+            self.feishu
+                .as_ref()
+                .map(|f| f.config.encrypt_key.is_some())
+                .unwrap_or(false),
+        ));
+        #[cfg(feature = "googlechat")]
+        checks.push((
+            "googlechat",
+            self.google_chat.is_some(),
+            self.google_chat
+                .as_ref()
+                .map(|a| a.jwt_verifier.is_some())
+                .unwrap_or(false),
+        ));
+        for (platform, active, l1_configured) in checks {
+            if l1_unenforceable(active, l1_configured) {
+                warn!(
+                    platform,
+                    "L1 webhook authentication is NOT configured — this webhook accepts \
+                     unauthenticated requests, so the per-platform allowed_users (L3) allowlist \
+                     is forgeable: an attacker can POST a spoofed allowlisted sender id and pass \
+                     the trust gate. Configure the platform's webhook secret/signature to make \
+                     identity trust enforceable. \
+                     See https://github.com/openabdev/openab/issues/1356."
+                );
+            }
         }
     }
 
@@ -452,6 +523,10 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         client,
     });
 
+    // Phase 1 L1 audit (#1356): warn if any active webhook platform has no
+    // transport authentication configured (identity trust unenforceable).
+    state.warn_unenforceable_l1();
+
     // Background: sweep expired reply tokens
     {
         let cache_state = state.clone();
@@ -670,4 +745,20 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
 
 async fn health() -> &'static str {
     "ok"
+}
+
+#[cfg(test)]
+mod l1_audit_tests {
+    use super::l1_unenforceable;
+
+    #[test]
+    fn warns_only_when_active_and_secret_missing() {
+        // active platform, no L1 secret → unenforceable (warn)
+        assert!(l1_unenforceable(true, false));
+        // active with L1 configured → fine
+        assert!(!l1_unenforceable(true, true));
+        // inactive platform → never warn, regardless of L1
+        assert!(!l1_unenforceable(false, false));
+        assert!(!l1_unenforceable(false, true));
+    }
 }

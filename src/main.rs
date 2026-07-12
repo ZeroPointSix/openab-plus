@@ -869,6 +869,12 @@ async fn main() -> anyhow::Result<()> {
             };
             let gw_state = Arc::new(gw_state_inner);
 
+            // Phase 1 L1 audit (#1356): warn if any active webhook platform has
+            // no transport authentication configured. Called after
+            // apply_telegram_config so a config-supplied secret is not falsely
+            // flagged as missing.
+            gw_state.warn_unenforceable_l1();
+
             // Build axum router with platform webhook routes
             let mut app =
                 axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
