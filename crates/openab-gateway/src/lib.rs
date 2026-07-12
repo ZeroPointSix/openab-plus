@@ -208,15 +208,22 @@ impl AppState {
     /// gate. Phase 1 only warns (backward-compatible: existing no-secret
     /// deployments keep running); a later phase may escalate to a hard error.
     ///
+    /// `feishu_webhook_route_mounted`: whether the caller actually mounted the
+    /// Feishu webhook route. The two binaries differ — the standalone gateway
+    /// mounts it only in Webhook connection mode, while the unified binary
+    /// mounts it unconditionally — so exposure is the caller's knowledge, not
+    /// derivable from `AppState` alone.
+    ///
     /// Call this once at startup **after** all config overrides are applied
     /// (e.g. after `apply_telegram_config`), so a config-supplied secret is not
     /// falsely reported as missing. WeCom and MS Teams are intentionally
     /// omitted: their adapters treat the L1 secret as a construction
-    /// precondition (`from_env` returns `None` without it), so they cannot be
-    /// active-but-unconfigured.
-    pub fn warn_unenforceable_l1(&self) {
+    /// precondition (`from_env` returns `None` without it) and verify every
+    /// request, so they cannot be active-but-unconfigured.
+    #[cfg_attr(not(feature = "feishu"), allow(unused_variables))]
+    pub fn warn_unenforceable_l1(&self, feishu_webhook_route_mounted: bool) {
         use tracing::warn;
-        for (platform, hint) in self.unenforceable_l1() {
+        for (platform, hint) in self.unenforceable_l1(feishu_webhook_route_mounted) {
             warn!(
                 platform,
                 hint,
@@ -233,7 +240,11 @@ impl AppState {
     /// The platforms whose L1 is unenforceable right now, with a remediation
     /// hint each. Separated from the warn wrapper so the per-platform
     /// active/configured wiring is unit-testable.
-    fn unenforceable_l1(&self) -> Vec<(&'static str, &'static str)> {
+    #[cfg_attr(not(feature = "feishu"), allow(unused_variables))]
+    fn unenforceable_l1(
+        &self,
+        feishu_webhook_route_mounted: bool,
+    ) -> Vec<(&'static str, &'static str)> {
         // (platform, active, l1_configured, remediation hint)
         #[allow(unused_mut)]
         let mut checks: Vec<(&str, bool, bool, &str)> = vec![
@@ -260,7 +271,12 @@ impl AppState {
         #[cfg(feature = "feishu")]
         checks.push((
             "feishu",
-            self.feishu.is_some(),
+            // Active = the webhook route is actually exposed (caller-supplied:
+            // the standalone gateway mounts it only in Webhook connection
+            // mode; the unified binary mounts it unconditionally). Websocket
+            // delivery itself needs no L1 secret — events arrive over an
+            // outbound long-connection.
+            self.feishu.is_some() && feishu_webhook_route_mounted,
             self.feishu
                 .as_ref()
                 .map(|f| f.config.encrypt_key.is_some())
@@ -545,7 +561,17 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
 
     // Phase 1 L1 audit (#1356): warn if any active webhook platform has no
     // transport authentication configured (identity trust unenforceable).
-    state.warn_unenforceable_l1();
+    // The standalone gateway mounts the feishu webhook route only in Webhook
+    // connection mode (see the route setup above).
+    #[cfg(feature = "feishu")]
+    let feishu_webhook_route_mounted = state
+        .feishu
+        .as_ref()
+        .map(|f| f.config.connection_mode == adapters::feishu::ConnectionMode::Webhook)
+        .unwrap_or(false);
+    #[cfg(not(feature = "feishu"))]
+    let feishu_webhook_route_mounted = false;
+    state.warn_unenforceable_l1(feishu_webhook_route_mounted);
 
     // Background: sweep expired reply tokens
     {
@@ -789,13 +815,18 @@ mod l1_audit_tests {
     }
 
     fn flagged(s: &AppState) -> Vec<&'static str> {
-        s.unenforceable_l1().into_iter().map(|(p, _)| p).collect()
+        s.unenforceable_l1(false)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect()
     }
 
     #[test]
     fn inactive_platforms_are_never_flagged() {
         // test_default is all-None → nothing configured, nothing active.
         assert!(flagged(&state()).is_empty());
+        // …even when a feishu webhook route is reported as mounted (no adapter).
+        assert!(state().unenforceable_l1(true).is_empty());
     }
 
     #[test]
