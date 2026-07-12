@@ -216,6 +216,24 @@ impl AppState {
     /// active-but-unconfigured.
     pub fn warn_unenforceable_l1(&self) {
         use tracing::warn;
+        for (platform, hint) in self.unenforceable_l1() {
+            warn!(
+                platform,
+                hint,
+                "L1 webhook authentication is NOT configured — this webhook accepts \
+                 unauthenticated requests, so the per-platform allowed_users (L3) allowlist \
+                 is forgeable: an attacker can POST a spoofed allowlisted sender id and pass \
+                 the trust gate. Configure the platform's webhook secret/signature to make \
+                 identity trust enforceable. \
+                 See https://github.com/openabdev/openab/issues/1356."
+            );
+        }
+    }
+
+    /// The platforms whose L1 is unenforceable right now, with a remediation
+    /// hint each. Separated from the warn wrapper so the per-platform
+    /// active/configured wiring is unit-testable.
+    fn unenforceable_l1(&self) -> Vec<(&'static str, &'static str)> {
         // (platform, active, l1_configured, remediation hint)
         #[allow(unused_mut)]
         let mut checks: Vec<(&str, bool, bool, &str)> = vec![
@@ -259,20 +277,11 @@ impl AppState {
                 .unwrap_or(false),
             "set GOOGLE_CHAT_AUDIENCE",
         ));
-        for (platform, active, l1_configured, hint) in checks {
-            if l1_unenforceable(active, l1_configured) {
-                warn!(
-                    platform,
-                    hint,
-                    "L1 webhook authentication is NOT configured — this webhook accepts \
-                     unauthenticated requests, so the per-platform allowed_users (L3) allowlist \
-                     is forgeable: an attacker can POST a spoofed allowlisted sender id and pass \
-                     the trust gate. Configure the platform's webhook secret/signature to make \
-                     identity trust enforceable. \
-                     See https://github.com/openabdev/openab/issues/1356."
-                );
-            }
-        }
+        checks
+            .into_iter()
+            .filter(|(_, active, l1_configured, _)| l1_unenforceable(*active, *l1_configured))
+            .map(|(platform, _, _, hint)| (platform, hint))
+            .collect()
     }
 
     /// Apply resolved `[telegram]` config values, overriding the env-derived
@@ -760,7 +769,8 @@ async fn health() -> &'static str {
 
 #[cfg(test)]
 mod l1_audit_tests {
-    use super::l1_unenforceable;
+    use super::{l1_unenforceable, AppState};
+    use tokio::sync::broadcast;
 
     #[test]
     fn warns_only_when_active_and_secret_missing() {
@@ -771,5 +781,48 @@ mod l1_audit_tests {
         // inactive platform → never warn, regardless of L1
         assert!(!l1_unenforceable(false, false));
         assert!(!l1_unenforceable(false, true));
+    }
+
+    fn state() -> AppState {
+        let (tx, _rx) = broadcast::channel(4);
+        AppState::test_default(tx)
+    }
+
+    fn flagged(s: &AppState) -> Vec<&'static str> {
+        s.unenforceable_l1().into_iter().map(|(p, _)| p).collect()
+    }
+
+    #[test]
+    fn inactive_platforms_are_never_flagged() {
+        // test_default is all-None → nothing configured, nothing active.
+        assert!(flagged(&state()).is_empty());
+    }
+
+    #[test]
+    fn telegram_active_without_l1_is_flagged() {
+        let mut s = state();
+        s.telegram_bot_token = Some("bot".into());
+        assert_eq!(flagged(&s), vec!["telegram"]);
+
+        // secret_token satisfies L1
+        s.telegram_secret_token = Some("sec".into());
+        assert!(flagged(&s).is_empty());
+
+        // trusted_source_only is an accepted alternate L1
+        s.telegram_secret_token = None;
+        s.telegram_trusted_source_only = true;
+        assert!(flagged(&s).is_empty());
+    }
+
+    #[test]
+    fn line_flagged_only_when_active_without_secret() {
+        let mut s = state();
+        // access token present but no channel secret → active, L1 missing
+        s.line_access_token = Some("tok".into());
+        assert_eq!(flagged(&s), vec!["line"]);
+
+        // channel secret present → L1 enforced
+        s.line_channel_secret = Some("csecret".into());
+        assert!(flagged(&s).is_empty());
     }
 }
