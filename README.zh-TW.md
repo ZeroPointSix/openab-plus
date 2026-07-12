@@ -11,8 +11,8 @@
 🪼 **加入我們的社群！** 歡迎到 Discord 和大家打招呼：**[🪼 OpenAB — Official](https://openab.dev/discord)** 🎉
 
 ```
-┌──────────────┐  Gateway WS  ┌─────────────────┐  ACP stdio   ┌─────────────────────────┐
-│ Discord      │◄────────────►│                 │─────────────►│ agent runtime           │
+┌──────────────┐  Gateway WS  ┌─────────────────┐  ACP stdio  ┌─────────────────────────┐
+│ Discord      │◄────────────►│                 │────────────►│ agent runtime           │
 │ User         │              │ openab (Rust)   │◄──JSON-RPC──│ (ACP process)           │
 ├──────────────┤  Socket Mode │ thin ACP broker │             ├─────────────────────────┤
 │ Slack        │◄────────────►│                 │             │ kiro-cli acp            │
