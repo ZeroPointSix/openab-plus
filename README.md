@@ -11,8 +11,8 @@ A lightweight, secure, cloud-native ACP harness that bridges **Discord, Slack**,
 🪼 **Join our community!** Come say hi on Discord — we'd love to have you: **[🪼 OpenAB — Official](https://openab.dev/discord)** 🎉
 
 ```
-┌──────────────┐  Gateway WS  ┌─────────────────┐  ACP stdio   ┌─────────────────────────┐
-│ Discord      │◄────────────►│                 │─────────────►│ agent runtime           │
+┌──────────────┐  Gateway WS  ┌─────────────────┐  ACP stdio  ┌─────────────────────────┐
+│ Discord      │◄────────────►│                 │────────────►│ agent runtime           │
 │ User         │              │ openab (Rust)   │◄──JSON-RPC──│ (ACP process)           │
 ├──────────────┤  Socket Mode │ thin ACP broker │             ├─────────────────────────┤
 │ Slack        │◄────────────►│                 │             │ kiro-cli acp            │
