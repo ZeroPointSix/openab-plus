@@ -216,18 +216,27 @@ impl AppState {
     /// active-but-unconfigured.
     pub fn warn_unenforceable_l1(&self) {
         use tracing::warn;
-        // (platform, active, l1_configured)
+        // (platform, active, l1_configured, remediation hint)
         #[allow(unused_mut)]
-        let mut checks: Vec<(&str, bool, bool)> = vec![
+        let mut checks: Vec<(&str, bool, bool, &str)> = vec![
             (
                 "telegram",
                 self.telegram_bot_token.is_some(),
-                self.telegram_secret_token.is_some(),
+                // secret_token is the primary L1; the trusted_source_only IP
+                // allowlist is a weaker-but-real alternate L1 (ADR Layer 1).
+                self.telegram_secret_token.is_some() || self.telegram_trusted_source_only,
+                "set TELEGRAM_SECRET_TOKEN (or [telegram].secret_token), or enable \
+                 TELEGRAM_TRUSTED_SOURCE_ONLY",
             ),
             (
                 "line",
+                // Any LINE env present = an operator intends to run LINE. With
+                // no LINE env at all the route still mounts, but spoofed events
+                // then face the core trust gate's deny-all default, so we avoid
+                // a false-positive warn on gateways that don't use LINE.
                 self.line_channel_secret.is_some() || self.line_access_token.is_some(),
                 self.line_channel_secret.is_some(),
+                "set LINE_CHANNEL_SECRET",
             ),
         ];
         #[cfg(feature = "feishu")]
@@ -238,6 +247,7 @@ impl AppState {
                 .as_ref()
                 .map(|f| f.config.encrypt_key.is_some())
                 .unwrap_or(false),
+            "set FEISHU_ENCRYPT_KEY",
         ));
         #[cfg(feature = "googlechat")]
         checks.push((
@@ -247,11 +257,13 @@ impl AppState {
                 .as_ref()
                 .map(|a| a.jwt_verifier.is_some())
                 .unwrap_or(false),
+            "set GOOGLE_CHAT_AUDIENCE",
         ));
-        for (platform, active, l1_configured) in checks {
+        for (platform, active, l1_configured, hint) in checks {
             if l1_unenforceable(active, l1_configured) {
                 warn!(
                     platform,
+                    hint,
                     "L1 webhook authentication is NOT configured — this webhook accepts \
                      unauthenticated requests, so the per-platform allowed_users (L3) allowlist \
                      is forgeable: an attacker can POST a spoofed allowlisted sender id and pass \
@@ -335,9 +347,8 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     if telegram_bot_token.is_some() {
         let webhook_path =
             std::env::var("TELEGRAM_WEBHOOK_PATH").unwrap_or_else(|_| "/webhook/telegram".into());
-        if telegram_secret_token.is_none() {
-            warn!("TELEGRAM_SECRET_TOKEN not set — webhook requests are NOT validated (insecure)");
-        }
+        // Missing-secret warning is emitted by warn_unenforceable_l1 below,
+        // which also accounts for the trusted_source_only IP-allowlist L1.
         info!(path = %webhook_path, "telegram adapter enabled");
         app = app.route(&webhook_path, post(adapters::telegram::webhook));
     }
