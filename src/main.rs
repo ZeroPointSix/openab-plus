@@ -677,6 +677,13 @@ async fn main() -> anyhow::Result<()> {
     if cfg.telegram.is_some() || std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
         configured_platforms.push("telegram");
     }
+    #[cfg(feature = "googlechat")]
+    if std::env::var("GOOGLE_CHAT_ENABLED")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+    {
+        configured_platforms.push("googlechat");
+    }
     cron::validate_cronjobs(&cfg.cron.jobs, &configured_platforms)?;
 
     // Spawn Slack adapter (background task)
@@ -1082,6 +1089,10 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "telegram")]
         if let Some(ref a) = shared_unified_adapter {
             cron_adapters.insert("telegram".into(), a.clone());
+        }
+        #[cfg(feature = "googlechat")]
+        if let Some(ref a) = shared_unified_adapter {
+            cron_adapters.insert("googlechat".into(), a.clone());
         }
         let cron_platforms: Vec<String> =
             configured_platforms.iter().map(|s| s.to_string()).collect();
