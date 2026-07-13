@@ -522,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
         platform_trust_override(
             &mut reg,
             "googlechat",
-            &cfg.googlechat,
+            &cfg.googlechat.as_ref().map(|g| g.trust_config()),
             "GOOGLE_CHAT",
             cfg!(feature = "googlechat")
                 && std::env::var("GOOGLE_CHAT_ENABLED")
@@ -899,6 +899,22 @@ async fn main() -> anyhow::Result<()> {
                     debounce_secs: r.debounce_secs,
                 });
             }
+            // First-class `[googlechat]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + GOOGLE_CHAT_* env
+            // fallback, #1379). Applied before warn_unenforceable_l1 so a
+            // config-supplied audience (JWT verifier) is not falsely flagged.
+            #[cfg(feature = "googlechat")]
+            if let Some(ref g) = cfg.googlechat {
+                let r = g.resolve();
+                gw_state_inner.apply_googlechat_config(openab_gateway::GatewayGoogleChatConfig {
+                    enabled: r.enabled,
+                    sa_key_json: r.sa_key_json,
+                    sa_key_file: r.sa_key_file,
+                    access_token: r.access_token,
+                    audience: r.audience,
+                    webhook_path: r.webhook_path,
+                });
+            }
             let gw_state = Arc::new(gw_state_inner);
 
             // Phase 1 L1 audit (#1356): warn if any active webhook platform has
@@ -981,11 +997,9 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "googlechat")]
             if gw_state.google_chat.is_some() {
-                let path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
-                    .unwrap_or_else(|_| "/webhook/googlechat".into());
-                info!(path = %path, "unified: googlechat adapter enabled");
+                info!(path = %gw_state.googlechat_webhook_path, "unified: googlechat adapter enabled");
                 app = app.route(
-                    &path,
+                    &gw_state.googlechat_webhook_path,
                     axum::routing::post(openab_gateway::adapters::googlechat::webhook),
                 );
             }

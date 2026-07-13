@@ -107,6 +107,12 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # allowed_users = ["zhangsan", "lisi"]  # WeCom UserIDs (tenant-assigned, freeform strings)
 #                                       # env fallback: WECOM_ALLOWED_USERS (comma-separated)
 # [googlechat]
+# enabled = true                        # env fallback: GOOGLE_CHAT_ENABLED
+# sa_key_json = "${GOOGLE_CHAT_SA_KEY_JSON}"   # inline SA key; wins over sa_key_file
+# sa_key_file = "/etc/openab/sa.json"   # env fallback: GOOGLE_CHAT_SA_KEY_FILE
+# access_token = "${GOOGLE_CHAT_ACCESS_TOKEN}" # static token alternative
+# audience = "projects/<n>/..."         # enables webhook JWT verification (L1)
+# webhook_path = "/webhook/googlechat"  # env fallback: GOOGLE_CHAT_WEBHOOK_PATH
 # allow_all_users = false               # env fallback: GOOGLE_CHAT_ALLOW_ALL_USERS
 # allowed_users = ["users/123456789"]   # Chat user resource names (users/<id>)
 #                                       # env fallback: GOOGLE_CHAT_ALLOWED_USERS (comma-separated)

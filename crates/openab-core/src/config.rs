@@ -174,7 +174,7 @@ pub struct Config {
     pub telegram: Option<TelegramConfig>,
     pub line: Option<LineConfig>,
     pub wecom: Option<WecomConfig>,
-    pub googlechat: Option<PlatformTrustConfig>,
+    pub googlechat: Option<GoogleChatConfig>,
     pub teams: Option<PlatformTrustConfig>,
     pub agentcore: Option<AgentCoreConfig>,
     #[serde(default)]
@@ -956,6 +956,106 @@ impl WecomConfig {
             allowed_users: match &self.allowed_users {
                 Some(list) => list.clone(),
                 None => std::env::var("WECOM_ALLOWED_USERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            },
+        }
+    }
+
+    /// Trust-fields view for the shared registry override path, preserving
+    /// the semantics the section had as a [`PlatformTrustConfig`].
+    pub fn trust_config(&self) -> PlatformTrustConfig {
+        PlatformTrustConfig {
+            allow_all_users: self.allow_all_users,
+            allowed_users: self.allowed_users.clone(),
+        }
+    }
+}
+
+/// First-class `[googlechat]` section — credentials, connection, and L3
+/// identity trust for the Google Chat adapter. Config-first invariant
+/// (#1375): each field resolves `[googlechat].field` (with `${}` expansion)
+/// → `GOOGLE_CHAT_*` env var → default. Graduates from the shared
+/// [`PlatformTrustConfig`] (#1379).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct GoogleChatConfig {
+    /// Enable the adapter. Env fallback: `GOOGLE_CHAT_ENABLED`
+    /// (`true`/`1`; default false).
+    pub enabled: Option<bool>,
+    /// Service-account key JSON (inline). Env fallback:
+    /// `GOOGLE_CHAT_SA_KEY_JSON`. Takes precedence over `sa_key_file`.
+    pub sa_key_json: Option<String>,
+    /// Path to a service-account key file. Env fallback:
+    /// `GOOGLE_CHAT_SA_KEY_FILE`.
+    pub sa_key_file: Option<String>,
+    /// Static access token (alternative to the service account). Env
+    /// fallback: `GOOGLE_CHAT_ACCESS_TOKEN`.
+    pub access_token: Option<String>,
+    /// JWT audience — enables webhook JWT verification (L1). Env fallback:
+    /// `GOOGLE_CHAT_AUDIENCE`.
+    pub audience: Option<String>,
+    /// Webhook mount path. Env fallback: `GOOGLE_CHAT_WEBHOOK_PATH`
+    /// (default `/webhook/googlechat`).
+    pub webhook_path: Option<String>,
+    /// Explicit flag: true = allow all users, false = check `allowed_users`.
+    /// When not set, defaults to `false` (deny-all, per identity-trust-none
+    /// ADR). Env fallback: `GOOGLE_CHAT_ALLOW_ALL_USERS` (empty = unset).
+    pub allow_all_users: Option<bool>,
+    /// Chat user resource names (`users/<id>`) allowed to interact. Only
+    /// checked when `allow_all_users` resolves to `false`. Env fallback:
+    /// `GOOGLE_CHAT_ALLOWED_USERS` (comma-separated).
+    pub allowed_users: Option<Vec<String>>,
+}
+
+/// Fully resolved Google Chat settings (config → env → default applied).
+#[derive(Debug, Clone)]
+pub struct ResolvedGoogleChat {
+    pub enabled: bool,
+    pub sa_key_json: Option<String>,
+    pub sa_key_file: Option<String>,
+    pub access_token: Option<String>,
+    pub audience: Option<String>,
+    pub webhook_path: String,
+    pub allow_all_users: bool,
+    pub allowed_users: Vec<String>,
+}
+
+impl GoogleChatConfig {
+    /// Resolve every field: config value (if set) → `GOOGLE_CHAT_*` env →
+    /// default. String fields filter empty strings from `${}` expansion.
+    pub fn resolve(&self) -> ResolvedGoogleChat {
+        let opt_str = |cfg: &Option<String>, env: &str| -> Option<String> {
+            cfg.as_ref()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .or_else(|| std::env::var(env).ok())
+        };
+        ResolvedGoogleChat {
+            enabled: self.enabled.unwrap_or_else(|| {
+                std::env::var("GOOGLE_CHAT_ENABLED")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false)
+            }),
+            sa_key_json: opt_str(&self.sa_key_json, "GOOGLE_CHAT_SA_KEY_JSON"),
+            sa_key_file: opt_str(&self.sa_key_file, "GOOGLE_CHAT_SA_KEY_FILE"),
+            access_token: opt_str(&self.access_token, "GOOGLE_CHAT_ACCESS_TOKEN"),
+            audience: opt_str(&self.audience, "GOOGLE_CHAT_AUDIENCE"),
+            webhook_path: opt_str(&self.webhook_path, "GOOGLE_CHAT_WEBHOOK_PATH")
+                .unwrap_or_else(|| "/webhook/googlechat".into()),
+            allow_all_users: self.allow_all_users.unwrap_or_else(|| {
+                std::env::var("GOOGLE_CHAT_ALLOW_ALL_USERS")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or(false)
+            }),
+            allowed_users: match &self.allowed_users {
+                Some(list) => list.clone(),
+                None => std::env::var("GOOGLE_CHAT_ALLOWED_USERS")
                     .unwrap_or_default()
                     .split(',')
                     .map(|s| s.trim().to_string())
@@ -2304,6 +2404,63 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
         std::env::remove_var("WECOM_DEBOUNCE_SECS");
     }
 
+    /// All `GOOGLE_CHAT_*` env scenarios in ONE test (env is process-global).
+    #[test]
+    fn googlechat_resolve_all_scenarios() {
+        for k in [
+            "GOOGLE_CHAT_ENABLED",
+            "GOOGLE_CHAT_SA_KEY_JSON",
+            "GOOGLE_CHAT_SA_KEY_FILE",
+            "GOOGLE_CHAT_ACCESS_TOKEN",
+            "GOOGLE_CHAT_AUDIENCE",
+            "GOOGLE_CHAT_WEBHOOK_PATH",
+        ] {
+            std::env::remove_var(k);
+        }
+        // --- defaults ---
+        let r = GoogleChatConfig::default().resolve();
+        assert!(!r.enabled);
+        assert!(r.audience.is_none());
+        assert_eq!(r.webhook_path, "/webhook/googlechat");
+
+        // --- config wins over env ---
+        std::env::set_var("GOOGLE_CHAT_ENABLED", "true");
+        std::env::set_var("GOOGLE_CHAT_AUDIENCE", "env-aud");
+        let cfg = GoogleChatConfig {
+            enabled: Some(false),
+            audience: Some("cfg-aud".into()),
+            ..Default::default()
+        };
+        let r = cfg.resolve();
+        assert!(!r.enabled); // config false wins over env true
+        assert_eq!(r.audience.as_deref(), Some("cfg-aud"));
+
+        // --- empty-string ${} expansion falls through to env ---
+        let cfg = GoogleChatConfig {
+            audience: Some("".into()),
+            ..Default::default()
+        };
+        let r = cfg.resolve();
+        assert!(r.enabled); // env fallback
+        assert_eq!(r.audience.as_deref(), Some("env-aud"));
+
+        // --- trust_config() preserves trust semantics ---
+        let cfg = GoogleChatConfig {
+            allow_all_users: Some(true),
+            allowed_users: Some(vec!["users/123".into()]),
+            ..Default::default()
+        };
+        let t = cfg.trust_config();
+        assert_eq!(t.allow_all_users, Some(true));
+        assert_eq!(
+            t.allowed_users.as_deref(),
+            Some(&["users/123".to_string()][..])
+        );
+
+        std::env::remove_var("GOOGLE_CHAT_ENABLED");
+        std::env::remove_var("GOOGLE_CHAT_AUDIENCE");
+    }
+
     #[test]
     fn platform_trust_sections_parse_from_toml() {
         let toml_str = r#"
@@ -2316,6 +2473,7 @@ token = "tok"
 allowed_users = ["zhangsan", "lisi"]
 
 [googlechat]
+audience = "projects/p/..."
 allowed_users = ["users/123456789"]
 
 [teams]
@@ -2331,6 +2489,7 @@ allow_all_users = true
         );
         assert_eq!(wecom.allow_all_users, None);
         let gc = cfg.googlechat.expect("googlechat section");
+        assert_eq!(gc.audience.as_deref(), Some("projects/p/..."));
         assert_eq!(
             gc.allowed_users.as_deref(),
             Some(&["users/123456789".to_string()][..])

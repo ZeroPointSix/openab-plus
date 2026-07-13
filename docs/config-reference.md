@@ -178,13 +178,30 @@ Full first-class WeCom section (config-first parity, #1378) — credentials, con
 
 ---
 
-## `[googlechat]` / `[teams]`
+## `[googlechat]`
 
-First-class L3 identity trust — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`GOOGLE_CHAT_*`, `TEAMS_APP_ID`/`TEAMS_APP_SECRET`) until their config-first parity slices land (#1379, #1380).
+Full first-class Google Chat section (config-first parity, #1379) — credentials, connection, and L3 identity trust. Each field resolves: config → `GOOGLE_CHAT_*` env → default.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Enable the adapter. Env: `GOOGLE_CHAT_ENABLED`. |
+| `sa_key_json` | string | — | Inline service-account key JSON (wins over `sa_key_file`). Env: `GOOGLE_CHAT_SA_KEY_JSON`. |
+| `sa_key_file` | string | — | Path to a service-account key file. Env: `GOOGLE_CHAT_SA_KEY_FILE`. |
+| `access_token` | string | — | Static access token alternative. Env: `GOOGLE_CHAT_ACCESS_TOKEN`. |
+| `audience` | string | — | JWT audience — enables webhook JWT verification (L1). Env: `GOOGLE_CHAT_AUDIENCE`. |
+| `webhook_path` | string | `/webhook/googlechat` | Env: `GOOGLE_CHAT_WEBHOOK_PATH`. |
+| `allow_all_users` | bool \| omit | `false` (deny-all) | Env: `GOOGLE_CHAT_ALLOW_ALL_USERS`. |
+| `allowed_users` | string[] | `[]` | User resource names (`users/<id>`). Env: `GOOGLE_CHAT_ALLOWED_USERS`. |
+
+---
+
+## `[teams]`
+
+First-class L3 identity trust — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`TEAMS_APP_ID`/`TEAMS_APP_SECRET`) until the Teams config-first parity slice lands (#1380).
 
 > **Mode scoping:** these sections (like `[line]`) take effect on the **embedded/unified adapter path**, where events pass the shared ingress trust gate. Deployments using the standalone `openab-gateway` companion over WebSocket enforce trust via `[gateway].allow_all_users` / `allowed_users` instead; Phase 1c consolidates the two paths.
 
-Each field resolves: config value → `{PREFIX}_*` env var → default (deny-all). Env prefixes: `GOOGLE_CHAT`, `TEAMS`.
+Each field resolves: config value → `TEAMS_*` env var → default (deny-all).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -195,13 +212,9 @@ Sender ID formats per platform:
 
 | Platform | Sender ID format | Example |
 |----------|-----------------|---------|
-| Google Chat | User resource name | `"users/123456789"` |
 | MS Teams | Bot Framework `activity.from.id` | `"29:1abc..."` |
 
 ```toml
-[googlechat]
-allowed_users = ["users/123456789"]
-
 [teams]
 allowed_users = ["29:1abc..."]
 # allow_all_users = true   # explicit opt-in only

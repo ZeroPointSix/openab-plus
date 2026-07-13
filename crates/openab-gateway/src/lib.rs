@@ -50,6 +50,9 @@ pub struct AppState {
     pub feishu: Option<adapters::feishu::FeishuAdapter>,
     #[cfg(feature = "googlechat")]
     pub google_chat: Option<adapters::googlechat::GoogleChatAdapter>,
+    /// Webhook mount path for Google Chat (env: `GOOGLE_CHAT_WEBHOOK_PATH`;
+    /// config-first via `apply_googlechat_config`, default `/webhook/googlechat`).
+    pub googlechat_webhook_path: String,
     #[cfg(feature = "wecom")]
     pub wecom: Option<adapters::wecom::WecomAdapter>,
     pub ws_token: Option<String>,
@@ -87,6 +90,7 @@ impl AppState {
             feishu: None,
             #[cfg(feature = "googlechat")]
             google_chat: None,
+            googlechat_webhook_path: "/webhook/googlechat".into(),
             #[cfg(feature = "wecom")]
             wecom: None,
             ws_token: None,
@@ -101,7 +105,7 @@ impl AppState {
     /// Initializes all platform adapters based on available env vars.
     /// `ws_token` is passed separately (only needed for standalone gateway mode).
     pub fn from_env(event_tx: broadcast::Sender<String>, ws_token: Option<String>) -> Self {
-        use tracing::{info, warn};
+        use tracing::info;
 
         // Telegram
         let telegram_bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
@@ -141,34 +145,18 @@ impl AppState {
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false);
             if enabled {
-                let token_cache = std::env::var("GOOGLE_CHAT_SA_KEY_JSON")
-                    .ok()
-                    .or_else(|| {
-                        std::env::var("GOOGLE_CHAT_SA_KEY_FILE")
-                            .ok()
-                            .and_then(|path| {
-                                std::fs::read_to_string(&path).map_err(|e| {
-                                    warn!("failed to read GOOGLE_CHAT_SA_KEY_FILE '{}': {e}", path);
-                                }).ok()
-                            })
-                    })
-                    .and_then(|json| {
-                        adapters::googlechat::GoogleChatTokenCache::new(&json)
-                            .map_err(|e| warn!("googlechat SA key error: {e}"))
-                            .ok()
-                    });
-                let access_token = std::env::var("GOOGLE_CHAT_ACCESS_TOKEN").ok();
-                let jwt_verifier = std::env::var("GOOGLE_CHAT_AUDIENCE").ok().map(|aud| {
-                    info!("googlechat JWT verification enabled (audience={aud})");
-                    adapters::googlechat::GoogleChatJwtVerifier::new(aud)
-                });
-                Some(adapters::googlechat::GoogleChatAdapter::new(
-                    token_cache, access_token, jwt_verifier,
+                Some(adapters::googlechat::GoogleChatAdapter::from_parts(
+                    std::env::var("GOOGLE_CHAT_SA_KEY_JSON").ok(),
+                    std::env::var("GOOGLE_CHAT_SA_KEY_FILE").ok(),
+                    std::env::var("GOOGLE_CHAT_ACCESS_TOKEN").ok(),
+                    std::env::var("GOOGLE_CHAT_AUDIENCE").ok(),
                 ))
             } else {
                 None
             }
         };
+        let googlechat_webhook_path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
+            .unwrap_or_else(|_| "/webhook/googlechat".into());
 
         // WeCom
         #[cfg(feature = "wecom")]
@@ -196,6 +184,7 @@ impl AppState {
             feishu,
             #[cfg(feature = "googlechat")]
             google_chat,
+            googlechat_webhook_path,
             #[cfg(feature = "wecom")]
             wecom,
             ws_token,
@@ -351,6 +340,25 @@ impl AppState {
         })
         .map(adapters::wecom::WecomAdapter::new);
     }
+
+    /// Apply resolved `[googlechat]` config values (#1379), rebuilding the
+    /// adapter from them via the same `from_parts` construction as env-only
+    /// startup. Call before [`AppState::warn_unenforceable_l1`] so a
+    /// config-supplied `audience` (JWT verifier) is not falsely flagged.
+    #[cfg(feature = "googlechat")]
+    pub fn apply_googlechat_config(&mut self, cfg: GatewayGoogleChatConfig) {
+        self.googlechat_webhook_path = cfg.webhook_path;
+        self.google_chat = if cfg.enabled {
+            Some(adapters::googlechat::GoogleChatAdapter::from_parts(
+                cfg.sa_key_json,
+                cfg.sa_key_file,
+                cfg.access_token,
+                cfg.audience,
+            ))
+        } else {
+            None
+        };
+    }
 }
 
 /// Parameter object for passing resolved Telegram config across the crate
@@ -386,6 +394,18 @@ pub struct GatewayWecomConfig {
     pub webhook_path: String,
     pub streaming_enabled: bool,
     pub debounce_secs: u64,
+}
+
+/// Parameter object for passing resolved Google Chat config across the crate
+/// boundary without introducing a dependency on `openab-core` (#1379).
+#[derive(Debug, Clone)]
+pub struct GatewayGoogleChatConfig {
+    pub enabled: bool,
+    pub sa_key_json: Option<String>,
+    pub sa_key_file: Option<String>,
+    pub access_token: Option<String>,
+    pub audience: Option<String>,
+    pub webhook_path: String,
 }
 
 // --- Public serve() entry point ---
@@ -533,42 +553,21 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
 
     // Google Chat adapter
     #[cfg(feature = "googlechat")]
+    let googlechat_webhook_path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
+        .unwrap_or_else(|_| "/webhook/googlechat".into());
+    #[cfg(feature = "googlechat")]
     let google_chat = {
         let enabled = std::env::var("GOOGLE_CHAT_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         if enabled {
-            let token_cache = std::env::var("GOOGLE_CHAT_SA_KEY_JSON")
-                .ok()
-                .or_else(|| {
-                    std::env::var("GOOGLE_CHAT_SA_KEY_FILE")
-                        .ok()
-                        .and_then(|path| {
-                            std::fs::read_to_string(&path).map_err(|e| {
-                                warn!("failed to read GOOGLE_CHAT_SA_KEY_FILE '{}': {e}", path);
-                            }).ok()
-                        })
-                })
-                .and_then(|json| {
-                    adapters::googlechat::GoogleChatTokenCache::new(&json)
-                        .map_err(|e| warn!("googlechat SA key error: {e}"))
-                        .ok()
-                });
-            let access_token = std::env::var("GOOGLE_CHAT_ACCESS_TOKEN").ok();
-            let jwt_verifier = std::env::var("GOOGLE_CHAT_AUDIENCE").ok().map(|aud| {
-                info!("googlechat webhook JWT verification enabled (audience={aud})");
-                adapters::googlechat::GoogleChatJwtVerifier::new(aud)
-            });
-
-            let webhook_path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
-                .unwrap_or_else(|_| "/webhook/googlechat".into());
-            info!(path = %webhook_path, "googlechat adapter enabled");
-            app = app.route(&webhook_path, post(adapters::googlechat::webhook));
-
-            Some(adapters::googlechat::GoogleChatAdapter::new(
-                token_cache,
-                access_token,
-                jwt_verifier,
+            info!(path = %googlechat_webhook_path, "googlechat adapter enabled");
+            app = app.route(&googlechat_webhook_path, post(adapters::googlechat::webhook));
+            Some(adapters::googlechat::GoogleChatAdapter::from_parts(
+                std::env::var("GOOGLE_CHAT_SA_KEY_JSON").ok(),
+                std::env::var("GOOGLE_CHAT_SA_KEY_FILE").ok(),
+                std::env::var("GOOGLE_CHAT_ACCESS_TOKEN").ok(),
+                std::env::var("GOOGLE_CHAT_AUDIENCE").ok(),
             ))
         } else {
             None
@@ -576,6 +575,8 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "googlechat"))]
     let google_chat: Option<()> = None;
+    #[cfg(not(feature = "googlechat"))]
+    let googlechat_webhook_path = "/webhook/googlechat".to_string();
 
     // WeCom adapter
     #[cfg(feature = "wecom")]
@@ -621,6 +622,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         feishu,
         #[cfg(feature = "googlechat")]
         google_chat,
+        googlechat_webhook_path,
         #[cfg(feature = "wecom")]
         wecom,
         ws_token,
@@ -926,6 +928,47 @@ mod l1_audit_tests {
         // channel secret present → L1 enforced
         s.line_channel_secret = Some("csecret".into());
         assert!(flagged(&s).is_empty());
+    }
+
+    #[cfg(feature = "googlechat")]
+    #[test]
+    fn apply_googlechat_config_builds_adapter_and_feeds_l1_warning() {
+        use super::GatewayGoogleChatConfig;
+        let mut s = state();
+        // Enabled without audience → adapter active, no JWT verifier → flagged.
+        s.apply_googlechat_config(GatewayGoogleChatConfig {
+            enabled: true,
+            sa_key_json: None,
+            sa_key_file: None,
+            access_token: Some("tok".into()),
+            audience: None,
+            webhook_path: "/hook/gc".into(),
+        });
+        assert!(s.google_chat.is_some());
+        assert_eq!(s.googlechat_webhook_path, "/hook/gc");
+        assert_eq!(flagged(&s), vec!["googlechat"]);
+
+        // Config-supplied audience builds the verifier → L1 satisfied.
+        s.apply_googlechat_config(GatewayGoogleChatConfig {
+            enabled: true,
+            sa_key_json: None,
+            sa_key_file: None,
+            access_token: Some("tok".into()),
+            audience: Some("aud".into()),
+            webhook_path: "/hook/gc".into(),
+        });
+        assert!(flagged(&s).is_empty());
+
+        // Disabled → adapter removed.
+        s.apply_googlechat_config(GatewayGoogleChatConfig {
+            enabled: false,
+            sa_key_json: None,
+            sa_key_file: None,
+            access_token: None,
+            audience: None,
+            webhook_path: "/hook/gc".into(),
+        });
+        assert!(s.google_chat.is_none());
     }
 
     #[test]
