@@ -156,6 +156,26 @@ fn has_unified_wecom_config(cfg: &config::Config) -> bool {
     })
 }
 
+/// Trust view of the `[gateway]` section for the standalone WebSocket platform.
+/// Same `resolve_allow_all` semantics the WS path's inline allowlist filter used
+/// before L2/L3 moved to the shared registry (#1356 Phase 1c prerequisite):
+/// explicit flag wins; otherwise a non-empty list implies deny-by-default.
+fn gateway_section_trust(gw: &config::GatewayConfig) -> openab_core::trust::TrustConfig {
+    openab_core::trust::TrustConfig::new(
+        Some(config::resolve_allow_all(
+            gw.allow_all_channels,
+            &gw.allowed_channels,
+        )),
+        gw.allowed_channels.clone(),
+        None, // allow_dm unused in Phase 1 (is_dm passed as false)
+        Some(config::resolve_allow_all(
+            gw.allow_all_users,
+            &gw.allowed_users,
+        )),
+        gw.allowed_users.clone(),
+    )
+}
+
 /// Apply a platform's first-class trust section to the registry, or — when the
 /// platform is active but still trust-driven by the deprecated uniform
 /// `GATEWAY_ALLOW_ALL_USERS`/`GATEWAY_ALLOWED_USERS` env — log the Phase 1
@@ -410,6 +430,17 @@ async fn main() -> anyhow::Result<()> {
                     allowed_users.clone(),
                 ),
             );
+        }
+
+        // [gateway] section seed for the standalone WS platform: the WebSocket
+        // path now enforces L2/L3 via this registry (gate_gateway_event) instead
+        // of its own inline allowlist checks, so the section's values must land
+        // here (behavior-preserving: same resolve_allow_all semantics the old
+        // inline filter used). Precedence: GATEWAY_* env (uniform seed above)
+        // < [gateway] (this insert) < [<platform>] section
+        // (platform_trust_override below, which runs in both modes).
+        if let Some(ref gw) = cfg.gateway {
+            reg.insert(&gw.platform, gateway_section_trust(gw));
         }
 
         // Discord: gate L3 (identity) only via the shared gate. Discord's L2 is
@@ -836,16 +867,6 @@ async fn main() -> anyhow::Result<()> {
             platform: gw_cfg.platform,
             token: gw_cfg.token,
             bot_username: gw_cfg.bot_username,
-            allow_all_channels: config::resolve_allow_all(
-                gw_cfg.allow_all_channels,
-                &gw_cfg.allowed_channels,
-            ),
-            allowed_channels: gw_cfg.allowed_channels,
-            allow_all_users: config::resolve_allow_all(
-                gw_cfg.allow_all_users,
-                &gw_cfg.allowed_users,
-            ),
-            allowed_users: gw_cfg.allowed_users,
             allow_bot_messages: gw_cfg.allow_bot_messages,
             trusted_bot_ids: gw_cfg.trusted_bot_ids,
             streaming: gw_cfg.streaming,
@@ -1099,27 +1120,9 @@ async fn main() -> anyhow::Result<()> {
                 unified_adapter::UnifiedGatewayAdapter::new(gw_state.clone()),
             );
 
-            // Read security gating from env (mirrors [gateway] config section)
-            let gw_allow_all_channels = std::env::var("GATEWAY_ALLOW_ALL_CHANNELS")
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true);
-            let gw_allowed_channels: std::collections::HashSet<String> =
-                std::env::var("GATEWAY_ALLOWED_CHANNELS")
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            let gw_allow_all_users = std::env::var("GATEWAY_ALLOW_ALL_USERS")
-                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
-                .unwrap_or(true);
-            let gw_allowed_users: std::collections::HashSet<String> =
-                std::env::var("GATEWAY_ALLOWED_USERS")
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+            // Bot gating still reads env here (structural, not L2/L3):
+            // channel/user gating moved to the shared trust registry, seeded
+            // from GATEWAY_* env / [gateway] / [<platform>] at startup.
             let gw_bot_username = std::env::var("GATEWAY_BOT_USERNAME").ok();
 
             let gw_allow_bot_messages = std::env::var("GATEWAY_ALLOW_BOT_MESSAGES")
@@ -1139,16 +1142,6 @@ async fn main() -> anyhow::Result<()> {
                 adapter: unified_adapter,
                 dispatcher: unified_dispatcher,
                 router: router.clone(),
-                allow_all_channels: config::resolve_allow_all(
-                    Some(gw_allow_all_channels),
-                    &gw_allowed_channels.iter().cloned().collect::<Vec<_>>(),
-                ),
-                allowed_channels: gw_allowed_channels,
-                allow_all_users: config::resolve_allow_all(
-                    Some(gw_allow_all_users),
-                    &gw_allowed_users.iter().cloned().collect::<Vec<_>>(),
-                ),
-                allowed_users: gw_allowed_users,
                 allow_bot_messages: gw_allow_bot_messages,
                 trusted_bot_ids: gw_trusted_bot_ids,
                 bot_username: gw_bot_username,
@@ -1571,6 +1564,95 @@ mod tests {
 
         // Cleanup
         clear_all();
+    }
+
+    #[test]
+    fn gateway_section_trust_mirrors_ws_filter_semantics() {
+        use openab_core::trust::Decision;
+
+        // Explicit lists → deny-by-default with listed entries admitted
+        // (resolve_allow_all: no flag + non-empty list = false).
+        let gw = config::parse_config_str(
+            r#"
+[gateway]
+url = "ws://gw:8080/ws"
+platform = "telegram"
+allowed_channels = ["c1"]
+allowed_users = ["u1"]
+"#,
+            "test",
+        )
+        .unwrap()
+        .gateway
+        .unwrap();
+        let trust = gateway_section_trust(&gw);
+        assert_eq!(trust.decide("c1", false, "u1"), Decision::Allow);
+        assert_ne!(trust.decide("c1", false, "u2"), Decision::Allow);
+        assert_ne!(trust.decide("c2", false, "u1"), Decision::Allow);
+
+        // Empty lists → allow-all (matching the old inline filter default).
+        let gw_open = config::parse_config_str(
+            "[gateway]\nurl = \"ws://gw:8080/ws\"\n",
+            "test",
+        )
+        .unwrap()
+        .gateway
+        .unwrap();
+        let trust_open = gateway_section_trust(&gw_open);
+        assert_eq!(trust_open.decide("any", false, "anyone"), Decision::Allow);
+    }
+
+    #[test]
+    fn gateway_trust_seed_precedence_env_lt_gateway_lt_platform() {
+        use openab_core::trust::{Decision, PlatformTrustConfigs, TrustConfig};
+
+        let mut reg = PlatformTrustConfigs::new();
+        // 1. uniform GATEWAY_* env seed: deny-all users
+        reg.insert(
+            "telegram",
+            TrustConfig::new(Some(true), vec![], None, Some(false), vec![]),
+        );
+        assert_ne!(
+            reg.get("telegram").decide("c", false, "alice"),
+            Decision::Allow
+        );
+
+        // 2. [gateway] section seed overwrites the env seed for its platform
+        let gw = config::parse_config_str(
+            r#"
+[gateway]
+url = "ws://gw:8080/ws"
+platform = "telegram"
+allowed_users = ["alice"]
+"#,
+            "test",
+        )
+        .unwrap()
+        .gateway
+        .unwrap();
+        reg.insert("telegram", gateway_section_trust(&gw));
+        assert_eq!(
+            reg.get("telegram").decide("c", false, "alice"),
+            Decision::Allow
+        );
+        assert_ne!(
+            reg.get("telegram").decide("c", false, "bob"),
+            Decision::Allow
+        );
+
+        // 3. [telegram] platform section (platform_trust_override) wins last
+        reg.insert(
+            "telegram",
+            TrustConfig::new(Some(true), vec![], None, Some(false), vec!["bob".into()]),
+        );
+        assert_eq!(
+            reg.get("telegram").decide("c", false, "bob"),
+            Decision::Allow
+        );
+        assert_ne!(
+            reg.get("telegram").decide("c", false, "alice"),
+            Decision::Allow
+        );
     }
 
     #[test]

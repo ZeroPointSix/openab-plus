@@ -139,7 +139,7 @@ Custom Gateway adapter for platforms like Telegram, LINE, Feishu/Lark, and Googl
 
 First-class LINE section — credentials, connection, and L3 identity trust (config-first parity, #1376). Replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for LINE trust — relying on those for LINE is deprecated and warns at startup.
 
-> **Mode scoping:** takes effect on the **embedded/unified adapter path** (see the note under `[wecom]` / `[googlechat]` / `[teams]` below — the same applies here).
+> **Trust resolution:** applies in **both** deployment modes (see the note under `[wecom]` / `[googlechat]` / `[teams]` below — the same applies here).
 
 Each field resolves: config value → `LINE_*` env var → default (deny-all).
 
@@ -214,7 +214,7 @@ Full first-class Teams section (config-first parity, #1380) — credentials, con
 
 First-class L3 identity trust — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`TEAMS_APP_ID`/`TEAMS_APP_SECRET`) until the Teams config-first parity slice lands (#1380).
 
-> **Mode scoping:** these sections (like `[line]`) take effect on the **embedded/unified adapter path**, where events pass the shared ingress trust gate. Deployments using the standalone `openab-gateway` companion over WebSocket enforce trust via `[gateway].allow_all_users` / `allowed_users` instead; Phase 1c consolidates the two paths.
+> **Trust resolution:** these sections (like `[line]`) apply in **both** deployment modes — the embedded/unified adapter path and the broker's WebSocket path to the standalone `openab-gateway` companion both consult the shared per-platform trust registry. Precedence per platform: `GATEWAY_*` env < `[gateway]` section < `[<platform>]` section (the platform section wins when both are set).
 
 Each field resolves: config value → `TEAMS_*` env var → default (deny-all).
 

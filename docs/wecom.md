@@ -145,7 +145,7 @@ allowed_users    = ["zhangsan", "lisi"]
 
 ### User Trust (`[wecom]` section)
 
-> **Mode scoping:** the `[wecom]` section applies when the WeCom adapter is **embedded in the OAB binary** (unified mode, `WECOM_CORP_ID` env set on the OAB container). In the standalone-gateway mode shown above, trust is enforced by `[gateway].allow_all_users` / `allowed_users` instead — the `[wecom]` section has no effect on that path yet (Phase 1c consolidates the two).
+> **Trust resolution:** the `[wecom]` section's trust settings apply in **both** deployment modes. Broker-side enforcement goes through the shared per-platform trust registry with precedence `GATEWAY_*` env < `[gateway]` section < `[wecom]` section — in the standalone-gateway mode, the broker's WebSocket path consults the same registry, so a `[wecom]` section overrides `[gateway].allow_all_users` / `allowed_users` for this platform.
 
 Identity trust defaults to **deny-all** (identity-trust-none ADR): unknown senders are rejected until explicitly admitted. Configure trust with a first-class `[wecom]` section:
 

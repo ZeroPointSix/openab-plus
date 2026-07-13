@@ -55,7 +55,7 @@ allowed_users = ["29:1abc..."]  # Bot Framework activity.from.id values
 
 Each field falls back to its `TEAMS_ALLOW_ALL_USERS` / `TEAMS_ALLOWED_USERS` env var when unset. To find a user's `29:…` ID, check the OAB logs — the sender ID is logged for each incoming message.
 
-> **Mode scoping:** the `[teams]` section applies to this unified (embedded) mode. In the legacy standalone-gateway mode below, trust is enforced by `[gateway].allow_all_users` / `allowed_users` instead — the `[teams]` section has no effect on that path yet (Phase 1c consolidates the two).
+> **Trust resolution:** the `[teams]` section's trust settings apply in **both** deployment modes. Broker-side enforcement goes through the shared per-platform trust registry with precedence `GATEWAY_*` env < `[gateway]` section < `[teams]` section — in the standalone-gateway mode, the broker's WebSocket path consults the same registry, so a `[teams]` section overrides `[gateway].allow_all_users` / `allowed_users` for this platform.
 
 > ⚠️ **Deprecated:** driving Teams trust through the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars still works but logs a startup warning; it will become a startup error in a later phase. Migrate to `[teams]` (or `TEAMS_*` env vars).
 
