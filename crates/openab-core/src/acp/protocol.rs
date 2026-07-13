@@ -298,7 +298,18 @@ pub fn parse_usage_report(result: &Value) -> Option<UsageReport> {
             items
                 .iter()
                 .filter_map(|b| {
-                    let has_limit = b.get("hasLimit").and_then(|v| v.as_bool()).unwrap_or(false);
+                    // `hasLimit: false` is an explicit sentinel (pooled/no-cap
+                    // enterprise accounts). Some kiro-cli versions omit the
+                    // field entirely while still returning a numeric `limit`
+                    // (observed live: overage state on kiro-cli in the pr1392
+                    // image) — treat a missing `hasLimit` as "has a limit if a
+                    // numeric limit is present" instead of hiding the cap.
+                    let has_limit = b
+                        .get("hasLimit")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or_else(|| {
+                            b.get("limit").and_then(|v| v.as_f64()).is_some()
+                        });
                     Some(UsageBreakdown {
                         display_name: b.get("displayName")?.as_str()?.to_string(),
                         used: b.get("used")?.as_f64()?,
@@ -637,6 +648,55 @@ mod tests {
         let report = parse_usage_report(&result).expect("should parse");
         assert_eq!(report.breakdowns[0].limit, None);
         assert_eq!(report.billing_cycle_reset, None);
+    }
+
+    #[test]
+    fn parse_usage_report_missing_has_limit_keeps_numeric_limit() {
+        // Regression: exact payload captured live from B0 (kiro-cli in the
+        // pr1392 image, 2026-07-13). This kiro-cli version omits `hasLimit`
+        // entirely while returning a real numeric `limit` — the old
+        // `unwrap_or(false)` default hid the cap and progress bar even though
+        // the account was 130% over its 10000-credit limit.
+        let result = json!({
+            "success": true,
+            "message": "Plan: KIRO POWER | 1 usage breakdowns",
+            "data": {
+                "planName": "KIRO POWER",
+                "billingCycleReset": "2026-08-01",
+                "overagesEnabled": true,
+                "isEnterprise": false,
+                "usageBreakdowns": [{
+                    "resourceType": "CREDIT",
+                    "displayName": "Credits",
+                    "used": 13080.52,
+                    "limit": 10000.0,
+                    "percentage": 130,
+                    "currentOverages": 3080.52,
+                    "overageRate": 0.04,
+                    "overageCharges": 123.220870825752,
+                    "currency": "USD"
+                }],
+                "bonusCredits": []
+            }
+        });
+        let report = parse_usage_report(&result).expect("should parse");
+        let b = &report.breakdowns[0];
+        assert_eq!(b.limit, Some(10000.0));
+        assert_eq!(b.percentage, Some(130));
+    }
+
+    #[test]
+    fn parse_usage_report_missing_has_limit_and_missing_limit_hides_cap() {
+        // No `hasLimit` and no numeric `limit` → still consumption-only.
+        let result = json!({
+            "success": true,
+            "data": {
+                "planName": "POOLED",
+                "usageBreakdowns": [{"displayName": "Credits", "used": 320.0}]
+            }
+        });
+        let report = parse_usage_report(&result).expect("should parse");
+        assert_eq!(report.breakdowns[0].limit, None);
     }
 
     #[test]
