@@ -1689,9 +1689,13 @@ impl Handler {
         }
 
         let followup = match self.router.pool().get_usage(&thread_key).await {
-            Ok(report) => CreateInteractionResponseFollowup::new()
-                .embed(build_usage_embed(&report))
-                .ephemeral(true),
+            Ok(report) => {
+                let (content, embed) = build_usage_reply(&report);
+                CreateInteractionResponseFollowup::new()
+                    .content(content)
+                    .embed(embed)
+                    .ephemeral(true)
+            }
             Err(e) => CreateInteractionResponseFollowup::new()
                 .content(format!("⚠️ {e}"))
                 .ephemeral(true),
@@ -2569,20 +2573,23 @@ fn format_usage_body(report: &UsageReport) -> (String, bool) {
     (lines.join("\n"), over_limit)
 }
 
-/// Build an embed card for a usage report. Green when within the plan limit,
-/// red when any breakdown is over.
-fn build_usage_embed(report: &UsageReport) -> CreateEmbed {
+/// Build the /usage reply as full-size message content plus a minimal
+/// color-strip embed. Discord renders embed descriptions at a smaller font
+/// than message content, so the report body lives in `content` (normal font)
+/// while the embed carries only the at-a-glance color signal (green within
+/// the plan limit, red when any breakdown is over) and the billing-cycle
+/// footer.
+fn build_usage_reply(report: &UsageReport) -> (String, CreateEmbed) {
     let (body, over_limit) = format_usage_body(report);
-    let mut embed = CreateEmbed::new()
-        .title(format!("📊 Usage — {}", report.plan_name))
-        .description(body)
-        .colour(if over_limit { 0xE74C3C } else { 0x2ECC71 });
+    let content = format!("📊 **Usage — {}**\n{}", report.plan_name, body);
+    let mut embed =
+        CreateEmbed::new().colour(if over_limit { 0xE74C3C } else { 0x2ECC71 });
     if let Some(reset) = &report.billing_cycle_reset {
         embed = embed.footer(CreateEmbedFooter::new(format!(
             "Billing cycle resets {reset}"
         )));
     }
-    embed
+    (content, embed)
 }
 
 fn discord_msg_ref(msg: &Message) -> MessageRef {
@@ -3266,6 +3273,27 @@ mod tests {
         assert!(body.contains("127%"));
         assert!(body.contains("⚠️"));
         assert!(body.contains("Overage charges: 111.27 USD"));
+    }
+
+    /// The report body must ride in the message content (normal font size),
+    /// not the embed description (rendered smaller by Discord clients). The
+    /// embed only carries the color strip + billing-cycle footer.
+    #[test]
+    fn usage_reply_body_in_content_not_embed() {
+        let report = UsageReport {
+            plan_name: "KIRO POWER".into(),
+            billing_cycle_reset: Some("2026-08-01".into()),
+            breakdowns: vec![usage_breakdown()],
+        };
+        let (content, embed) = build_usage_reply(&report);
+        assert!(content.starts_with("📊 **Usage — KIRO POWER**"));
+        assert!(content.contains("12781.64 / 10000"));
+        assert!(content.contains("Overage charges: 111.27 USD"));
+        let json = serde_json::to_value(&embed).expect("embed serializes");
+        assert!(json.get("description").is_none(), "body must not be in embed");
+        assert!(json.get("title").is_none(), "title must not be in embed");
+        assert_eq!(json["color"], 0xE74C3C, "over limit → red strip");
+        assert_eq!(json["footer"]["text"], "Billing cycle resets 2026-08-01");
     }
 
     #[test]
