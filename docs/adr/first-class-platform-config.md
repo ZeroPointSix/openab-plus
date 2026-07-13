@@ -1,10 +1,10 @@
 # ADR: First-Class Per-Platform Configuration
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented)
 - **Date:** 2026-06-30
 - **Author:** @chaodu-agent
 - **Reviewers:** @pahud
-- **Tracking issues:** #1262
+- **Tracking issues:** #1262, #1356 (trust migration), #1375 (config-first parity)
 - **Related:** [Identity Trust-None Default & Trust Pyramid](identity-trust-none.md) — builds on the per-platform sections defined here to hold each platform's `allowed_users`.
 
 ---
@@ -70,7 +70,8 @@ token = "${WECOM_TOKEN}"
 allowed_users = ["zhangsan"]
 
 [googlechat]
-service_account = "${GOOGLE_CHAT_SA_JSON}"
+sa_key_json = "${GOOGLE_CHAT_SA_KEY_JSON}"
+audience = "projects/<n>/..."   # enables webhook JWT verification (L1)
 allowed_users = ["users/123456789"]
 
 [teams]
@@ -106,7 +107,7 @@ allowed_users = ["123"]
 | Feishu | `[feishu]` | Open ID | `ou_xxxxxxxxxxxxxxxxxxxx` |
 | WeCom | `[wecom]` | UserID | `zhangsan` |
 | Google Chat | `[googlechat]` | User resource name | `users/123456789` |
-| MS Teams | `[teams]` | AAD Object ID | `29:1abc...` |
+| MS Teams | `[teams]` | Bot Framework `activity.from.id` (not the AAD Object ID) | `29:1abc...` |
 
 ## 5. Migration
 
@@ -126,13 +127,15 @@ allowed_users = ["123456789"]
 The `[gateway]` section continues to work (with a deprecation warning) for one
 release cycle to give deployments time to migrate.
 
-## 6. Implementation Plan
+## 6. Implementation (shipped)
 
-1. **Add per-platform config structs** — `[telegram]`, `[line]`, `[feishu]`, `[wecom]`, `[googlechat]`, `[teams]` parsed as top-level sections
-2. **Map gateway events to the owning platform's config** by `platform` name
-3. **Deprecation warning** when `[gateway]` is present
-4. **Update `config.toml.example`** and per-platform docs
-5. **Migration guide** in release notes
+The plan below was implemented across two umbrellas — #1356 (trust fields + shared registry) and #1375 (full config-first parity):
+
+1. **Per-platform config structs** — ✅ `[telegram]` #1297; `[line]` #1365/#1381; `[wecom]` #1366/#1382; `[googlechat]` #1366/#1383; `[teams]` #1366/#1384; `[feishu]` #1385. Every field resolves **config → `PLATFORM_*` env → default** (config always wins).
+2. **Per-platform trust routing** — ✅ each section feeds the shared `PlatformTrustConfigs` registry (`platform_trust_override`), ending the ID-format mixing this ADR called out.
+3. **Deprecation warnings** — ✅ for the uniform `GATEWAY_ALLOW_ALL_USERS`/`GATEWAY_ALLOWED_USERS` env seed (#1365/#1366). ⏳ A warning when the `[gateway]` *section* itself is present awaits the Phase 1c WS-path consolidation (tracked on #1356) — the two-process model still legitimately uses `[gateway]` for its WebSocket connection settings.
+4. **`config.toml.example` + per-platform docs** — ✅ #1381–#1385.
+5. **Migration guide** — release-notes callouts shipped with each slice; L1 startup diagnostics (#1373) surface unenforceable configs at boot.
 
 ## 7. Rejected Alternatives
 
