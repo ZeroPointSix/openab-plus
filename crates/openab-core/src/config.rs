@@ -1252,64 +1252,91 @@ impl FeishuConfig {
     /// result feeds the gateway adapter's `from_reader`, keeping its parsing
     /// and defaults as the single source of truth.
     pub fn resolve_pairs(&self) -> std::collections::HashMap<String, String> {
-        let mut m = std::collections::HashMap::new();
-        let mut put = |key: &str, v: Option<String>| {
+        type Pairs = std::collections::HashMap<String, String>;
+        // String fields: empty string = `${UNSET}` expansion → fall through to
+        // env (same rule as every other platform section).
+        fn put(m: &mut Pairs, key: &str, v: Option<String>) {
             let v = v
                 .filter(|s| !s.is_empty())
                 .or_else(|| std::env::var(key).ok());
             if let Some(v) = v {
                 m.insert(key.to_string(), v);
             }
-        };
+        }
+        // List fields: `Some(vec![])` is an explicit empty list and must
+        // OVERRIDE the env var (deny-all semantics, matching `trust_config()`
+        // and the other sections' `allowed_users`), so no empty-filter here —
+        // `from_reader` splits "" into an empty vec.
+        fn put_list(m: &mut Pairs, key: &str, v: Option<String>) {
+            let v = v.or_else(|| std::env::var(key).ok());
+            if let Some(v) = v {
+                m.insert(key.to_string(), v);
+            }
+        }
         let csv = |v: &Option<Vec<String>>| v.as_ref().map(|l| l.join(","));
-        put("FEISHU_APP_ID", self.app_id.clone());
-        put("FEISHU_APP_SECRET", self.app_secret.clone());
-        put("FEISHU_VERIFICATION_TOKEN", self.verification_token.clone());
-        put("FEISHU_ENCRYPT_KEY", self.encrypt_key.clone());
-        put("FEISHU_DOMAIN", self.domain.clone());
-        put("FEISHU_CONNECTION_MODE", self.connection_mode.clone());
-        put("FEISHU_WEBHOOK_PATH", self.webhook_path.clone());
-        put("FEISHU_ALLOWED_GROUPS", csv(&self.allowed_groups));
-        put("FEISHU_ALLOWED_USERS", csv(&self.allowed_users));
+        let mut m = Pairs::new();
+        put(&mut m, "FEISHU_APP_ID", self.app_id.clone());
+        put(&mut m, "FEISHU_APP_SECRET", self.app_secret.clone());
         put(
+            &mut m,
+            "FEISHU_VERIFICATION_TOKEN",
+            self.verification_token.clone(),
+        );
+        put(&mut m, "FEISHU_ENCRYPT_KEY", self.encrypt_key.clone());
+        put(&mut m, "FEISHU_DOMAIN", self.domain.clone());
+        put(&mut m, "FEISHU_CONNECTION_MODE", self.connection_mode.clone());
+        put(&mut m, "FEISHU_WEBHOOK_PATH", self.webhook_path.clone());
+        put_list(&mut m, "FEISHU_ALLOWED_GROUPS", csv(&self.allowed_groups));
+        put_list(&mut m, "FEISHU_ALLOWED_USERS", csv(&self.allowed_users));
+        put(
+            &mut m,
             "FEISHU_REQUIRE_MENTION",
             self.require_mention.map(|b| b.to_string()),
         );
-        put("FEISHU_ALLOW_BOTS", self.allow_bots.clone());
+        put(&mut m, "FEISHU_ALLOW_BOTS", self.allow_bots.clone());
         put(
+            &mut m,
             "FEISHU_ALLOW_USER_MESSAGES",
             self.allow_user_messages.clone(),
         );
-        put("FEISHU_TRUSTED_BOT_IDS", csv(&self.trusted_bot_ids));
+        put_list(&mut m, "FEISHU_TRUSTED_BOT_IDS", csv(&self.trusted_bot_ids));
         put(
+            &mut m,
             "FEISHU_MAX_BOT_TURNS",
             self.max_bot_turns.map(|v| v.to_string()),
         );
         put(
+            &mut m,
             "FEISHU_DEDUPE_TTL_SECS",
             self.dedupe_ttl_secs.map(|v| v.to_string()),
         );
         put(
+            &mut m,
             "FEISHU_MESSAGE_LIMIT",
             self.message_limit.map(|v| v.to_string()),
         );
         put(
+            &mut m,
             "FEISHU_SESSION_TTL_HOURS",
             self.session_ttl_hours.map(|v| v.to_string()),
         );
         put(
+            &mut m,
             "FEISHU_CARD_STREAMING_MODE",
             self.card_streaming_mode.clone(),
         );
         put(
+            &mut m,
             "FEISHU_CARD_FALLBACK_TO_POST",
             self.card_fallback_to_post.map(|b| b.to_string()),
         );
         put(
+            &mut m,
             "FEISHU_CARD_PROMOTE_BYTES",
             self.card_promote_bytes.map(|v| v.to_string()),
         );
         put(
+            &mut m,
             "FEISHU_CARD_IDLE_FINALIZE_MS",
             self.card_idle_finalize_ms.map(|v| v.to_string()),
         );
@@ -2771,7 +2798,30 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
     /// All `FEISHU_*` env scenarios in ONE test (env is process-global).
     #[test]
     fn feishu_resolve_pairs_scenarios() {
-        for k in ["FEISHU_APP_ID", "FEISHU_DOMAIN", "FEISHU_ALLOWED_USERS"] {
+        const ALL_FEISHU_KEYS: [&str; 21] = [
+            "FEISHU_APP_ID",
+            "FEISHU_APP_SECRET",
+            "FEISHU_VERIFICATION_TOKEN",
+            "FEISHU_ENCRYPT_KEY",
+            "FEISHU_DOMAIN",
+            "FEISHU_CONNECTION_MODE",
+            "FEISHU_WEBHOOK_PATH",
+            "FEISHU_ALLOWED_GROUPS",
+            "FEISHU_ALLOWED_USERS",
+            "FEISHU_REQUIRE_MENTION",
+            "FEISHU_ALLOW_BOTS",
+            "FEISHU_ALLOW_USER_MESSAGES",
+            "FEISHU_TRUSTED_BOT_IDS",
+            "FEISHU_MAX_BOT_TURNS",
+            "FEISHU_DEDUPE_TTL_SECS",
+            "FEISHU_MESSAGE_LIMIT",
+            "FEISHU_SESSION_TTL_HOURS",
+            "FEISHU_CARD_STREAMING_MODE",
+            "FEISHU_CARD_FALLBACK_TO_POST",
+            "FEISHU_CARD_PROMOTE_BYTES",
+            "FEISHU_CARD_IDLE_FINALIZE_MS",
+        ];
+        for k in ALL_FEISHU_KEYS {
             std::env::remove_var(k);
         }
         // --- nothing set → keys absent (adapter from_reader applies defaults) ---
@@ -2803,6 +2853,21 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
         };
         assert_eq!(cfg.resolve_pairs().get("FEISHU_APP_ID").unwrap(), "env-app");
 
+        // --- F3 regression (#1385 review): explicit empty list OVERRIDES the
+        //     env var — Some(vec![]) renders "" which from_reader splits into
+        //     an empty vec (deny-all), instead of falling through to env ---
+        std::env::set_var("FEISHU_ALLOWED_USERS", "ou_env");
+        let cfg = FeishuConfig {
+            allowed_users: Some(vec![]),
+            ..Default::default()
+        };
+        let m = cfg.resolve_pairs();
+        assert_eq!(m.get("FEISHU_ALLOWED_USERS").unwrap(), "");
+        // …while an absent list still falls through to env:
+        let m = FeishuConfig::default().resolve_pairs();
+        assert_eq!(m.get("FEISHU_ALLOWED_USERS").unwrap(), "ou_env");
+        std::env::remove_var("FEISHU_ALLOWED_USERS");
+
         // --- trust_config() view ---
         let cfg = FeishuConfig {
             allow_all_users: Some(true),
@@ -2813,8 +2878,9 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
         assert_eq!(t.allow_all_users, Some(true));
         assert_eq!(t.allowed_users.as_deref(), Some(&["ou_x".to_string()][..]));
 
-        std::env::remove_var("FEISHU_APP_ID");
-        std::env::remove_var("FEISHU_DOMAIN");
+        for k in ALL_FEISHU_KEYS {
+            std::env::remove_var(k);
+        }
     }
 
     #[test]

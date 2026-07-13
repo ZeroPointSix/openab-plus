@@ -256,7 +256,7 @@ Full first-class Feishu/Lark section (config-first parity, #1377) — credential
 | `trusted_bot_ids` | string[] | `[]` | `FEISHU_TRUSTED_BOT_IDS` |
 | `require_mention` | bool | `true` | `FEISHU_REQUIRE_MENTION` |
 | `allow_bots` | string | `off` (`off`\|`mentions`\|`all`) | `FEISHU_ALLOW_BOTS` |
-| `allow_user_messages` | string | `multibot_mentions` | `FEISHU_ALLOW_USER_MESSAGES` |
+| `allow_user_messages` | string | `multibot_mentions` (`multibot_mentions`\|`mentions`\|`involved`) | `FEISHU_ALLOW_USER_MESSAGES` |
 | `max_bot_turns` | u32 | `20` | `FEISHU_MAX_BOT_TURNS` |
 | `dedupe_ttl_secs` | u64 | `300` | `FEISHU_DEDUPE_TTL_SECS` |
 | `message_limit` | u64 | `4000` | `FEISHU_MESSAGE_LIMIT` |
