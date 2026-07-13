@@ -1,4 +1,4 @@
-use crate::acp::protocol::ConfigOption;
+use crate::acp::protocol::{ConfigOption, UsageReport};
 use crate::acp::ContentBlock;
 use crate::adapter::{AdapterRouter, ChannelRef, ChatAdapter, MessageRef, SenderContext};
 use crate::bot_turns::{BotTurnTracker, TurnAction, TurnSeverity, BOT_TURN_LIMIT_WARNING_PREFIX};
@@ -1398,6 +1398,8 @@ impl EventHandler for Handler {
                 ).required(true)),
             CreateCommand::new("auth")
                 .description("Authenticate the backend agent (device flow)"),
+            CreateCommand::new("usage")
+                .description("Show backend account usage and billing information"),
             CreateCommand::new("export-thread")
                 .description("Download this thread as a text file")
                 .add_option(CreateCommandOption::new(
@@ -1488,6 +1490,9 @@ impl EventHandler for Handler {
             }
             Interaction::Command(cmd) if cmd.data.name == "auth" => {
                 self.handle_auth_command(&ctx, &cmd).await;
+            }
+            Interaction::Command(cmd) if cmd.data.name == "usage" => {
+                self.handle_usage_command(&ctx, &cmd).await;
             }
             Interaction::Component(comp) if comp.data.custom_id.starts_with("acp_config_") => {
                 self.handle_config_select(&ctx, &comp).await;
@@ -1652,6 +1657,47 @@ impl Handler {
 
         if let Err(e) = cmd.create_response(&ctx.http, response).await {
             tracing::error!(error = %e, category, "failed to respond to slash command");
+        }
+    }
+
+    async fn handle_usage_command(
+        &self,
+        ctx: &Context,
+        cmd: &serenity::model::application::CommandInteraction,
+    ) {
+        let thread_key = format!("discord:{}", cmd.channel_id.get());
+
+        if !self.router.pool().has_active_session(&thread_key).await {
+            let response = CreateInteractionResponse::Message(
+                CreateInteractionResponseMessage::new()
+                    .content("⚠️ No active session. Start a conversation first by @mentioning the bot.")
+                    .ephemeral(true),
+            );
+            if let Err(e) = cmd.create_response(&ctx.http, response).await {
+                tracing::error!(error = %e, "failed to respond to /usage command");
+            }
+            return;
+        }
+
+        // The ACP round-trip can exceed Discord's 3-second interaction
+        // deadline — acknowledge with a deferred ephemeral response first.
+        let defer =
+            CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true));
+        if let Err(e) = cmd.create_response(&ctx.http, defer).await {
+            tracing::error!(error = %e, "failed to defer /usage response");
+            return;
+        }
+
+        let content = match self.router.pool().get_usage(&thread_key).await {
+            Ok(report) => format_usage_report(&report),
+            Err(e) => format!("⚠️ {e}"),
+        };
+
+        let followup = CreateInteractionResponseFollowup::new()
+            .content(content)
+            .ephemeral(true);
+        if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
+            tracing::error!(error = %e, "failed to send /usage followup");
         }
     }
 
@@ -2473,6 +2519,54 @@ impl Handler {
 
 // --- Discord-specific helpers ---
 
+/// Render an account usage report as a Discord message.
+fn format_usage_report(report: &UsageReport) -> String {
+    let mut out = format!("📊 **Usage — {}**", report.plan_name);
+
+    for b in &report.breakdowns {
+        out.push('\n');
+        match b.limit {
+            Some(limit) => {
+                let pct = b.percentage.unwrap_or_else(|| {
+                    if limit > 0.0 {
+                        (b.used / limit * 100.0).round() as u64
+                    } else {
+                        0
+                    }
+                });
+                // 10-slot progress bar, clamped at 100%.
+                let filled = (pct.min(100) as usize) / 10;
+                let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
+                out.push_str(&format!(
+                    "{}: {:.2} / {:.0} `{}` {}%{}",
+                    b.display_name,
+                    b.used,
+                    limit,
+                    bar,
+                    pct,
+                    if pct > 100 { " ⚠️" } else { "" }
+                ));
+            }
+            // No per-user cap (e.g. pooled enterprise credits).
+            None => out.push_str(&format!("{}: {:.2} used", b.display_name, b.used)),
+        }
+        if let Some(charges) = b.overage_charges {
+            if charges > 0.0 {
+                out.push_str(&format!(
+                    "\nOverage charges: {:.2} {}",
+                    charges,
+                    b.currency.as_deref().unwrap_or("USD")
+                ));
+            }
+        }
+    }
+
+    if let Some(reset) = &report.billing_cycle_reset {
+        out.push_str(&format!("\nBilling cycle resets: {reset}"));
+    }
+    out
+}
+
 fn discord_msg_ref(msg: &Message) -> MessageRef {
     MessageRef {
         channel: ChannelRef {
@@ -3127,6 +3221,78 @@ fn truncate_to_utf16_budget(body: &str, prefix: &str, suffix: &str, limit: usize
 mod tests {
     use super::*;
     use crate::bot_turns::{TurnResult, HARD_BOT_TURN_LIMIT, BOT_TURN_LIMIT_WARNING_PREFIX};
+
+    // --- format_usage_report tests (/usage slash command) ---
+
+    fn usage_breakdown() -> crate::acp::protocol::UsageBreakdown {
+        crate::acp::protocol::UsageBreakdown {
+            display_name: "Credits".into(),
+            used: 12781.64,
+            limit: Some(10000.0),
+            percentage: Some(127),
+            overage_charges: Some(111.27),
+            currency: Some("USD".into()),
+        }
+    }
+
+    #[test]
+    fn format_usage_over_limit() {
+        let report = UsageReport {
+            plan_name: "KIRO POWER".into(),
+            billing_cycle_reset: Some("2026-08-01".into()),
+            breakdowns: vec![usage_breakdown()],
+        };
+        let out = format_usage_report(&report);
+        assert!(out.contains("KIRO POWER"));
+        assert!(out.contains("12781.64 / 10000"));
+        assert!(out.contains("127%"));
+        assert!(out.contains("⚠️"));
+        assert!(out.contains("Overage charges: 111.27 USD"));
+        assert!(out.contains("Billing cycle resets: 2026-08-01"));
+    }
+
+    #[test]
+    fn format_usage_no_limit_shows_consumption_only() {
+        let report = UsageReport {
+            plan_name: "ENTERPRISE".into(),
+            billing_cycle_reset: None,
+            breakdowns: vec![crate::acp::protocol::UsageBreakdown {
+                display_name: "Credits".into(),
+                used: 320.0,
+                limit: None,
+                percentage: None,
+                overage_charges: None,
+                currency: None,
+            }],
+        };
+        let out = format_usage_report(&report);
+        assert!(out.contains("Credits: 320.00 used"));
+        assert!(!out.contains('/'));
+        assert!(!out.contains("Overage"));
+        assert!(!out.contains("resets"));
+    }
+
+    #[test]
+    fn format_usage_under_limit_no_warning() {
+        let report = UsageReport {
+            plan_name: "FREE".into(),
+            billing_cycle_reset: None,
+            breakdowns: vec![crate::acp::protocol::UsageBreakdown {
+                display_name: "Credits".into(),
+                used: 50.0,
+                limit: Some(100.0),
+                percentage: Some(50),
+                overage_charges: Some(0.0),
+                currency: Some("USD".into()),
+            }],
+        };
+        let out = format_usage_report(&report);
+        assert!(out.contains("50%"));
+        assert!(!out.contains("⚠️"));
+        assert!(!out.contains("Overage"));
+        // 50% → 5 of 10 bar slots filled.
+        assert!(out.contains("█████░░░░░"));
+    }
 
     // --- truncate_to_utf16_budget tests (#1185 /auth output relay) ---
 
