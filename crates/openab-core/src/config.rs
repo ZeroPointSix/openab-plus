@@ -1284,7 +1284,11 @@ impl FeishuConfig {
         );
         put(&mut m, "FEISHU_ENCRYPT_KEY", self.encrypt_key.clone());
         put(&mut m, "FEISHU_DOMAIN", self.domain.clone());
-        put(&mut m, "FEISHU_CONNECTION_MODE", self.connection_mode.clone());
+        put(
+            &mut m,
+            "FEISHU_CONNECTION_MODE",
+            self.connection_mode.clone(),
+        );
         put(&mut m, "FEISHU_WEBHOOK_PATH", self.webhook_path.clone());
         put_list(&mut m, "FEISHU_ALLOWED_GROUPS", csv(&self.allowed_groups));
         put_list(&mut m, "FEISHU_ALLOWED_USERS", csv(&self.allowed_users));
