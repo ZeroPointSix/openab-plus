@@ -1172,16 +1172,13 @@ impl TeamsConfig {
     }
 }
 
-/// Shared first-class trust section for gateway platforms whose Phase 1 needs
-/// exactly the two L3 identity fields (identity-trust-none ADR): `[teams]`.
-/// Same shape and resolution order as
-/// [`LineConfig`] / [`TelegramConfig`]: `[section].field` (with `${}`
-/// expansion) → `{PREFIX}_*` env var → deny-all default.
-///
-/// Trust-only by design — platform credentials stay on the gateway env vars
-/// the webhook adapters read (`TEAMS_APP_ID`/`TEAMS_APP_SECRET`).
-/// Also serves as the shared trust-fields view type returned by the
-/// graduated sections' `trust_config()`. Platforms that later
+/// Shared trust-fields view (L3 identity, identity-trust-none ADR) returned
+/// by the platform sections' `trust_config()` for the registry override path.
+/// All platform sections have graduated to dedicated structs (#1375); this
+/// type remains as the common denominator the binary's
+/// `platform_trust_override` consumes. Resolution order per field:
+/// `[section].field` → `{PREFIX}_*` env var → deny-all default.
+/// Platforms that later
 /// need extra trust fields (e.g. `trusted_bot_ids`) graduate to their own
 /// struct, as LINE will for group policy.
 #[derive(Debug, Clone, Default, Deserialize)]
