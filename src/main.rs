@@ -540,6 +540,15 @@ async fn main() -> anyhow::Result<()> {
             allow_all_channels,
             &allowed_channels,
         );
+        platform_trust_override(
+            &mut reg,
+            "feishu",
+            &cfg.feishu.as_ref().map(|f| f.trust_config()),
+            "FEISHU",
+            cfg!(feature = "feishu") && std::env::var("FEISHU_APP_ID").is_ok(),
+            allow_all_channels,
+            &allowed_channels,
+        );
         reg
     };
 
@@ -930,6 +939,16 @@ async fn main() -> anyhow::Result<()> {
                     webhook_path: r.webhook_path,
                 });
             }
+            // First-class `[feishu]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + FEISHU_* env fallback,
+            // #1377). Applied before warn_unenforceable_l1 so a
+            // config-supplied encrypt_key is not falsely flagged.
+            #[cfg(feature = "feishu")]
+            if let Some(ref fe) = cfg.feishu {
+                gw_state_inner.apply_feishu_config(openab_gateway::GatewayFeishuConfig {
+                    pairs: fe.resolve_pairs(),
+                });
+            }
             let gw_state = Arc::new(gw_state_inner);
 
             // Phase 1 L1 audit (#1356): warn if any active webhook platform has
@@ -976,8 +995,11 @@ async fn main() -> anyhow::Result<()> {
                 // (default: websocket) work only because of this mount, so
                 // gating it is a behavior change that needs its own
                 // deprecation path — tracked on #1356, not changed here.
-                let path = std::env::var("FEISHU_WEBHOOK_PATH")
-                    .unwrap_or_else(|_| "/webhook/feishu".into());
+                let path = gw_state
+                    .feishu
+                    .as_ref()
+                    .map(|f| f.config.webhook_path.clone())
+                    .unwrap_or_else(|| "/webhook/feishu".into());
                 info!(path = %path, "unified: feishu adapter enabled");
                 app = app.route(
                     &path,

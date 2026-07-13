@@ -385,6 +385,17 @@ impl AppState {
         })
         .map(adapters::teams::TeamsAdapter::new);
     }
+
+    /// Apply resolved `[feishu]` config values (#1377), rebuilding the
+    /// adapter through the same `from_reader` construction as env-only
+    /// startup (app_id + app_secret mandatory; incomplete section disables
+    /// the adapter). Call before [`AppState::warn_unenforceable_l1`] so a
+    /// config-supplied `encrypt_key` is not falsely flagged.
+    #[cfg(feature = "feishu")]
+    pub fn apply_feishu_config(&mut self, cfg: GatewayFeishuConfig) {
+        self.feishu = adapters::feishu::FeishuConfig::from_reader(|k| cfg.pairs.get(k).cloned())
+            .map(adapters::feishu::FeishuAdapter::new);
+    }
 }
 
 /// Parameter object for passing resolved Telegram config across the crate
@@ -444,6 +455,15 @@ pub struct GatewayTeamsConfig {
     pub oauth_endpoint: String,
     pub openid_metadata: String,
     pub webhook_path: String,
+}
+
+/// Parameter object for passing resolved Feishu config across the crate
+/// boundary without introducing a dependency on `openab-core` (#1377).
+/// Carries the config-first key/value pairs in env-var string form; the
+/// adapter's `from_reader` performs all parsing and default resolution.
+#[derive(Debug, Clone)]
+pub struct GatewayFeishuConfig {
+    pub pairs: std::collections::HashMap<String, String>,
 }
 
 // --- Public serve() entry point ---
@@ -967,6 +987,39 @@ mod l1_audit_tests {
         // channel secret present → L1 enforced
         s.line_channel_secret = Some("csecret".into());
         assert!(flagged(&s).is_empty());
+    }
+
+    #[cfg(feature = "feishu")]
+    #[test]
+    fn apply_feishu_config_requires_credentials() {
+        use super::GatewayFeishuConfig;
+        use std::collections::HashMap;
+        let mut s = state();
+        // Complete credentials → adapter built via the shared from_reader.
+        let mut pairs = HashMap::new();
+        pairs.insert("FEISHU_APP_ID".to_string(), "cli_x".to_string());
+        pairs.insert("FEISHU_APP_SECRET".to_string(), "sec".to_string());
+        pairs.insert("FEISHU_CONNECTION_MODE".to_string(), "webhook".to_string());
+        pairs.insert("FEISHU_ENCRYPT_KEY".to_string(), "ek".to_string());
+        s.apply_feishu_config(GatewayFeishuConfig {
+            pairs: pairs.clone(),
+        });
+        assert!(s.feishu.is_some());
+        let cfg = &s.feishu.as_ref().unwrap().config;
+        assert_eq!(cfg.app_id, "cli_x");
+        assert!(matches!(
+            cfg.connection_mode,
+            super::adapters::feishu::ConnectionMode::Webhook
+        ));
+        assert_eq!(cfg.encrypt_key.as_deref(), Some("ek"));
+        // Config-supplied encrypt_key satisfies the L1 startup check
+        // when the webhook route is exposed.
+        assert!(s.unenforceable_l1(true).is_empty());
+
+        // Missing secret → adapter disabled.
+        pairs.remove("FEISHU_APP_SECRET");
+        s.apply_feishu_config(GatewayFeishuConfig { pairs });
+        assert!(s.feishu.is_none());
     }
 
     #[cfg(feature = "teams")]

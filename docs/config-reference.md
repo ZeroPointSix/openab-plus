@@ -239,6 +239,38 @@ allowed_users = ["29:1abc..."]
 
 ---
 
+## `[feishu]`
+
+Full first-class Feishu/Lark section (config-first parity, #1377) — credentials, connection, behavior, and L3 identity trust. Each field resolves: config → `FEISHU_*` env → default. `app_id` + `app_secret` are mandatory (after env fallback); an incomplete section disables the adapter. The gateway adapter's parser remains the single source of truth — the section renders into the same form the env vars use, so defaults and enum rules cannot diverge.
+
+| Key | Type | Default | Env |
+|-----|------|---------|-----|
+| `app_id` / `app_secret` | string | — (mandatory) | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` |
+| `verification_token` | string | — | `FEISHU_VERIFICATION_TOKEN` |
+| `encrypt_key` | string | — (enables webhook signature, L1) | `FEISHU_ENCRYPT_KEY` |
+| `domain` | string | `feishu` (`feishu`\|`lark`) | `FEISHU_DOMAIN` |
+| `connection_mode` | string | `websocket` (`websocket`\|`webhook`) | `FEISHU_CONNECTION_MODE` |
+| `webhook_path` | string | `/webhook/feishu` | `FEISHU_WEBHOOK_PATH` |
+| `allowed_users` | string[] | `[]` (open_ids — per-app!) | `FEISHU_ALLOWED_USERS` |
+| `allowed_groups` | string[] | `[]` | `FEISHU_ALLOWED_GROUPS` |
+| `trusted_bot_ids` | string[] | `[]` | `FEISHU_TRUSTED_BOT_IDS` |
+| `require_mention` | bool | `true` | `FEISHU_REQUIRE_MENTION` |
+| `allow_bots` | string | `off` (`off`\|`mentions`\|`all`) | `FEISHU_ALLOW_BOTS` |
+| `allow_user_messages` | string | `multibot_mentions` | `FEISHU_ALLOW_USER_MESSAGES` |
+| `max_bot_turns` | u32 | `20` | `FEISHU_MAX_BOT_TURNS` |
+| `dedupe_ttl_secs` | u64 | `300` | `FEISHU_DEDUPE_TTL_SECS` |
+| `message_limit` | u64 | `4000` | `FEISHU_MESSAGE_LIMIT` |
+| `session_ttl_hours` | u64 | `24` (`0` disables) | `FEISHU_SESSION_TTL_HOURS` |
+| `card_streaming_mode` | string | `auto` (`auto`\|`post`\|`card`) | `FEISHU_CARD_STREAMING_MODE` |
+| `card_fallback_to_post` | bool | `true` | `FEISHU_CARD_FALLBACK_TO_POST` |
+| `card_promote_bytes` | u64 | `4000` | `FEISHU_CARD_PROMOTE_BYTES` |
+| `card_idle_finalize_ms` | u64 | `3000` | `FEISHU_CARD_IDLE_FINALIZE_MS` |
+| `allow_all_users` | bool \| omit | `false` (deny-all at the shared L3 gate) | `FEISHU_ALLOW_ALL_USERS` |
+
+> The `[feishu]` section also feeds the shared trust registry (feishu was the last platform on the uniform `GATEWAY_*` seed). The gateway-side `allowed_users`/`allowed_groups` double-gate elimination is tracked on #1357.
+
+---
+
 ## `[agent]`
 
 The AI agent subprocess that OpenAB spawns to handle messages via ACP.

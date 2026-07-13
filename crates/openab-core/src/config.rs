@@ -176,6 +176,7 @@ pub struct Config {
     pub wecom: Option<WecomConfig>,
     pub googlechat: Option<GoogleChatConfig>,
     pub teams: Option<TeamsConfig>,
+    pub feishu: Option<FeishuConfig>,
     pub agentcore: Option<AgentCoreConfig>,
     #[serde(default)]
     pub agent: AgentConfig,
@@ -1164,6 +1165,159 @@ impl TeamsConfig {
     }
 
     /// Trust-fields view for the shared registry override path.
+    pub fn trust_config(&self) -> PlatformTrustConfig {
+        PlatformTrustConfig {
+            allow_all_users: self.allow_all_users,
+            allowed_users: self.allowed_users.clone(),
+        }
+    }
+}
+
+/// First-class `[feishu]` section — credentials, connection, behavior, and
+/// L3 identity trust for the Feishu/Lark adapter. Config-first invariant
+/// (#1375, #1377): each field resolves `[feishu].field` (with `${}`
+/// expansion) → `FEISHU_*` env var → default.
+///
+/// The gateway adapter's `from_reader` remains the single source of truth
+/// for parsing and defaults: `resolve()` renders the typed TOML fields into
+/// the same string form the env vars use, so no default value or enum
+/// parsing rule is duplicated here.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct FeishuConfig {
+    /// App ID (mandatory for the adapter). Env: `FEISHU_APP_ID`.
+    pub app_id: Option<String>,
+    /// App secret (mandatory). Env: `FEISHU_APP_SECRET`.
+    pub app_secret: Option<String>,
+    /// Event verification token. Env: `FEISHU_VERIFICATION_TOKEN`.
+    pub verification_token: Option<String>,
+    /// Event encrypt key — enables webhook signature verification (L1).
+    /// Env: `FEISHU_ENCRYPT_KEY`.
+    pub encrypt_key: Option<String>,
+    /// `"feishu"` or `"lark"`. Env: `FEISHU_DOMAIN` (default `feishu`).
+    pub domain: Option<String>,
+    /// `"websocket"` (default) or `"webhook"`. Env: `FEISHU_CONNECTION_MODE`.
+    pub connection_mode: Option<String>,
+    /// Webhook mount path. Env: `FEISHU_WEBHOOK_PATH`
+    /// (default `/webhook/feishu`).
+    pub webhook_path: Option<String>,
+    /// Group (chat) ID allowlist. Env: `FEISHU_ALLOWED_GROUPS` (CSV).
+    pub allowed_groups: Option<Vec<String>>,
+    /// User (open_id) allowlist — note open_id is per-app. Env:
+    /// `FEISHU_ALLOWED_USERS` (CSV).
+    pub allowed_users: Option<Vec<String>>,
+    /// Require @mention in groups. Env: `FEISHU_REQUIRE_MENTION`
+    /// (default true).
+    pub require_mention: Option<bool>,
+    /// `"off"` (default) / `"mentions"` / `"all"`. Env: `FEISHU_ALLOW_BOTS`.
+    pub allow_bots: Option<String>,
+    /// `"multibot_mentions"` (default) / `"mentions"` / `"involved"`.
+    /// Env: `FEISHU_ALLOW_USER_MESSAGES`.
+    pub allow_user_messages: Option<String>,
+    /// Bot open_ids treated as trusted senders. Env:
+    /// `FEISHU_TRUSTED_BOT_IDS` (CSV).
+    pub trusted_bot_ids: Option<Vec<String>>,
+    /// Max consecutive bot turns. Env: `FEISHU_MAX_BOT_TURNS` (default 20).
+    pub max_bot_turns: Option<u32>,
+    /// Event dedupe TTL seconds. Env: `FEISHU_DEDUPE_TTL_SECS` (default 300).
+    pub dedupe_ttl_secs: Option<u64>,
+    /// Outbound message split limit (bytes). Env: `FEISHU_MESSAGE_LIMIT`
+    /// (default 4000).
+    pub message_limit: Option<u64>,
+    /// Participated-thread TTL in hours (0 disables). Env:
+    /// `FEISHU_SESSION_TTL_HOURS` (default 24).
+    pub session_ttl_hours: Option<u64>,
+    /// `"auto"` (default) / `"post"` / `"card"`. Env:
+    /// `FEISHU_CARD_STREAMING_MODE`.
+    pub card_streaming_mode: Option<String>,
+    /// Fall back to post on CardKit failure. Env:
+    /// `FEISHU_CARD_FALLBACK_TO_POST` (default true).
+    pub card_fallback_to_post: Option<bool>,
+    /// Auto-mode promote threshold bytes. Env: `FEISHU_CARD_PROMOTE_BYTES`
+    /// (default 4000).
+    pub card_promote_bytes: Option<u64>,
+    /// Streaming-card idle finalize window ms. Env:
+    /// `FEISHU_CARD_IDLE_FINALIZE_MS` (default 3000).
+    pub card_idle_finalize_ms: Option<u64>,
+    /// Explicit flag: true = allow all users at the shared trust gate (L3),
+    /// false = check `allowed_users`. Defaults to `false` (deny-all). Env:
+    /// `FEISHU_ALLOW_ALL_USERS`. Registry-only — the gateway-side
+    /// `allowed_users` double-gate is tracked separately (#1357).
+    pub allow_all_users: Option<bool>,
+}
+
+impl FeishuConfig {
+    /// Render the typed fields into the env-var string form, config value
+    /// first, falling back to the corresponding `FEISHU_*` env var. The
+    /// result feeds the gateway adapter's `from_reader`, keeping its parsing
+    /// and defaults as the single source of truth.
+    pub fn resolve_pairs(&self) -> std::collections::HashMap<String, String> {
+        let mut m = std::collections::HashMap::new();
+        let mut put = |key: &str, v: Option<String>| {
+            let v = v
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var(key).ok());
+            if let Some(v) = v {
+                m.insert(key.to_string(), v);
+            }
+        };
+        let csv = |v: &Option<Vec<String>>| v.as_ref().map(|l| l.join(","));
+        put("FEISHU_APP_ID", self.app_id.clone());
+        put("FEISHU_APP_SECRET", self.app_secret.clone());
+        put("FEISHU_VERIFICATION_TOKEN", self.verification_token.clone());
+        put("FEISHU_ENCRYPT_KEY", self.encrypt_key.clone());
+        put("FEISHU_DOMAIN", self.domain.clone());
+        put("FEISHU_CONNECTION_MODE", self.connection_mode.clone());
+        put("FEISHU_WEBHOOK_PATH", self.webhook_path.clone());
+        put("FEISHU_ALLOWED_GROUPS", csv(&self.allowed_groups));
+        put("FEISHU_ALLOWED_USERS", csv(&self.allowed_users));
+        put(
+            "FEISHU_REQUIRE_MENTION",
+            self.require_mention.map(|b| b.to_string()),
+        );
+        put("FEISHU_ALLOW_BOTS", self.allow_bots.clone());
+        put(
+            "FEISHU_ALLOW_USER_MESSAGES",
+            self.allow_user_messages.clone(),
+        );
+        put("FEISHU_TRUSTED_BOT_IDS", csv(&self.trusted_bot_ids));
+        put(
+            "FEISHU_MAX_BOT_TURNS",
+            self.max_bot_turns.map(|v| v.to_string()),
+        );
+        put(
+            "FEISHU_DEDUPE_TTL_SECS",
+            self.dedupe_ttl_secs.map(|v| v.to_string()),
+        );
+        put(
+            "FEISHU_MESSAGE_LIMIT",
+            self.message_limit.map(|v| v.to_string()),
+        );
+        put(
+            "FEISHU_SESSION_TTL_HOURS",
+            self.session_ttl_hours.map(|v| v.to_string()),
+        );
+        put(
+            "FEISHU_CARD_STREAMING_MODE",
+            self.card_streaming_mode.clone(),
+        );
+        put(
+            "FEISHU_CARD_FALLBACK_TO_POST",
+            self.card_fallback_to_post.map(|b| b.to_string()),
+        );
+        put(
+            "FEISHU_CARD_PROMOTE_BYTES",
+            self.card_promote_bytes.map(|v| v.to_string()),
+        );
+        put(
+            "FEISHU_CARD_IDLE_FINALIZE_MS",
+            self.card_idle_finalize_ms.map(|v| v.to_string()),
+        );
+        m
+    }
+
+    /// Trust-fields view for the shared registry override path (#1357's
+    /// registry task): L3 identity at the shared gate.
     pub fn trust_config(&self) -> PlatformTrustConfig {
         PlatformTrustConfig {
             allow_all_users: self.allow_all_users,
@@ -2612,6 +2766,79 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
 
         std::env::remove_var("TEAMS_APP_ID");
         std::env::remove_var("TEAMS_OAUTH_ENDPOINT");
+    }
+
+    /// All `FEISHU_*` env scenarios in ONE test (env is process-global).
+    #[test]
+    fn feishu_resolve_pairs_scenarios() {
+        for k in ["FEISHU_APP_ID", "FEISHU_DOMAIN", "FEISHU_ALLOWED_USERS"] {
+            std::env::remove_var(k);
+        }
+        // --- nothing set → keys absent (adapter from_reader applies defaults) ---
+        let m = FeishuConfig::default().resolve_pairs();
+        assert!(!m.contains_key("FEISHU_APP_ID"));
+        assert!(!m.contains_key("FEISHU_DOMAIN"));
+
+        // --- config wins over env; typed fields render to env string form ---
+        std::env::set_var("FEISHU_APP_ID", "env-app");
+        std::env::set_var("FEISHU_DOMAIN", "lark");
+        let cfg = FeishuConfig {
+            app_id: Some("cfg-app".into()),
+            require_mention: Some(false),
+            max_bot_turns: Some(7),
+            allowed_users: Some(vec!["ou_a".into(), "ou_b".into()]),
+            ..Default::default()
+        };
+        let m = cfg.resolve_pairs();
+        assert_eq!(m.get("FEISHU_APP_ID").unwrap(), "cfg-app");
+        assert_eq!(m.get("FEISHU_DOMAIN").unwrap(), "lark"); // env fallback
+        assert_eq!(m.get("FEISHU_REQUIRE_MENTION").unwrap(), "false");
+        assert_eq!(m.get("FEISHU_MAX_BOT_TURNS").unwrap(), "7");
+        assert_eq!(m.get("FEISHU_ALLOWED_USERS").unwrap(), "ou_a,ou_b");
+
+        // --- empty-string ${} expansion falls through to env ---
+        let cfg = FeishuConfig {
+            app_id: Some("".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolve_pairs().get("FEISHU_APP_ID").unwrap(), "env-app");
+
+        // --- trust_config() view ---
+        let cfg = FeishuConfig {
+            allow_all_users: Some(true),
+            allowed_users: Some(vec!["ou_x".into()]),
+            ..Default::default()
+        };
+        let t = cfg.trust_config();
+        assert_eq!(t.allow_all_users, Some(true));
+        assert_eq!(t.allowed_users.as_deref(), Some(&["ou_x".to_string()][..]));
+
+        std::env::remove_var("FEISHU_APP_ID");
+        std::env::remove_var("FEISHU_DOMAIN");
+    }
+
+    #[test]
+    fn feishu_section_parses_from_toml() {
+        let toml_str = r#"
+[discord]
+bot_token = "x"
+
+[feishu]
+app_id = "cli_xxx"
+app_secret = "sec"
+connection_mode = "webhook"
+encrypt_key = "ek"
+allowed_users = ["ou_123"]
+max_bot_turns = 5
+card_streaming_mode = "post"
+"#;
+        let cfg = parse_config_str(toml_str, "test").unwrap();
+        let fe = cfg.feishu.expect("feishu section");
+        assert_eq!(fe.app_id.as_deref(), Some("cli_xxx"));
+        assert_eq!(fe.connection_mode.as_deref(), Some("webhook"));
+        assert_eq!(fe.encrypt_key.as_deref(), Some("ek"));
+        assert_eq!(fe.max_bot_turns, Some(5));
+        assert_eq!(fe.card_streaming_mode.as_deref(), Some("post"));
     }
 
     #[test]
