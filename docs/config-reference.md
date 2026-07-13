@@ -159,13 +159,32 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
 
 ---
 
-## `[wecom]` / `[googlechat]` / `[teams]`
+## `[wecom]`
 
-First-class L3 identity trust for the remaining gateway platforms — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`WECOM_CORP_ID`/`WECOM_SECRET`, `GOOGLE_CHAT_*`, `TEAMS_APP_ID`/`TEAMS_APP_SECRET`).
+Full first-class WeCom section (config-first parity, #1378) — credentials, connection, and L3 identity trust. Each field resolves: config → `WECOM_*` env → default. The adapter requires all five credentials (`corp_id`, `secret`, `token`, `encoding_aes_key`, `agent_id`); an incomplete section (after env fallback) disables the adapter, matching env-only semantics.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `corp_id` | string | — | Corp ID. Env: `WECOM_CORP_ID`. |
+| `secret` | string | — | App secret. Env: `WECOM_SECRET`. |
+| `token` | string | — | Callback token (L1 signature). Env: `WECOM_TOKEN`. |
+| `encoding_aes_key` | string | — | 43-char callback AES key (L1). Env: `WECOM_ENCODING_AES_KEY`. |
+| `agent_id` | string | — | Numeric agent id. Env: `WECOM_AGENT_ID`. |
+| `webhook_path` | string | `/webhook/wecom` | Env: `WECOM_WEBHOOK_PATH`. |
+| `streaming_enabled` | bool | `false` | Recall+resend streaming opt-in. Env: `WECOM_STREAMING_ENABLED`. |
+| `debounce_secs` | u64 | `3` | Debounce window. Env: `WECOM_DEBOUNCE_SECS`. |
+| `allow_all_users` | bool \| omit | `false` (deny-all) | Env: `WECOM_ALLOW_ALL_USERS`. |
+| `allowed_users` | string[] | `[]` | WeCom UserIDs. Env: `WECOM_ALLOWED_USERS` (comma-separated). |
+
+---
+
+## `[googlechat]` / `[teams]`
+
+First-class L3 identity trust — same shape and semantics as `[line]`. Each section replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for its platform (deprecated: warns at startup, becomes an error in Phase 2). Platform credentials remain on the gateway env vars (`GOOGLE_CHAT_*`, `TEAMS_APP_ID`/`TEAMS_APP_SECRET`) until their config-first parity slices land (#1379, #1380).
 
 > **Mode scoping:** these sections (like `[line]`) take effect on the **embedded/unified adapter path**, where events pass the shared ingress trust gate. Deployments using the standalone `openab-gateway` companion over WebSocket enforce trust via `[gateway].allow_all_users` / `allowed_users` instead; Phase 1c consolidates the two paths.
 
-Each field resolves: config value → `{PREFIX}_*` env var → default (deny-all). Env prefixes: `WECOM`, `GOOGLE_CHAT`, `TEAMS`.
+Each field resolves: config value → `{PREFIX}_*` env var → default (deny-all). Env prefixes: `GOOGLE_CHAT`, `TEAMS`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -176,14 +195,10 @@ Sender ID formats per platform:
 
 | Platform | Sender ID format | Example |
 |----------|-----------------|---------|
-| WeCom | Tenant-assigned UserID (freeform string) | `"zhangsan"` |
 | Google Chat | User resource name | `"users/123456789"` |
 | MS Teams | Bot Framework `activity.from.id` | `"29:1abc..."` |
 
 ```toml
-[wecom]
-allowed_users = ["zhangsan", "lisi"]
-
 [googlechat]
 allowed_users = ["users/123456789"]
 

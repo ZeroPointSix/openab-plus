@@ -328,6 +328,29 @@ impl AppState {
         self.line_access_token = cfg.channel_access_token;
         self.line_webhook_path = cfg.webhook_path;
     }
+
+    /// Apply resolved `[wecom]` config values (#1378), rebuilding the WeCom
+    /// adapter from them. Reuses the adapter's `from_reader` construction so
+    /// the exact same validation applies (all five credentials mandatory,
+    /// numeric agent_id, 43-char AES key) — an incomplete section resolves to
+    /// no adapter, matching env-only semantics.
+    #[cfg(feature = "wecom")]
+    pub fn apply_wecom_config(&mut self, cfg: GatewayWecomConfig) {
+        let streaming = if cfg.streaming_enabled { "true" } else { "false" }.to_string();
+        let debounce = cfg.debounce_secs.to_string();
+        self.wecom = adapters::wecom::WecomConfig::from_reader(|k| match k {
+            "WECOM_CORP_ID" => cfg.corp_id.clone(),
+            "WECOM_SECRET" => cfg.secret.clone(),
+            "WECOM_TOKEN" => cfg.token.clone(),
+            "WECOM_ENCODING_AES_KEY" => cfg.encoding_aes_key.clone(),
+            "WECOM_AGENT_ID" => cfg.agent_id.clone(),
+            "WECOM_WEBHOOK_PATH" => Some(cfg.webhook_path.clone()),
+            "WECOM_STREAMING_ENABLED" => Some(streaming.clone()),
+            "WECOM_DEBOUNCE_SECS" => Some(debounce.clone()),
+            _ => None,
+        })
+        .map(adapters::wecom::WecomAdapter::new);
+    }
 }
 
 /// Parameter object for passing resolved Telegram config across the crate
@@ -348,6 +371,21 @@ pub struct GatewayLineConfig {
     pub channel_secret: Option<String>,
     pub channel_access_token: Option<String>,
     pub webhook_path: String,
+}
+
+/// Parameter object for passing resolved WeCom config across the crate
+/// boundary without introducing a dependency on `openab-core` (#1378).
+/// Fields are the fully resolved (config → env → default) values.
+#[derive(Debug, Clone)]
+pub struct GatewayWecomConfig {
+    pub corp_id: Option<String>,
+    pub secret: Option<String>,
+    pub token: Option<String>,
+    pub encoding_aes_key: Option<String>,
+    pub agent_id: Option<String>,
+    pub webhook_path: String,
+    pub streaming_enabled: bool,
+    pub debounce_secs: u64,
 }
 
 // --- Public serve() entry point ---

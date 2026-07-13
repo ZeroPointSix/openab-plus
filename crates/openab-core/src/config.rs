@@ -173,7 +173,7 @@ pub struct Config {
     pub gateway: Option<GatewayConfig>,
     pub telegram: Option<TelegramConfig>,
     pub line: Option<LineConfig>,
-    pub wecom: Option<PlatformTrustConfig>,
+    pub wecom: Option<WecomConfig>,
     pub googlechat: Option<PlatformTrustConfig>,
     pub teams: Option<PlatformTrustConfig>,
     pub agentcore: Option<AgentCoreConfig>,
@@ -862,6 +862,116 @@ impl LineConfig {
     /// uniform `GATEWAY_*` seed (and to warn when it does).
     pub fn env_trust_present() -> bool {
         std::env::var("LINE_ALLOW_ALL_USERS").is_ok() || std::env::var("LINE_ALLOWED_USERS").is_ok()
+    }
+}
+
+/// First-class `[wecom]` section — credentials, connection, and L3 identity
+/// trust for the WeCom adapter. Config-first invariant (#1375): each field
+/// resolves `[wecom].field` (with `${}` expansion) → `WECOM_*` env var →
+/// default. Graduates from the shared [`PlatformTrustConfig`] (#1378).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WecomConfig {
+    /// Corp ID. Env fallback: `WECOM_CORP_ID`.
+    pub corp_id: Option<String>,
+    /// App secret (access-token exchange). Env fallback: `WECOM_SECRET`.
+    pub secret: Option<String>,
+    /// Callback token (signature verification, L1). Env fallback: `WECOM_TOKEN`.
+    pub token: Option<String>,
+    /// Callback AES key (43 chars, message decryption, L1). Env fallback:
+    /// `WECOM_ENCODING_AES_KEY`.
+    pub encoding_aes_key: Option<String>,
+    /// Agent ID (numeric). Env fallback: `WECOM_AGENT_ID`.
+    pub agent_id: Option<String>,
+    /// Webhook mount path. Env fallback: `WECOM_WEBHOOK_PATH`
+    /// (default `/webhook/wecom`).
+    pub webhook_path: Option<String>,
+    /// Streaming (recall + resend) opt-in. Env fallback:
+    /// `WECOM_STREAMING_ENABLED` (default false).
+    pub streaming_enabled: Option<bool>,
+    /// Debounce window in seconds. Env fallback: `WECOM_DEBOUNCE_SECS`
+    /// (default 3).
+    pub debounce_secs: Option<u64>,
+    /// Explicit flag: true = allow all users, false = check `allowed_users`.
+    /// When not set, defaults to `false` (deny-all, per identity-trust-none
+    /// ADR). Env fallback: `WECOM_ALLOW_ALL_USERS` (empty string = unset).
+    pub allow_all_users: Option<bool>,
+    /// WeCom UserIDs (tenant-assigned, freeform strings) allowed to interact.
+    /// Only checked when `allow_all_users` resolves to `false`. Env fallback:
+    /// `WECOM_ALLOWED_USERS` (comma-separated).
+    pub allowed_users: Option<Vec<String>>,
+}
+
+/// Fully resolved WeCom settings (config → env → default applied).
+#[derive(Debug, Clone)]
+pub struct ResolvedWecom {
+    pub corp_id: Option<String>,
+    pub secret: Option<String>,
+    pub token: Option<String>,
+    pub encoding_aes_key: Option<String>,
+    pub agent_id: Option<String>,
+    pub webhook_path: String,
+    pub streaming_enabled: bool,
+    pub debounce_secs: u64,
+    pub allow_all_users: bool,
+    pub allowed_users: Vec<String>,
+}
+
+impl WecomConfig {
+    /// Resolve every field: config value (if set) → `WECOM_*` env → default.
+    /// String fields filter empty strings from `${}` expansion of unset vars.
+    pub fn resolve(&self) -> ResolvedWecom {
+        let opt_str = |cfg: &Option<String>, env: &str| -> Option<String> {
+            cfg.as_ref()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .or_else(|| std::env::var(env).ok())
+        };
+        ResolvedWecom {
+            corp_id: opt_str(&self.corp_id, "WECOM_CORP_ID"),
+            secret: opt_str(&self.secret, "WECOM_SECRET"),
+            token: opt_str(&self.token, "WECOM_TOKEN"),
+            encoding_aes_key: opt_str(&self.encoding_aes_key, "WECOM_ENCODING_AES_KEY"),
+            agent_id: opt_str(&self.agent_id, "WECOM_AGENT_ID"),
+            webhook_path: opt_str(&self.webhook_path, "WECOM_WEBHOOK_PATH")
+                .unwrap_or_else(|| "/webhook/wecom".into()),
+            streaming_enabled: self.streaming_enabled.unwrap_or_else(|| {
+                std::env::var("WECOM_STREAMING_ENABLED")
+                    .map(|v| v == "true" || v == "1")
+                    .unwrap_or(false)
+            }),
+            debounce_secs: self.debounce_secs.unwrap_or_else(|| {
+                std::env::var("WECOM_DEBOUNCE_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(3)
+            }),
+            allow_all_users: self.allow_all_users.unwrap_or_else(|| {
+                std::env::var("WECOM_ALLOW_ALL_USERS")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or(false)
+            }),
+            allowed_users: match &self.allowed_users {
+                Some(list) => list.clone(),
+                None => std::env::var("WECOM_ALLOWED_USERS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            },
+        }
+    }
+
+    /// Trust-fields view for the shared registry override path, preserving
+    /// the semantics the section had as a [`PlatformTrustConfig`].
+    pub fn trust_config(&self) -> PlatformTrustConfig {
+        PlatformTrustConfig {
+            allow_all_users: self.allow_all_users,
+            allowed_users: self.allowed_users.clone(),
+        }
     }
 }
 
@@ -2132,6 +2242,68 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
         std::env::remove_var("LINE_ALLOWED_USERS");
     }
 
+    /// All `WECOM_*` env scenarios in ONE test — env is process-global (same
+    /// pattern as `line_resolve_all_scenarios`). Only credential/connection
+    /// fields here; the trust fields share `PlatformTrustConfig` semantics
+    /// via `trust_config()` and are covered by `platform_trust_resolve_all_scenarios`.
+    #[test]
+    fn wecom_resolve_all_scenarios() {
+        for k in [
+            "WECOM_CORP_ID",
+            "WECOM_SECRET",
+            "WECOM_TOKEN",
+            "WECOM_ENCODING_AES_KEY",
+            "WECOM_AGENT_ID",
+            "WECOM_WEBHOOK_PATH",
+            "WECOM_STREAMING_ENABLED",
+            "WECOM_DEBOUNCE_SECS",
+        ] {
+            std::env::remove_var(k);
+        }
+        // --- defaults ---
+        let r = WecomConfig::default().resolve();
+        assert!(r.corp_id.is_none());
+        assert_eq!(r.webhook_path, "/webhook/wecom");
+        assert!(!r.streaming_enabled);
+        assert_eq!(r.debounce_secs, 3);
+
+        // --- config wins over env ---
+        std::env::set_var("WECOM_CORP_ID", "env-corp");
+        std::env::set_var("WECOM_DEBOUNCE_SECS", "9");
+        let cfg = WecomConfig {
+            corp_id: Some("cfg-corp".into()),
+            debounce_secs: Some(5),
+            ..Default::default()
+        };
+        let r = cfg.resolve();
+        assert_eq!(r.corp_id.as_deref(), Some("cfg-corp"));
+        assert_eq!(r.debounce_secs, 5);
+
+        // --- empty-string ${} expansion falls through to env ---
+        let cfg = WecomConfig {
+            corp_id: Some("".into()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.resolve().corp_id.as_deref(), Some("env-corp"));
+        assert_eq!(cfg.resolve().debounce_secs, 9); // env fallback
+
+        // --- trust_config() preserves trust semantics ---
+        let cfg = WecomConfig {
+            allow_all_users: Some(true),
+            allowed_users: Some(vec!["zhangsan".into()]),
+            ..Default::default()
+        };
+        let t = cfg.trust_config();
+        assert_eq!(t.allow_all_users, Some(true));
+        assert_eq!(
+            t.allowed_users.as_deref(),
+            Some(&["zhangsan".to_string()][..])
+        );
+
+        std::env::remove_var("WECOM_CORP_ID");
+        std::env::remove_var("WECOM_DEBOUNCE_SECS");
+    }
+
     #[test]
     fn platform_trust_sections_parse_from_toml() {
         let toml_str = r#"
@@ -2139,6 +2311,8 @@ allowed_users = ["U1234567890abcdef0123456789abcdef"]
 bot_token = "x"
 
 [wecom]
+corp_id = "corp1"
+token = "tok"
 allowed_users = ["zhangsan", "lisi"]
 
 [googlechat]
@@ -2149,6 +2323,8 @@ allow_all_users = true
 "#;
         let cfg = parse_config_str(toml_str, "test").unwrap();
         let wecom = cfg.wecom.expect("wecom section");
+        assert_eq!(wecom.corp_id.as_deref(), Some("corp1"));
+        assert_eq!(wecom.token.as_deref(), Some("tok"));
         assert_eq!(
             wecom.allowed_users.as_deref(),
             Some(&["zhangsan".to_string(), "lisi".to_string()][..])

@@ -95,6 +95,14 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # credentials stay on their gateway env vars (WECOM_CORP_ID/WECOM_SECRET,
 # GOOGLE_CHAT_*, TEAMS_APP_ID/TEAMS_APP_SECRET).
 # [wecom]
+# corp_id          = "${WECOM_CORP_ID}"          # env fallback: WECOM_CORP_ID
+# secret           = "${WECOM_SECRET}"           # env fallback: WECOM_SECRET
+# token            = "${WECOM_TOKEN}"            # callback token (L1); env fallback: WECOM_TOKEN
+# encoding_aes_key = "${WECOM_ENCODING_AES_KEY}" # 43 chars (L1); env fallback: WECOM_ENCODING_AES_KEY
+# agent_id         = "1000002"                   # numeric; env fallback: WECOM_AGENT_ID
+# webhook_path = "/webhook/wecom"       # env fallback: WECOM_WEBHOOK_PATH
+# streaming_enabled = false             # env fallback: WECOM_STREAMING_ENABLED
+# debounce_secs = 3                     # env fallback: WECOM_DEBOUNCE_SECS
 # allow_all_users = false               # env fallback: WECOM_ALLOW_ALL_USERS
 # allowed_users = ["zhangsan", "lisi"]  # WeCom UserIDs (tenant-assigned, freeform strings)
 #                                       # env fallback: WECOM_ALLOWED_USERS (comma-separated)

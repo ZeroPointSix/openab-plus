@@ -513,7 +513,7 @@ async fn main() -> anyhow::Result<()> {
         platform_trust_override(
             &mut reg,
             "wecom",
-            &cfg.wecom,
+            &cfg.wecom.as_ref().map(|w| w.trust_config()),
             "WECOM",
             cfg!(feature = "wecom") && std::env::var("WECOM_CORP_ID").is_ok(),
             allow_all_channels,
@@ -878,6 +878,25 @@ async fn main() -> anyhow::Result<()> {
                     channel_secret: r.channel_secret,
                     channel_access_token: r.channel_access_token,
                     webhook_path: r.webhook_path,
+                });
+            }
+
+            // First-class `[wecom]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + WECOM_* env fallback,
+            // #1378). The apply rebuilds the adapter through the same
+            // validation as env-only construction.
+            #[cfg(feature = "wecom")]
+            if let Some(ref w) = cfg.wecom {
+                let r = w.resolve();
+                gw_state_inner.apply_wecom_config(openab_gateway::GatewayWecomConfig {
+                    corp_id: r.corp_id,
+                    secret: r.secret,
+                    token: r.token,
+                    encoding_aes_key: r.encoding_aes_key,
+                    agent_id: r.agent_id,
+                    webhook_path: r.webhook_path,
+                    streaming_enabled: r.streaming_enabled,
+                    debounce_secs: r.debounce_secs,
                 });
             }
             let gw_state = Arc::new(gw_state_inner);
