@@ -1076,14 +1076,15 @@ impl GoogleChatConfig {
 }
 
 /// Shared first-class trust section for gateway platforms whose Phase 1 needs
-/// exactly the two L3 identity fields (identity-trust-none ADR): `[googlechat]`,
-/// `[teams]`. Same shape and resolution order as
+/// exactly the two L3 identity fields (identity-trust-none ADR): `[teams]`.
+/// Same shape and resolution order as
 /// [`LineConfig`] / [`TelegramConfig`]: `[section].field` (with `${}`
 /// expansion) → `{PREFIX}_*` env var → deny-all default.
 ///
 /// Trust-only by design — platform credentials stay on the gateway env vars
-/// the webhook adapters read (`GOOGLE_CHAT_*`,
-/// `TEAMS_APP_ID`/`TEAMS_APP_SECRET`). Platforms that later
+/// the webhook adapters read (`TEAMS_APP_ID`/`TEAMS_APP_SECRET`).
+/// Also serves as the shared trust-fields view type returned by the
+/// graduated sections' `trust_config()`. Platforms that later
 /// need extra trust fields (e.g. `trusted_bot_ids`) graduate to their own
 /// struct, as LINE will for group policy.
 #[derive(Debug, Clone, Default, Deserialize)]
