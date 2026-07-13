@@ -338,6 +338,14 @@ events from multiple real platforms.
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
+> **Per-platform note on "group routing":** WeCom's callback mode (self-built
+> app) is **DM-only** — `channel_type` is always `"direct"` with a per-user
+> channel id (`wecom:{corp}:{user}`), so group routing does not exist for WeCom
+> today and its L2 scope is effectively `allow_dm` only (`allowed_channels`
+> cannot match anything meaningful). Group delivery would arrive only via the
+> separate WS-bot ("智能机器人") model. (Verified in
+> [canyugs/openab#18](https://github.com/canyugs/openab/issues/18).)
+
 ### InboundEvent (Receiver output / Trust Gate input)
 
 **Gateway Receiver note:** The Gateway Receiver is a **single receiver** that
@@ -677,7 +685,7 @@ Handler. The Trust Gate only evaluates human sender identity.
 | LINE | Always `false` | LINE has no bot-to-bot webhook delivery; bot-bypass is a no-op |
 | Feishu | `trusted_bot_ids.contains(sender_open_id)` | Feishu marks other bots as `sender_type="user"` — unreliable; must match against known bot IDs |
 | Telegram | `message.from.is_bot` flag | Native field from Telegram API |
-| WeCom | `trusted_bot_ids.contains(userid)` | WeCom has no reliable native bot flag; match against known bot IDs. Note: `enter_agent` (member-enter event) is user-initiated — do NOT treat as bot |
+| WeCom | `trusted_bot_ids.contains(userid)` | WeCom has no reliable native bot flag; match against known bot IDs. Note: `enter_agent` (member-enter event) is user-initiated — do NOT treat as bot. **Today the Receiver hardcodes `is_bot = false`** (`wecom.rs`), so the L3 bot-bypass is a no-op for WeCom until bot detection is implemented — the bypass is *available* uniformly but *effective* only where the Receiver can derive `is_bot` |
 | Google Chat | `message.sender.type == "BOT"` | Native field from Chat API event payload |
 | MS Teams | `activity.from.role == "bot"` or `trusted_bot_ids.contains(activity.from.id)` | Bot Framework marks bot senders with role field; verify against known bot IDs for reliability |
 
@@ -838,7 +846,7 @@ using the **exact format** the platform provides in event payloads:
 | Telegram | Integer (i64) | Stringified integer | `"123456789"` | ⚠️ Do NOT use `@username` — only numeric ID works |
 | LINE | String | U + 32 hex chars | `"U1234567890abcdef0123456789abcdef"` | — |
 | Feishu | String | open_id | `"ou_xxxxxxxxxxxxxxxxxxxx"` | ⚠️ `open_id` is **per-app** — same user has different ID in different Feishu apps |
-| WeCom | String | UserID | `"zhangsan"` | — |
+| WeCom | String | UserID (self-built apps) | `"zhangsan"` | External-contact / ISV callbacks carry `wm`/`wo`-prefixed `external_userid` or encrypted OpenUserID instead — plain UserIDs only match internal members ([official docs](https://developer.work.weixin.qq.com/document/path/92113)) |
 | Google Chat | String | User resource name | `"users/123456789"` | — |
 | MS Teams | String | `activity.from.id` | `"29:1abc..."` | Verify via actual event payload; may differ from AAD Object ID |
 
