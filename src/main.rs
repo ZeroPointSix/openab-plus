@@ -513,7 +513,7 @@ async fn main() -> anyhow::Result<()> {
         platform_trust_override(
             &mut reg,
             "wecom",
-            &cfg.wecom,
+            &cfg.wecom.as_ref().map(|w| w.trust_config()),
             "WECOM",
             cfg!(feature = "wecom") && std::env::var("WECOM_CORP_ID").is_ok(),
             allow_all_channels,
@@ -522,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
         platform_trust_override(
             &mut reg,
             "googlechat",
-            &cfg.googlechat,
+            &cfg.googlechat.as_ref().map(|g| g.trust_config()),
             "GOOGLE_CHAT",
             cfg!(feature = "googlechat")
                 && std::env::var("GOOGLE_CHAT_ENABLED")
@@ -534,9 +534,18 @@ async fn main() -> anyhow::Result<()> {
         platform_trust_override(
             &mut reg,
             "teams",
-            &cfg.teams,
+            &cfg.teams.as_ref().map(|t| t.trust_config()),
             "TEAMS",
             cfg!(feature = "teams") && std::env::var("TEAMS_APP_ID").is_ok(),
+            allow_all_channels,
+            &allowed_channels,
+        );
+        platform_trust_override(
+            &mut reg,
+            "feishu",
+            &cfg.feishu.as_ref().map(|f| f.trust_config()),
+            "FEISHU",
+            cfg!(feature = "feishu") && std::env::var("FEISHU_APP_ID").is_ok(),
             allow_all_channels,
             &allowed_channels,
         );
@@ -874,7 +883,88 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+
+            // First-class `[line]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + LINE_* env fallback,
+            // #1376). Applied before warn_unenforceable_l1 so a
+            // config-supplied channel_secret is not falsely flagged.
+            if let Some(ref l) = cfg.line {
+                let r = l.resolve();
+                gw_state_inner.apply_line_config(openab_gateway::GatewayLineConfig {
+                    channel_secret: r.channel_secret,
+                    channel_access_token: r.channel_access_token,
+                    webhook_path: r.webhook_path,
+                });
+            }
+
+            // First-class `[wecom]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + WECOM_* env fallback,
+            // #1378). The apply rebuilds the adapter through the same
+            // validation as env-only construction.
+            #[cfg(feature = "wecom")]
+            if let Some(ref w) = cfg.wecom {
+                let r = w.resolve();
+                gw_state_inner.apply_wecom_config(openab_gateway::GatewayWecomConfig {
+                    corp_id: r.corp_id,
+                    secret: r.secret,
+                    token: r.token,
+                    encoding_aes_key: r.encoding_aes_key,
+                    agent_id: r.agent_id,
+                    webhook_path: r.webhook_path,
+                    streaming_enabled: r.streaming_enabled,
+                    debounce_secs: r.debounce_secs,
+                });
+            }
+            // First-class `[googlechat]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + GOOGLE_CHAT_* env
+            // fallback, #1379). Applied before warn_unenforceable_l1 so a
+            // config-supplied audience (JWT verifier) is not falsely flagged.
+            #[cfg(feature = "googlechat")]
+            if let Some(ref g) = cfg.googlechat {
+                let r = g.resolve();
+                gw_state_inner.apply_googlechat_config(openab_gateway::GatewayGoogleChatConfig {
+                    enabled: r.enabled,
+                    sa_key_json: r.sa_key_json,
+                    sa_key_file: r.sa_key_file,
+                    access_token: r.access_token,
+                    audience: r.audience,
+                    webhook_path: r.webhook_path,
+                });
+            }
+            // First-class `[teams]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + TEAMS_* env fallback,
+            // #1380).
+            #[cfg(feature = "teams")]
+            if let Some(ref t) = cfg.teams {
+                let r = t.resolve();
+                gw_state_inner.apply_teams_config(openab_gateway::GatewayTeamsConfig {
+                    app_id: r.app_id,
+                    app_secret: r.app_secret,
+                    allowed_tenants: r.allowed_tenants,
+                    oauth_endpoint: r.oauth_endpoint,
+                    openid_metadata: r.openid_metadata,
+                    webhook_path: r.webhook_path,
+                });
+            }
+            // First-class `[feishu]` config overrides env-derived values
+            // (config-authoritative + ${} expansion + FEISHU_* env fallback,
+            // #1377). Applied before warn_unenforceable_l1 so a
+            // config-supplied encrypt_key is not falsely flagged.
+            #[cfg(feature = "feishu")]
+            if let Some(ref fe) = cfg.feishu {
+                gw_state_inner.apply_feishu_config(openab_gateway::GatewayFeishuConfig {
+                    pairs: fe.resolve_pairs(),
+                });
+            }
             let gw_state = Arc::new(gw_state_inner);
+
+            // Phase 1 L1 audit (#1356): warn if any active webhook platform has
+            // no transport authentication configured. Called after
+            // apply_telegram_config so a config-supplied secret is not falsely
+            // flagged as missing. The unified binary mounts the feishu webhook
+            // route unconditionally (see NOTE at the mount below), so feishu
+            // exposure is `true` whenever the adapter is configured.
+            gw_state.warn_unenforceable_l1(true);
 
             // Build axum router with platform webhook routes
             let mut app =
@@ -895,17 +985,28 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "line")]
             {
-                info!("unified: line adapter enabled");
+                info!(path = %gw_state.line_webhook_path, "unified: line adapter enabled");
                 app = app.route(
-                    "/webhook/line",
+                    &gw_state.line_webhook_path,
                     axum::routing::post(openab_gateway::adapters::line::webhook),
                 );
             }
 
             #[cfg(feature = "feishu")]
             if gw_state.feishu.is_some() {
-                let path = std::env::var("FEISHU_WEBHOOK_PATH")
-                    .unwrap_or_else(|_| "/webhook/feishu".into());
+                // NOTE (#1356 L1 audit): unlike the standalone gateway (which
+                // mounts this route only in Webhook connection mode), the
+                // unified binary mounts it unconditionally — and never spawns
+                // the Websocket client. Deployments relying on Feishu-side
+                // webhook delivery while FEISHU_CONNECTION_MODE is unset
+                // (default: websocket) work only because of this mount, so
+                // gating it is a behavior change that needs its own
+                // deprecation path — tracked on #1356, not changed here.
+                let path = gw_state
+                    .feishu
+                    .as_ref()
+                    .map(|f| f.config.webhook_path.clone())
+                    .unwrap_or_else(|| "/webhook/feishu".into());
                 info!(path = %path, "unified: feishu adapter enabled");
                 app = app.route(
                     &path,
@@ -929,22 +1030,18 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(feature = "teams")]
             if gw_state.teams.is_some() {
-                let path =
-                    std::env::var("TEAMS_WEBHOOK_PATH").unwrap_or_else(|_| "/webhook/teams".into());
-                info!(path = %path, "unified: teams adapter enabled");
+                info!(path = %gw_state.teams_webhook_path, "unified: teams adapter enabled");
                 app = app.route(
-                    &path,
+                    &gw_state.teams_webhook_path,
                     axum::routing::post(openab_gateway::adapters::teams::webhook),
                 );
             }
 
             #[cfg(feature = "googlechat")]
             if gw_state.google_chat.is_some() {
-                let path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
-                    .unwrap_or_else(|_| "/webhook/googlechat".into());
-                info!(path = %path, "unified: googlechat adapter enabled");
+                info!(path = %gw_state.googlechat_webhook_path, "unified: googlechat adapter enabled");
                 app = app.route(
-                    &path,
+                    &gw_state.googlechat_webhook_path,
                     axum::routing::post(openab_gateway::adapters::googlechat::webhook),
                 );
             }
