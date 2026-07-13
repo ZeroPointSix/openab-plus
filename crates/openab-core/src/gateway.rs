@@ -889,9 +889,25 @@ pub async fn run_gateway_adapter(
                                     // identity) — same per-platform registry as
                                     // the unified path. Placed before slash
                                     // handling so untrusted senders cannot
-                                    // execute /reset|/cancel|/config.
-                                    if !gate_gateway_event(&router, adapter.as_ref(), &event).await {
-                                        continue;
+                                    // execute /reset|/cancel|/config. The echo
+                                    // is SPAWNED, never awaited here: streaming
+                                    // send_message waits for a GatewayResponse
+                                    // that only this loop can dispatch, so an
+                                    // inline await would stall all event
+                                    // processing for the reply timeout.
+                                    match gate_gateway_event(&router, &event) {
+                                        GateOutcome::Allow => {}
+                                        GateOutcome::Deny { echo } => {
+                                            if let Some((echo_channel, msg)) = echo {
+                                                let echo_adapter = adapter.clone();
+                                                tasks.spawn(async move {
+                                                    let _ = echo_adapter
+                                                        .send_message(&echo_channel, &msg)
+                                                        .await;
+                                                });
+                                            }
+                                            continue;
+                                        }
                                     }
 
                                     info!(
@@ -1259,30 +1275,39 @@ fn echo_allowed(key: &str) -> bool {
     }
 }
 
+/// Outcome of the shared ingress trust gate. `Deny { echo }` carries the
+/// throttled request-access echo payload (channel + message) when the deny is
+/// an identity deny and the per-sender throttle admits it; the CALLER decides
+/// how to deliver it. Delivery must NOT be awaited inline inside the WS event
+/// loop: `GatewayAdapter::send_message` (streaming mode) waits for a
+/// `GatewayResponse` that is dispatched by that same loop — awaiting there
+/// would stall all event processing for the reply timeout. The WS path spawns
+/// the echo; the unified path (axum/bridge task) awaits it directly.
+enum GateOutcome {
+    Allow,
+    Deny { echo: Option<(ChannelRef, String)> },
+}
+
 /// Shared ingress trust gate for gateway events — used by BOTH the standalone
 /// WebSocket path (`run_gateway_adapter`) and the unified path
 /// (`process_gateway_event`), so L2 (channel scope) and L3 (identity) are
 /// enforced by the same per-platform registry regardless of deployment mode
 /// (#1356 Phase 1c prerequisite).
 ///
-/// Returns `true` if the event may proceed. On `DenyIdentity`, sends the
-/// throttled request-access echo via `adapter`; on `DenyScope` (and any future
-/// variant), drops silently — scope is not a security boundary, so no echo.
+/// On `DenyIdentity`, returns the throttled request-access echo payload; on
+/// `DenyScope` (and any future variant), denies silently — scope is not a
+/// security boundary, so no echo.
 ///
 /// Phase 1: `is_dm = false` preserves today's behavior where gateway DMs are
 /// evaluated against the channel allowlist like any other channel (the
 /// `allow_dm` surface semantics arrive with the per-platform trust flip).
 /// TODO(phase-2): derive is_dm from the event/ChannelRef carrier so the
 /// `allow_dm` L2 surface can be enforced and tested for gateway platforms.
-async fn gate_gateway_event(
-    router: &crate::adapter::AdapterRouter,
-    adapter: &dyn ChatAdapter,
-    event: &GatewayEvent,
-) -> bool {
+fn gate_gateway_event(router: &crate::adapter::AdapterRouter, event: &GatewayEvent) -> GateOutcome {
     let decision =
         router.gate_incoming(&event.platform, &event.channel.id, false, &event.sender.id);
     match decision {
-        crate::trust::Decision::Allow => true,
+        crate::trust::Decision::Allow => GateOutcome::Allow,
         crate::trust::Decision::DenyIdentity => {
             // L3 identity deny → echo the sender their ID so they can request
             // access (throttled to avoid amplification). Bots never reach here
@@ -1294,7 +1319,7 @@ async fn gate_gateway_event(
                 "gateway event denied (identity); echoing request-access"
             );
             let throttle_key = format!("{}:{}", event.platform, event.sender.id);
-            if echo_allowed(&throttle_key) {
+            let echo = if echo_allowed(&throttle_key) {
                 let echo_channel = ChannelRef {
                     platform: event.platform.clone(),
                     channel_id: event.channel.id.clone(),
@@ -1302,13 +1327,15 @@ async fn gate_gateway_event(
                     parent_id: None,
                     origin_event_id: Some(event.event_id.clone()),
                 };
-                let echo = format!(
+                let msg = format!(
                     "⚠️ You are not on this bot's trusted list.\nYour ID: {}\nAsk the admin to add it to allowed_users.",
                     event.sender.id
                 );
-                let _ = adapter.send_message(&echo_channel, &echo).await;
-            }
-            false
+                Some((echo_channel, msg))
+            } else {
+                None
+            };
+            GateOutcome::Deny { echo }
         }
         // DenyScope (and any future variant) → silent drop (scope is not a
         // security boundary; no request-access echo).
@@ -1320,7 +1347,7 @@ async fn gate_gateway_event(
                 ?decision,
                 "gateway event denied (scope); silent"
             );
-            false
+            GateOutcome::Deny { echo: None }
         }
     }
 }
@@ -1351,8 +1378,16 @@ pub async fn process_gateway_event(
     }
 
     // Shared ingress trust gate (L2 scope + L3 identity), keyed by platform.
-    if !gate_gateway_event(&ctx.router, ctx.adapter.as_ref(), &event).await {
-        return Ok(false);
+    // Awaiting echo delivery here is safe: this runs on the axum/bridge task,
+    // not inside the WS event loop.
+    match gate_gateway_event(&ctx.router, &event) {
+        GateOutcome::Allow => {}
+        GateOutcome::Deny { echo } => {
+            if let Some((echo_channel, msg)) = echo {
+                let _ = ctx.adapter.send_message(&echo_channel, &msg).await;
+            }
+            return Ok(false);
+        }
     }
 
     tracing::info!(
