@@ -11,9 +11,9 @@ use crate::trust::l3_gate_applies;
 use async_trait::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateAttachment, CreateButton, CreateCommand, CreateCommandOption,
-    CreateInteractionResponse, CreateInteractionResponseFollowup, CreateInteractionResponseMessage,
-    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditChannel,
-    EditMessage, GetMessages,
+    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, CreateThread, EditChannel, EditMessage, GetMessages,
 };
 use serenity::http::Http;
 use serenity::model::application::ButtonStyle;
@@ -1688,14 +1688,14 @@ impl Handler {
             return;
         }
 
-        let content = match self.router.pool().get_usage(&thread_key).await {
-            Ok(report) => format_usage_report(&report),
-            Err(e) => format!("⚠️ {e}"),
+        let followup = match self.router.pool().get_usage(&thread_key).await {
+            Ok(report) => CreateInteractionResponseFollowup::new()
+                .embed(build_usage_embed(&report))
+                .ephemeral(true),
+            Err(e) => CreateInteractionResponseFollowup::new()
+                .content(format!("⚠️ {e}"))
+                .ephemeral(true),
         };
-
-        let followup = CreateInteractionResponseFollowup::new()
-            .content(content)
-            .ephemeral(true);
         if let Err(e) = cmd.create_followup(&ctx.http, followup).await {
             tracing::error!(error = %e, "failed to send /usage followup");
         }
@@ -2519,12 +2519,14 @@ impl Handler {
 
 // --- Discord-specific helpers ---
 
-/// Render an account usage report as a Discord message.
-fn format_usage_report(report: &UsageReport) -> String {
-    let mut out = format!("📊 **Usage — {}**", report.plan_name);
+/// Render the body lines of a usage report (everything except the plan title
+/// and billing-cycle footer). Returns the text and whether any breakdown is
+/// over its plan limit.
+fn format_usage_body(report: &UsageReport) -> (String, bool) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut over_limit = false;
 
     for b in &report.breakdowns {
-        out.push('\n');
         match b.limit {
             Some(limit) => {
                 let pct = b.percentage.unwrap_or_else(|| {
@@ -2534,10 +2536,13 @@ fn format_usage_report(report: &UsageReport) -> String {
                         0
                     }
                 });
+                if pct > 100 {
+                    over_limit = true;
+                }
                 // 10-slot progress bar, clamped at 100%.
                 let filled = (pct.min(100) as usize) / 10;
                 let bar: String = "█".repeat(filled) + &"░".repeat(10 - filled);
-                out.push_str(&format!(
+                lines.push(format!(
                     "{}: {:.2} / {:.0} `{}` {}%{}",
                     b.display_name,
                     b.used,
@@ -2548,12 +2553,12 @@ fn format_usage_report(report: &UsageReport) -> String {
                 ));
             }
             // No per-user cap (e.g. pooled enterprise credits).
-            None => out.push_str(&format!("{}: {:.2} used", b.display_name, b.used)),
+            None => lines.push(format!("{}: {:.2} used", b.display_name, b.used)),
         }
         if let Some(charges) = b.overage_charges {
             if charges > 0.0 {
-                out.push_str(&format!(
-                    "\nOverage charges: {:.2} {}",
+                lines.push(format!(
+                    "Overage charges: {:.2} {}",
                     charges,
                     b.currency.as_deref().unwrap_or("USD")
                 ));
@@ -2561,10 +2566,23 @@ fn format_usage_report(report: &UsageReport) -> String {
         }
     }
 
+    (lines.join("\n"), over_limit)
+}
+
+/// Build an embed card for a usage report. Green when within the plan limit,
+/// red when any breakdown is over.
+fn build_usage_embed(report: &UsageReport) -> CreateEmbed {
+    let (body, over_limit) = format_usage_body(report);
+    let mut embed = CreateEmbed::new()
+        .title(format!("📊 Usage — {}", report.plan_name))
+        .description(body)
+        .colour(if over_limit { 0xE74C3C } else { 0x2ECC71 });
     if let Some(reset) = &report.billing_cycle_reset {
-        out.push_str(&format!("\nBilling cycle resets: {reset}"));
+        embed = embed.footer(CreateEmbedFooter::new(format!(
+            "Billing cycle resets {reset}"
+        )));
     }
-    out
+    embed
 }
 
 fn discord_msg_ref(msg: &Message) -> MessageRef {
@@ -3242,13 +3260,12 @@ mod tests {
             billing_cycle_reset: Some("2026-08-01".into()),
             breakdowns: vec![usage_breakdown()],
         };
-        let out = format_usage_report(&report);
-        assert!(out.contains("KIRO POWER"));
-        assert!(out.contains("12781.64 / 10000"));
-        assert!(out.contains("127%"));
-        assert!(out.contains("⚠️"));
-        assert!(out.contains("Overage charges: 111.27 USD"));
-        assert!(out.contains("Billing cycle resets: 2026-08-01"));
+        let (body, over_limit) = format_usage_body(&report);
+        assert!(over_limit);
+        assert!(body.contains("12781.64 / 10000"));
+        assert!(body.contains("127%"));
+        assert!(body.contains("⚠️"));
+        assert!(body.contains("Overage charges: 111.27 USD"));
     }
 
     #[test]
@@ -3265,11 +3282,11 @@ mod tests {
                 currency: None,
             }],
         };
-        let out = format_usage_report(&report);
-        assert!(out.contains("Credits: 320.00 used"));
-        assert!(!out.contains('/'));
-        assert!(!out.contains("Overage"));
-        assert!(!out.contains("resets"));
+        let (body, over_limit) = format_usage_body(&report);
+        assert!(!over_limit);
+        assert!(body.contains("Credits: 320.00 used"));
+        assert!(!body.contains('/'));
+        assert!(!body.contains("Overage"));
     }
 
     #[test]
@@ -3286,12 +3303,13 @@ mod tests {
                 currency: Some("USD".into()),
             }],
         };
-        let out = format_usage_report(&report);
-        assert!(out.contains("50%"));
-        assert!(!out.contains("⚠️"));
-        assert!(!out.contains("Overage"));
+        let (body, over_limit) = format_usage_body(&report);
+        assert!(!over_limit);
+        assert!(body.contains("50%"));
+        assert!(!body.contains("⚠️"));
+        assert!(!body.contains("Overage"));
         // 50% → 5 of 10 bar slots filled.
-        assert!(out.contains("█████░░░░░"));
+        assert!(body.contains("█████░░░░░"));
     }
 
     // --- truncate_to_utf16_budget tests (#1185 /auth output relay) ---
