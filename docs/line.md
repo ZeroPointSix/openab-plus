@@ -120,7 +120,9 @@ Each field falls back to its `LINE_*` env var when unset. Since #1376 the sectio
 [line]
 channel_secret       = "${LINE_CHANNEL_SECRET}"
 channel_access_token = "${LINE_CHANNEL_ACCESS_TOKEN}"
-``` This replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for LINE:
+```
+
+This replaces the uniform `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` env vars for LINE:
 
 > ⚠️ **Deprecated:** driving LINE trust through `GATEWAY_ALLOW_ALL_USERS` / `GATEWAY_ALLOWED_USERS` still works but logs a startup warning; it will become a startup error in a later phase. Migrate to `[line]` (or `LINE_*` env vars).
 
