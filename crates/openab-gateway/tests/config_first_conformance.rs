@@ -1,8 +1,9 @@
 //! Config-first conformance guard (#1375).
 //!
-//! Invariant: **every platform environment variable read anywhere in this
-//! crate must have a corresponding first-class `[section]` field in
-//! `openab-core`'s config**, so that the resolution order
+//! Invariant: **every platform environment variable referenced anywhere in
+//! the workspace (this crate, `openab-core`, and the `openab` binary) must
+//! have a corresponding first-class `[section]` field in `openab-core`'s
+//! config**, so that the resolution order
 //! `config → PLATFORM_* env → default` holds for every setting (config always
 //! wins; env is a fallback only — never the sole source).
 //!
@@ -115,6 +116,15 @@ const PLATFORM_PREFIXES: &[&str] = &[
 ];
 
 /// Extract platform-prefixed env-var string literals from Rust source text.
+///
+/// Deliberately conservative heuristic (not a Rust parser): any quoted
+/// literal that starts with a platform prefix and is entirely
+/// `[A-Z0-9_]` counts — including ones appearing in comments or test code.
+/// Failure direction is safe: prose in strings/comments fails the charset
+/// filter and is ignored, while a var name mentioned in a comment flags
+/// conservatively (fail-closed). Escaped quotes can mis-pair the scanner,
+/// but real env reads are always plain literals, and garbage extractions
+/// fail the charset filter.
 fn platform_env_literals(source: &str) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let bytes = source.as_bytes();
@@ -150,14 +160,38 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+/// Scan roots: this crate, openab-core, and the binary crate. Workspace-
+/// relative paths from CARGO_MANIFEST_DIR (crates/openab-gateway) — these
+/// crates are not published, so the layout is stable in CI and dev trees.
+fn workspace_scan_roots() -> Vec<std::path::PathBuf> {
+    let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+    vec![
+        here.join("src"),
+        here.join("../openab-core/src"),
+        here.join("../../src"),
+    ]
+}
+
+fn collect_workspace_files() -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for root in workspace_scan_roots() {
+        assert!(
+            root.is_dir(),
+            "scan root missing ({}) — workspace layout changed? update \
+             workspace_scan_roots()",
+            root.display()
+        );
+        collect_rs_files(&root, &mut files);
+    }
+    files
+}
+
 #[test]
 fn every_platform_env_var_has_a_config_section_field() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    collect_rs_files(&src, &mut files);
+    let files = collect_workspace_files();
     assert!(
         !files.is_empty(),
-        "no source files found — CARGO_MANIFEST_DIR layout changed?"
+        "no source files found — workspace layout changed?"
     );
 
     let covered: BTreeSet<&str> = COVERED.iter().copied().collect();
@@ -187,13 +221,11 @@ fn every_platform_env_var_has_a_config_section_field() {
 
 #[test]
 fn covered_set_has_no_stale_platform_entries() {
-    // Symmetric hygiene check: every COVERED entry with one of the platform
-    // prefixes should still be referenced somewhere in this crate OR be a
-    // trust var read by openab-core's registry path (ALLOW_ALL_USERS /
-    // ALLOWED_USERS). Keeps the allowlist from accumulating dead entries.
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    collect_rs_files(&src, &mut files);
+    // Symmetric hygiene check: every COVERED entry must still be referenced
+    // somewhere in the workspace (at minimum, openab-core's config.rs holds
+    // each section field's env fallback). Keeps the allowlist from
+    // accumulating dead entries.
+    let files = collect_workspace_files();
     let mut referenced = BTreeSet::new();
     for file in &files {
         let text = std::fs::read_to_string(file).expect("read source file");
@@ -203,6 +235,12 @@ fn covered_set_has_no_stale_platform_entries() {
         .iter()
         .copied()
         .filter(|v| {
+            // Trust vars are read via dynamically constructed keys —
+            // `PlatformTrustConfig::resolve_with_env` builds
+            // `format!("{prefix}_ALLOW_ALL_USERS")` / `_ALLOWED_USERS` — so
+            // no string literal exists for a literal scan to find. Exempt by
+            // suffix; the positive-direction test still covers any literal
+            // reads of them.
             !referenced.contains(*v)
                 && !v.ends_with("_ALLOW_ALL_USERS")
                 && !v.ends_with("_ALLOWED_USERS")
@@ -210,7 +248,7 @@ fn covered_set_has_no_stale_platform_entries() {
         .collect();
     assert!(
         stale.is_empty(),
-        "COVERED entries no longer referenced in this crate (remove them or \
-         re-wire the env fallback): {stale:?}"
+        "COVERED entries no longer referenced anywhere in the workspace \
+         (remove them or re-wire the env fallback): {stale:?}"
     );
 }
