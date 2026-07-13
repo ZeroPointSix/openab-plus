@@ -687,9 +687,12 @@ async fn main() -> anyhow::Result<()> {
         configured_platforms.push("telegram");
     }
     #[cfg(feature = "googlechat")]
-    if std::env::var("GOOGLE_CHAT_ENABLED")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
+    if cfg
+        .googlechat
+        .clone()
+        .unwrap_or_default()
+        .resolve()
+        .enabled
     {
         configured_platforms.push("googlechat");
     }

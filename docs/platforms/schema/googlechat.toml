@@ -230,7 +230,7 @@ pr      = ""
 [[openab_features]]
 feature = "cron_dispatch"
 status  = "implemented"
-note    = "`cronjob.toml` jobs with `platform = \"googlechat\"` fire through the unified adapter when the `googlechat` feature and `GOOGLE_CHAT_ENABLED` are active. Jobs without an explicit `thread_id` remain at the top level of the configured space because Google Chat does not implement the gateway `create_topic` command."
+note    = "`cronjob.toml` jobs with `platform = \"googlechat\"` fire through the unified adapter when the `googlechat` feature is compiled and the platform is enabled (`[googlechat] enabled = true` or `GOOGLE_CHAT_ENABLED` env — config-first, per the first-class-platform-config ADR). Jobs without an explicit `thread_id` remain at the top level of the configured space because Google Chat does not implement the gateway `create_topic` command."
 source  = ["crates/openab-core/src/cron.rs#VALID_PLATFORMS", "crates/openab-core/src/cron.rs#fire_cronjob", "src/main.rs#cron_adapters"]
 pr      = ""
 

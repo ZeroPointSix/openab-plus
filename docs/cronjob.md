@@ -346,7 +346,7 @@ Use `sender_name` to distinguish different scheduled tasks in logs and thread ti
 | `discord` | (always enabled) | `[discord]` section in config.toml |
 | `slack` | `--features slack` | `[slack]` section in config.toml |
 | `telegram` | `--features telegram` | `[telegram]` section in config.toml **or** `TELEGRAM_BOT_TOKEN` env var |
-| `googlechat` | `--features googlechat` | `GOOGLE_CHAT_ENABLED=true` and `GOOGLE_CHAT_SA_KEY_JSON`, `GOOGLE_CHAT_SA_KEY_FILE`, or `GOOGLE_CHAT_ACCESS_TOKEN` |
+| `googlechat` | `--features googlechat` | `[googlechat] enabled = true` in config.toml **or** `GOOGLE_CHAT_ENABLED=true` env var, plus credentials (`sa_key_json`/`sa_key_file`/`access_token` fields or their `GOOGLE_CHAT_*` env equivalents) |
 
 > **Note:** The `channel` field for Telegram should be the numeric chat ID (e.g. `"176096071"`). Use [@userinfobot](https://t.me/userinfobot) or the Telegram Bot API `getUpdates` to find your chat ID.
 
