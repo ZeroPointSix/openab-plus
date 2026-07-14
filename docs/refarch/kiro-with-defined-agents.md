@@ -57,6 +57,116 @@ Change only the selected alias for another deployment:
 
 No additional OpenAB service or infrastructure is required. The model used by each agent is billed according to the user's Kiro plan.
 
+## Multi-OAB Delegation by Complexity
+
+The same pattern can back multiple **named OpenAB agents** with different model policies. A common two-tier design uses:
+
+| Named OAB agent | Kiro agent | Model policy | Workload |
+|---|---|---|---|
+| `generic` | `auto` | `auto` | Routine questions, summaries, small changes, and general operations |
+| `complex` | `sol` | `gpt-5.6-sol` | Architecture, difficult debugging, long-horizon refactors, and high-complexity implementation |
+
+Each named OAB agent is an independent deployment with its own `config.toml`, bot identity, process, and state. OpenAB does not infer task complexity in this pattern: a human can select the target bot directly, or a coordinator bot can delegate by explicitly mentioning the target bot.
+
+### Define the optional `sol` Kiro agent
+
+Create `$HOME/.kiro/agents/sol.json`:
+
+```json
+{
+  "name": "sol",
+  "description": "High-complexity agent using GPT-5.6 Sol",
+  "model": "gpt-5.6-sol",
+  "tools": ["*"],
+  "allowedTools": ["@builtin"]
+}
+```
+
+Validate it before deployment:
+
+```bash
+kiro-cli agent validate --path "$HOME/.kiro/agents/sol.json"
+```
+
+### Delegation architecture
+
+```text
+                              TASK INTAKE
+                    +---------------------------+
+                    | Human or coordinator bot  |
+                    | classifies/selects target |
+                    +-------------+-------------+
+                                  |
+                    +-------------+-------------+
+                    |                           |
+             routine/generic             high complexity
+                    |                           |
+                    v                           v
+       +--------------------------+  +--------------------------+
+       | Named OAB agent: generic |  | Named OAB agent: complex |
+       |                          |  |                          |
+       | config.toml              |  | config.toml              |
+       | --agent auto             |  | --agent sol              |
+       |          |               |  |          |               |
+       |          v               |  |          v               |
+       | kiro-cli acp             |  | kiro-cli acp             |
+       |          |               |  |          |               |
+       |          v               |  |          v               |
+       | $HOME/.kiro/agents/      |  | $HOME/.kiro/agents/      |
+       |   auto.json              |  |   sol.json               |
+       | model: auto              |  | model: gpt-5.6-sol       |
+       +------------+-------------+  +-------------+------------+
+                    ^                              ^
+                    | hooks.pre_seed               | hooks.pre_seed
+                    +---------------+--------------+
+                                    |
+                    +---------------+----------------------------+
+                    | Private S3 HOME seed                       |
+                    | kiro-named-agents-home.tar.gz              |
+                    |                                            |
+                    | .kiro/agents/auto.json                     |
+                    | .kiro/agents/sol.json                      |
+                    | (optionally auth, steering, skills, tools) |
+                    +--------------------------------------------+
+```
+
+The two OAB deployments can restore the same base HOME archive because it contains both named Kiro profiles. Each deployment activates only the profile selected by its own `--agent` argument.
+
+Configure the two OpenAB backends independently:
+
+```toml
+# generic OAB agent config.toml
+[agent]
+command = "kiro-cli"
+args = ["acp", "--agent", "auto", "--trust-all-tools"]
+```
+
+```toml
+# complex OAB agent config.toml
+[agent]
+command = "kiro-cli"
+args = ["acp", "--agent", "sol", "--trust-all-tools"]
+```
+
+For manual routing, users mention the appropriate bot. For coordinator-to-worker delegation over Discord, allow only explicit bot mentions on the receiving worker:
+
+```toml
+[discord]
+allow_bot_messages = "mentions"
+# Optional: restrict delegation to known coordinator bot IDs.
+trusted_bot_ids = ["COORDINATOR_BOT_ID"]
+```
+
+`"mentions"` is the recommended loop breaker. Avoid `allow_bot_messages = "all"` unless every bot message must trigger work. See [Multi-Agent Setup](../multi-agent.md) and [Messaging](../messaging.md) for the complete routing and trust model.
+
+## Persist Named Kiro Agents in Stateless Environments
+
+Kiro discovers global named agents from `$HOME/.kiro/agents/`. For stateless runtimes such as ECS Fargate or Fargate Spot, keep the profiles under HOME, bundle the required HOME content into a private S3 tarball, and restore it before Kiro ACP starts. At minimum, the archive must recreate `.kiro/agents/...` relative to `$HOME`; it can also carry authentication, steering, skills, and tools when those need to persist.
+
+Use OpenAB's built-in `pre_seed` lifecycle hook for the restore. It extracts the archive into `$HOME` by default before `pre_boot` and before the agent pool starts, so the named profiles exist when OpenAB launches `kiro-cli acp --agent auto` or `kiro-cli acp --agent sol`. If runtime changes to HOME must survive task replacement, pair the restore with a `pre_shutdown` backup.
+
+See [Hooks: Pre-Seed and HOME Backup/Restore](../hooks.md#real-world-example-s3-restore--backup-round-trip) for the canonical archive layout, S3 configuration, checksum verification, IAM permissions, size limits, and complete `pre_seed`/`pre_shutdown` round-trip. Treat full HOME archives as sensitive because they may contain authentication material.
+
 ## Prerequisites
 
 - OpenAB with the Kiro CLI backend installed and authenticated. See [Kiro CLI (Default Agent)](../kiro.md).
@@ -116,7 +226,7 @@ Create `$HOME/.kiro/agents/auto.json`:
 
 `"tools": ["*"]` makes every available tool visible to the agent. `"allowedTools": ["@builtin"]` auto-approves all built-in tools; `"*"` is not supported in `allowedTools`. The OpenAB launch examples below also use `--trust-all-tools`, which auto-approves tool permission requests for the non-interactive ACP process.
 
-> **Security note:** `--trust-all-tools` grants broad tool execution authority. Restrict which Discord, Slack, or gateway users and channels can reach the OpenAB instance. For a least-privilege deployment, omit this flag or replace it with Kiro's selective trust controls.
+> **Why `--trust-all-tools` is used:** OpenAB normally runs Kiro ACP non-interactively inside a pod or container. There is no terminal operator available to approve individual tool requests, so an untrusted tool call can block the ACP session indefinitely. Keep `--trust-all-tools` on OAB-managed Kiro commands unless every required tool is covered by an explicit non-interactive trust policy. Treat the pod boundary, OpenAB channel/user/bot allowlists, container permissions, and IAM role as the security controls around that authority.
 
 ## Validate the Agent Files
 
