@@ -37,6 +37,26 @@ const PARTICIPATION_CACHE_MAX: usize = 1000;
 /// Discord StringSelectMenu hard limit on options.
 const SELECT_MENU_PAGE_SIZE: usize = 25;
 
+/// Discord caps select menu option labels and descriptions at 100
+/// characters; anything longer makes the entire interaction response fail
+/// with "Invalid Form Body", which surfaces to users as "The application
+/// did not respond". (Hit in the wild when a backend model description
+/// exceeded the cap.)
+const SELECT_OPTION_TEXT_MAX: usize = 100;
+
+/// Truncate to at most `max` characters (not bytes — Discord counts
+/// characters, and slicing on a byte boundary would panic on multi-byte
+/// UTF-8). Appends '…' when truncated.
+fn truncate_for_discord(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
 /// Avoid unbounded Discord history exports from very large threads.
 const THREAD_EXPORT_MESSAGE_LIMIT: usize = 5000;
 
@@ -1534,9 +1554,12 @@ impl Handler {
             .skip(page * SELECT_MENU_PAGE_SIZE)
             .take(SELECT_MENU_PAGE_SIZE)
             .map(|o| {
-                let mut item = CreateSelectMenuOption::new(&o.name, &o.value);
+                let mut item = CreateSelectMenuOption::new(
+                    truncate_for_discord(&o.name, SELECT_OPTION_TEXT_MAX),
+                    &o.value,
+                );
                 if let Some(desc) = &o.description {
-                    item = item.description(desc);
+                    item = item.description(truncate_for_discord(desc, SELECT_OPTION_TEXT_MAX));
                 }
                 if o.value == opt.current_value {
                     item = item.default_selection(true);
@@ -3246,6 +3269,40 @@ fn truncate_to_utf16_budget(body: &str, prefix: &str, suffix: &str, limit: usize
 mod tests {
     use super::*;
     use crate::bot_turns::{TurnResult, HARD_BOT_TURN_LIMIT, BOT_TURN_LIMIT_WARNING_PREFIX};
+
+    // --- truncate_for_discord (select menu option 100-char cap) ---
+
+    #[test]
+    fn truncate_for_discord_short_string_unchanged() {
+        assert_eq!(truncate_for_discord("auto", 100), "auto");
+    }
+
+    #[test]
+    fn truncate_for_discord_exactly_at_limit_unchanged() {
+        let s = "x".repeat(100);
+        assert_eq!(truncate_for_discord(&s, 100), s);
+    }
+
+    #[test]
+    fn truncate_for_discord_over_limit_truncated_with_ellipsis() {
+        // Real-world case: the claude-fable-5 model description (~140 chars)
+        // broke the /models slash command with Invalid Form Body.
+        let desc = "[Internal] DEVELOPMENT USE CASES ONLY, NOT FOR CUSTOMER DATA, ITAR OR PII. \
+                    Experimental preview of Claude Fable 5 model with 1M context window";
+        let out = truncate_for_discord(desc, 100);
+        assert_eq!(out.chars().count(), 100);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_for_discord_counts_chars_not_bytes() {
+        // 120 CJK chars = 360 bytes; must not panic on byte boundaries and
+        // must come back at exactly 100 chars.
+        let s = "測".repeat(120);
+        let out = truncate_for_discord(&s, 100);
+        assert_eq!(out.chars().count(), 100);
+        assert!(out.ends_with('…'));
+    }
 
     // --- format_usage_report tests (/usage slash command) ---
 
