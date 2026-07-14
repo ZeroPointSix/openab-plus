@@ -3,18 +3,21 @@
 > **Agent-friendly prompt:**
 >
 > ```text
-> Configure three global Kiro agents named opus48, sonnet5, and auto from
+> Configure four global Kiro agents named sol, terra, luna, and auto from
 > https://github.com/openabdev/openab/blob/main/docs/refarch/kiro-with-defined-agents.md,
 > then configure this OpenAB instance to launch the agent I select.
 > ```
 
-Use named Kiro agents to give each OpenAB deployment an explicit model policy. This example defines three reusable agents:
+Use named Kiro agents to give each OpenAB deployment an explicit model policy. This example defines four reusable agents:
 
-| Agent name | Agent `model` value | Intended selection |
+| Agent name | Agent `model` value | Intended policy |
 |---|---|---|
-| `opus48` | `claude-opus-4.8` | Claude Opus 4.8 |
-| `sonnet5` | `claude-sonnet-5` | Claude Sonnet 5 |
-| `auto` | `auto` | Kiro automatic model selection |
+| `sol` | `gpt-5.6-sol` | Hardest multi-step development and long-horizon work |
+| `terra` | `gpt-5.6-terra` | Balanced, routine multi-step development |
+| `luna` | `gpt-5.6-luna` | Fast, high-frequency agentic work |
+| `auto` | `auto` | Kiro routing for general development (recommended default) |
+
+GPT-5.6 Sol, Terra, and Luna were announced for Kiro on July 14, 2026. All three have a 272K context window and are currently Experimental; their Kiro credit multipliers are 2.4x, 1.2x, and 0.6x respectively, compared with Auto's 1.0x baseline. See the [GPT-5.6 announcement](https://kiro.dev/changelog/models/gpt-5-6/) and [Kiro model guide](https://kiro.dev/docs/models/) for current availability and lifecycle details.
 
 The agent names are aliases. OpenAB selects an alias when it launches Kiro ACP; Kiro then loads that agent's configuration and uses its configured model.
 
@@ -33,26 +36,27 @@ The agent names are aliases. OpenAB selects an alias when it launches Kiro ACP; 
 |  config.toml                                                          |
 |  [agent]                                                              |
 |  command = "kiro-cli"                                                 |
-|  args = ["acp", "--agent", "opus48", "--trust-all-tools"]             |
+|  args = ["acp", "--agent", "sol", "--trust-all-tools"]                |
 |                         |                                             |
 +-------------------------|---------------------------------------------+
                           | starts ACP over stdio
                           v
                  +--------------------+
                  | kiro-cli acp       |
-                 | --agent opus48     |
+                 | --agent sol        |
                  +---------+----------+
                            | loads
                            v
-              $HOME/.kiro/agents/opus48.json
+                $HOME/.kiro/agents/sol.json
                            |
-                           | "model": "claude-opus-4.8"
+                           | "model": "gpt-5.6-sol"
                            v
-                    Claude Opus 4.8
+                     GPT-5.6 Sol
 
 Change only the selected alias for another deployment:
-  --agent sonnet5  ->  claude-sonnet-5
-  --agent auto     ->  auto
+  --agent terra  ->  gpt-5.6-terra
+  --agent luna   ->  gpt-5.6-luna
+  --agent auto   ->  auto
 ```
 
 No additional OpenAB service or infrastructure is required. The model used by each agent is billed according to the user's Kiro plan.
@@ -66,27 +70,9 @@ The same pattern can back multiple **named OpenAB agents** with different model 
 | `generic` | `auto` | `auto` | Routine questions, summaries, small changes, and general operations |
 | `complex` | `sol` | `gpt-5.6-sol` | Architecture, difficult debugging, long-horizon refactors, and high-complexity implementation |
 
+Use `terra` for an additional fixed, balanced tier or `luna` for a fixed high-throughput tier. The diagram below keeps two deployments for clarity; every added policy still requires its own OpenAB deployment.
+
 Each named OAB agent is an independent deployment with its own `config.toml`, bot identity, process, and state. OpenAB does not infer task complexity in this pattern: a human can select the target bot directly, or a coordinator bot can delegate by explicitly mentioning the target bot.
-
-### Define the optional `sol` Kiro agent
-
-Create `$HOME/.kiro/agents/sol.json`:
-
-```json
-{
-  "name": "sol",
-  "description": "High-complexity agent using GPT-5.6 Sol",
-  "model": "gpt-5.6-sol",
-  "tools": ["*"],
-  "allowedTools": ["@builtin"]
-}
-```
-
-Validate it before deployment:
-
-```bash
-kiro-cli agent validate --path "$HOME/.kiro/agents/sol.json"
-```
 
 ### Delegation architecture
 
@@ -124,13 +110,15 @@ kiro-cli agent validate --path "$HOME/.kiro/agents/sol.json"
                     | Private S3 HOME seed                       |
                     | kiro-named-agents-home.tar.gz              |
                     |                                            |
-                    | .kiro/agents/auto.json                     |
                     | .kiro/agents/sol.json                      |
+                    | .kiro/agents/terra.json                    |
+                    | .kiro/agents/luna.json                     |
+                    | .kiro/agents/auto.json                     |
                     | (optionally auth, steering, skills, tools) |
                     +--------------------------------------------+
 ```
 
-The two OAB deployments can restore the same base HOME archive because it contains both named Kiro profiles. Each deployment activates only the profile selected by its own `--agent` argument.
+The OAB deployments can restore the same base HOME archive because it contains all four named Kiro profiles. Each deployment activates only the profile selected by its own `--agent` argument.
 
 Configure the two OpenAB backends independently:
 
@@ -163,7 +151,7 @@ trusted_bot_ids = ["COORDINATOR_BOT_ID"]
 
 Kiro discovers global named agents from `$HOME/.kiro/agents/`. For stateless runtimes such as ECS Fargate or Fargate Spot, keep the profiles under HOME, bundle the required HOME content into a private S3 tarball, and restore it before Kiro ACP starts. At minimum, the archive must recreate `.kiro/agents/...` relative to `$HOME`; it can also carry authentication, steering, skills, and tools when those need to persist.
 
-Use OpenAB's built-in `pre_seed` lifecycle hook for the restore. It extracts the archive into `$HOME` by default before `pre_boot` and before the agent pool starts, so the named profiles exist when OpenAB launches `kiro-cli acp --agent auto` or `kiro-cli acp --agent sol`. If runtime changes to HOME must survive task replacement, pair the restore with a `pre_shutdown` backup.
+Use OpenAB's built-in `pre_seed` lifecycle hook for the restore. It extracts the archive into `$HOME` by default before `pre_boot` and before the agent pool starts, so all four named profiles exist when OpenAB launches Kiro with the selected alias. If runtime changes to HOME must survive task replacement, pair the restore with a `pre_shutdown` backup.
 
 See [Hooks: Pre-Seed and HOME Backup/Restore](../hooks.md#real-world-example-s3-restore--backup-round-trip) for the canonical archive layout, S3 configuration, checksum verification, IAM permissions, size limits, and complete `pre_seed`/`pre_shutdown` round-trip. Treat full HOME archives as sensitive because they may contain authentication material.
 
@@ -171,10 +159,10 @@ See [Hooks: Pre-Seed and HOME Backup/Restore](../hooks.md#real-world-example-s3-
 
 - OpenAB with the Kiro CLI backend installed and authenticated. See [Kiro CLI (Default Agent)](../kiro.md).
 - A Kiro CLI release whose `kiro-cli acp --help` output includes `--agent <AGENT>`.
-- Access to the requested models in your Kiro account and region. Run `/model` in Kiro CLI to inspect currently available models.
+- Access to the requested models in your Kiro account and region. GPT-5.6 support is Experimental and may require an eligible paid plan and cross-region inference; run `/model` in Kiro CLI to inspect currently available models.
 - Write access to the Kiro home directory used by the OpenAB process.
 
-## Create the Three Kiro Agents
+## Create the Four Kiro Agents
 
 Global agents live in `$HOME/.kiro/agents/` and are available across workspaces. Create the directory first:
 
@@ -182,29 +170,43 @@ Global agents live in `$HOME/.kiro/agents/` and are available across workspaces.
 mkdir -p "$HOME/.kiro/agents"
 ```
 
-### `opus48`
+### `sol`
 
-Create `$HOME/.kiro/agents/opus48.json`:
+Create `$HOME/.kiro/agents/sol.json`:
 
 ```json
 {
-  "name": "opus48",
-  "description": "General-purpose agent using Claude Opus 4.8",
-  "model": "claude-opus-4.8",
+  "name": "sol",
+  "description": "Flagship agent for the hardest multi-step work using GPT-5.6 Sol",
+  "model": "gpt-5.6-sol",
   "tools": ["*"],
   "allowedTools": ["@builtin"]
 }
 ```
 
-### `sonnet5`
+### `terra`
 
-Create `$HOME/.kiro/agents/sonnet5.json`:
+Create `$HOME/.kiro/agents/terra.json`:
 
 ```json
 {
-  "name": "sonnet5",
-  "description": "General-purpose agent using Claude Sonnet 5",
-  "model": "claude-sonnet-5",
+  "name": "terra",
+  "description": "Balanced agent for routine multi-step work using GPT-5.6 Terra",
+  "model": "gpt-5.6-terra",
+  "tools": ["*"],
+  "allowedTools": ["@builtin"]
+}
+```
+
+### `luna`
+
+Create `$HOME/.kiro/agents/luna.json`:
+
+```json
+{
+  "name": "luna",
+  "description": "Fast agent for high-frequency work using GPT-5.6 Luna",
+  "model": "gpt-5.6-luna",
   "tools": ["*"],
   "allowedTools": ["@builtin"]
 }
@@ -217,7 +219,7 @@ Create `$HOME/.kiro/agents/auto.json`:
 ```json
 {
   "name": "auto",
-  "description": "General-purpose agent using automatic model selection",
+  "description": "General-purpose agent using Kiro automatic model selection",
   "model": "auto",
   "tools": ["*"],
   "allowedTools": ["@builtin"]
@@ -230,10 +232,10 @@ Create `$HOME/.kiro/agents/auto.json`:
 
 ## Validate the Agent Files
 
-Validate all three files against the installed Kiro agent schema:
+Validate all four files against the installed Kiro agent schema:
 
 ```bash
-for agent in opus48 sonnet5 auto; do
+for agent in sol terra luna auto; do
   kiro-cli agent validate --path "$HOME/.kiro/agents/${agent}.json"
 done
 
@@ -246,20 +248,28 @@ Kiro also supports workspace agents under `.kiro/agents/`. A workspace agent tak
 
 An OpenAB config has one `[agent]` backend. Set `command` to `kiro-cli` and pass the selected agent name as separate entries in `args`.
 
-### Select `opus48`
+### Select `sol`
 
 ```toml
 [agent]
 command = "kiro-cli"
-args = ["acp", "--agent", "opus48", "--trust-all-tools"]
+args = ["acp", "--agent", "sol", "--trust-all-tools"]
 ```
 
-### Select `sonnet5`
+### Select `terra`
 
 ```toml
 [agent]
 command = "kiro-cli"
-args = ["acp", "--agent", "sonnet5", "--trust-all-tools"]
+args = ["acp", "--agent", "terra", "--trust-all-tools"]
+```
+
+### Select `luna`
+
+```toml
+[agent]
+command = "kiro-cli"
+args = ["acp", "--agent", "luna", "--trust-all-tools"]
 ```
 
 ### Select `auto`
@@ -273,12 +283,12 @@ args = ["acp", "--agent", "auto", "--trust-all-tools"]
 The resulting command is, for example:
 
 ```bash
-kiro-cli acp --agent opus48 --trust-all-tools
+kiro-cli acp --agent sol --trust-all-tools
 ```
 
 `--agent <AGENT>` tells Kiro which agent to use when starting the first ACP session. Because the selected agent JSON contains `model`, the session starts with that agent's configured model. This avoids depending on the global `chat.defaultAgent` or `chat.defaultModel` settings.
 
-To run all three policies concurrently, deploy three OpenAB instances and give each instance its own `config.toml` with a different `--agent` value. Do not add three `[agent]` sections to one config.
+To run all four policies concurrently, deploy four OpenAB instances and give each instance its own `config.toml` with a different `--agent` value. Do not add four `[agent]` sections to one config.
 
 ## Deploy and Verify
 
@@ -299,7 +309,7 @@ To run all three policies concurrently, deploy three OpenAB instances and give e
 Edit the alias's JSON file, validate it, and restart OpenAB. The OpenAB `config.toml` does not need to change:
 
 ```bash
-kiro-cli agent validate --path "$HOME/.kiro/agents/opus48.json"
+kiro-cli agent validate --path "$HOME/.kiro/agents/sol.json"
 ```
 
 ### Change the selected alias
@@ -309,7 +319,7 @@ Change only the value after `--agent` in `config.toml`, then restart OpenAB:
 ```toml
 [agent]
 command = "kiro-cli"
-args = ["acp", "--agent", "sonnet5", "--trust-all-tools"]
+args = ["acp", "--agent", "terra", "--trust-all-tools"]
 ```
 
 ### Set a Kiro-wide fallback
@@ -339,4 +349,5 @@ If an agent does not specify `model`, Kiro uses the default model. If its config
 - Agent names and filenames are case-sensitive.
 - `--agent` selects the agent for the first ACP session; it is not an OpenAB model-setting flag.
 - Keep agent files on persistent storage in containerized deployments so they survive restarts.
+- GPT-5.6 Sol, Terra, and Luna are Experimental at the time of writing; review Kiro's model lifecycle and data-protection guidance before production use.
 - Model availability is account- and region-dependent and may change over time.
