@@ -78,8 +78,34 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
     let ecs = aws_sdk_ecs::Client::new(aws_config);
     let s3 = aws_sdk_s3::Client::new(aws_config);
 
+    apply_manifests_with(aws_config, &ecs, &s3, &manifests, wait).await
+}
+
+/// Validate and reconcile OAB services from in-memory manifests.
+///
+/// This is the library entry point for programmatic consumers (control
+/// planes, provisioners) that construct [`OABServiceManifest`] values
+/// directly instead of loading them from YAML files. All manifests are
+/// validated before any is applied (no partial apply on invalid input).
+pub async fn apply_manifests(
+    aws_config: &aws_config::SdkConfig,
+    manifests: &[OABServiceManifest],
+    wait: bool,
+) -> Result<()> {
+    let ecs = aws_sdk_ecs::Client::new(aws_config);
+    let s3 = aws_sdk_s3::Client::new(aws_config);
+    apply_manifests_with(aws_config, &ecs, &s3, manifests, wait).await
+}
+
+async fn apply_manifests_with(
+    aws_config: &aws_config::SdkConfig,
+    ecs: &aws_sdk_ecs::Client,
+    s3: &aws_sdk_s3::Client,
+    manifests: &[OABServiceManifest],
+    wait: bool,
+) -> Result<()> {
     // Validate ALL manifests before applying any (prevent partial apply)
-    for m in &manifests {
+    for m in manifests {
         m.validate()?;
         if matches!(&m.spec.runtime, Runtime::Kubernetes(_)) {
             anyhow::bail!(
@@ -89,16 +115,16 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
         }
     }
 
-    for m in &manifests {
+    for m in manifests {
         println!("  Applying {} (ECS)...", m.metadata.name);
-        apply_ecs(&ecs, &s3, aws_config, m, wait).await?;
+        apply_ecs(ecs, s3, aws_config, m, wait).await?;
     }
 
     println!("\n{} service(s) applied.", manifests.len());
     Ok(())
 }
 
-pub(crate) fn load_manifests(path: &Path) -> Result<Vec<OABServiceManifest>> {
+pub fn load_manifests(path: &Path) -> Result<Vec<OABServiceManifest>> {
     let mut manifests = Vec::new();
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {

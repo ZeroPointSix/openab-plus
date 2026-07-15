@@ -1,16 +1,6 @@
-mod apply;
-mod bootstrap;
-mod config;
-mod create;
-mod delete;
-mod get;
-mod ingress;
-mod manifest;
-mod scale;
-mod secrets;
-
 use anyhow::Context;
 use clap::{Parser, Subcommand};
+use oabctl::{apply, bootstrap, config, create, delete, get, scale};
 
 #[derive(Parser)]
 #[command(name = "oabctl", about = "OAB agent provisioner for ECS")]
