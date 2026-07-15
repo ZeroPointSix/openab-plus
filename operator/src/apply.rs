@@ -78,7 +78,27 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
     let ecs = aws_sdk_ecs::Client::new(aws_config);
     let s3 = aws_sdk_s3::Client::new(aws_config);
 
-    apply_manifests_with(aws_config, &ecs, &s3, &manifests, wait).await
+    // CLI path: resolve the cluster from ~/.oabctl/config.toml (same source
+    // as `get` and `delete`). Load errors propagate — silently defaulting on
+    // a malformed config could target the wrong cluster.
+    let oab_cfg = crate::config::OabConfig::load()
+        .context("failed to load ~/.oabctl/config.toml (run `oabctl bootstrap` first)")?;
+    let cluster = oab_cfg.defaults.cluster;
+
+    apply_manifests_with(aws_config, &ecs, &s3, &manifests, &cluster, wait).await
+}
+
+/// Target options for the programmatic apply API ([`apply_manifests`]).
+#[derive(Debug, Clone, Default)]
+pub struct ApplyOptions {
+    /// ECS cluster to reconcile into. **Required** for library callers —
+    /// there is deliberately no `~/.oabctl/config.toml` fallback here, so a
+    /// containerized control plane without CLI home configuration cannot
+    /// silently target a default cluster. (The `oabctl` CLI resolves its
+    /// cluster from the config file as before.)
+    pub cluster: Option<String>,
+    /// Wait for each service deployment to stabilize before returning.
+    pub wait: bool,
 }
 
 /// Validate and reconcile OAB services from in-memory manifests.
@@ -87,14 +107,27 @@ pub async fn run(aws_config: &aws_config::SdkConfig, file_path: &str, sync_confi
 /// planes, provisioners) that construct [`OABServiceManifest`] values
 /// directly instead of loading them from YAML files. All manifests are
 /// validated before any is applied (no partial apply on invalid input).
+///
+/// Contract (enforced before any AWS call):
+/// - an empty manifest set is rejected rather than reported as success
+/// - [`ApplyOptions::cluster`] must be set to a non-empty cluster name
 pub async fn apply_manifests(
     aws_config: &aws_config::SdkConfig,
     manifests: &[OABServiceManifest],
-    wait: bool,
+    opts: &ApplyOptions,
 ) -> Result<()> {
+    if manifests.is_empty() {
+        anyhow::bail!("no manifests to apply (empty manifest set)");
+    }
+    let cluster = opts
+        .cluster
+        .as_deref()
+        .context("ApplyOptions.cluster is required: pass the target ECS cluster explicitly (the library has no ~/.oabctl/config.toml fallback)")?;
+    anyhow::ensure!(!cluster.is_empty(), "ApplyOptions.cluster must not be empty");
+
     let ecs = aws_sdk_ecs::Client::new(aws_config);
     let s3 = aws_sdk_s3::Client::new(aws_config);
-    apply_manifests_with(aws_config, &ecs, &s3, manifests, wait).await
+    apply_manifests_with(aws_config, &ecs, &s3, manifests, cluster, opts.wait).await
 }
 
 async fn apply_manifests_with(
@@ -102,8 +135,13 @@ async fn apply_manifests_with(
     ecs: &aws_sdk_ecs::Client,
     s3: &aws_sdk_s3::Client,
     manifests: &[OABServiceManifest],
+    cluster: &str,
     wait: bool,
 ) -> Result<()> {
+    if manifests.is_empty() {
+        anyhow::bail!("no manifests to apply (empty manifest set)");
+    }
+
     // Validate ALL manifests before applying any (prevent partial apply)
     for m in manifests {
         m.validate()?;
@@ -117,7 +155,7 @@ async fn apply_manifests_with(
 
     for m in manifests {
         println!("  Applying {} (ECS)...", m.metadata.name);
-        apply_ecs(ecs, s3, aws_config, m, wait).await?;
+        apply_ecs(ecs, s3, aws_config, m, cluster, wait).await?;
     }
 
     println!("\n{} service(s) applied.", manifests.len());
@@ -171,6 +209,7 @@ async fn apply_ecs(
     s3: &aws_sdk_s3::Client,
     config: &aws_config::SdkConfig,
     m: &OABServiceManifest,
+    cluster: &str,
     wait: bool,
 ) -> Result<()> {
     let ecs_rt = match &m.spec.runtime {
@@ -208,14 +247,6 @@ async fn apply_ecs(
         };
     let generation = current_gen + 1;
 
-    // Resolve cluster from config (same source as `get` and `delete` commands).
-    // ~/.oabctl/config.toml defaults.cluster; falls back to "oab".
-    // Propagate config load errors (same behavior as get/delete) — silently
-    // defaulting to "oab" on a malformed config could target the wrong cluster.
-    let oab_cfg = crate::config::OabConfig::load()
-        .context("failed to load ~/.oabctl/config.toml (run `oabctl bootstrap` first)")?;
-    let cluster = &oab_cfg.defaults.cluster;
-
     // Look up the ECS service's current registry ARN(s) up front so both the
     // ingress-removal teardown below and the update/create logic further down
     // can use the *exact* registry rather than falling back to a name-only
@@ -223,7 +254,7 @@ async fn apply_ecs(
     // an account and reuse the same namespace/name).
     let describe_resp = ecs
         .describe_services()
-        .cluster(cluster.as_str())
+        .cluster(cluster)
         .services(&service_name)
         .send()
         .await;
@@ -506,7 +537,7 @@ async fn apply_ecs(
 
         let mut update_req = ecs
             .update_service()
-            .cluster(cluster.as_str())
+            .cluster(cluster)
             .service(&service_name)
             .task_definition(&task_def_arn)
             .enable_execute_command(true)
@@ -560,7 +591,7 @@ async fn apply_ecs(
 
         let mut create_req = ecs
             .create_service()
-            .cluster(cluster.as_str())
+            .cluster(cluster)
             .service_name(&service_name)
             .task_definition(&task_def_arn)
             .desired_count(1)
@@ -771,6 +802,78 @@ fn resolve_task_role_arn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_sdk_config() -> aws_config::SdkConfig {
+        aws_config::SdkConfig::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .build()
+    }
+
+    fn minimal_manifest() -> OABServiceManifest {
+        serde_yaml::from_str(
+            r#"
+apiVersion: oab.dev/v2
+kind: OABService
+metadata:
+  name: test-svc
+  namespace: test
+spec:
+  image: example.com/openab:latest
+  resources:
+    cpu: "256"
+    memory: "512"
+  configFrom: s3://bucket/config.toml
+  runtime:
+    type: ecs
+    networking:
+      subnets: [subnet-aaa]
+      securityGroups: [sg-aaa]
+"#,
+        )
+        .expect("valid manifest")
+    }
+
+    #[tokio::test]
+    async fn apply_manifests_rejects_empty_set() {
+        let cfg = test_sdk_config();
+        let opts = ApplyOptions {
+            cluster: Some("test-cluster".to_string()),
+            wait: false,
+        };
+        let err = apply_manifests(&cfg, &[], &opts).await.unwrap_err();
+        assert!(
+            err.to_string().contains("empty manifest set"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_manifests_requires_explicit_cluster() {
+        let cfg = test_sdk_config();
+        let m = minimal_manifest();
+        let err = apply_manifests(&cfg, &[m], &ApplyOptions::default())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("ApplyOptions.cluster is required"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_manifests_rejects_empty_cluster_name() {
+        let cfg = test_sdk_config();
+        let m = minimal_manifest();
+        let opts = ApplyOptions {
+            cluster: Some(String::new()),
+            wait: false,
+        };
+        let err = apply_manifests(&cfg, &[m], &opts).await.unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected error: {err}"
+        );
+    }
 
     #[test]
     fn task_role_manifest_wins_over_bootstrap() {
