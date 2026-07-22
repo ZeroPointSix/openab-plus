@@ -69,6 +69,64 @@ pub struct UpdateConfigResponse {
     pub status: ConfigStatus,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AppliedRuntimeConfig {
+    pub applied_paths: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReloadConfigResponse {
+    pub validation: ValidationResult,
+    pub runtime: AppliedRuntimeConfig,
+    pub status: ConfigStatus,
+}
+
+#[derive(Clone)]
+pub struct RuntimeConfigApplier {
+    state: Arc<crate::AppState>,
+    baseline: crate::RuntimeGatewayConfig,
+}
+
+impl std::fmt::Debug for RuntimeConfigApplier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeConfigApplier")
+            .field("baseline", &self.baseline)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeConfigApplier {
+    pub fn new(state: Arc<crate::AppState>) -> Self {
+        let baseline = crate::RuntimeGatewayConfig {
+            telegram_rich_messages: state.telegram_rich_messages,
+            telegram_trusted_source_only: state.telegram_trusted_source_only,
+            telegram_streaming: state.telegram_streaming,
+        };
+        Self { state, baseline }
+    }
+
+    pub async fn apply(&self, values: &Value) -> anyhow::Result<AppliedRuntimeConfig> {
+        let mut next = self.baseline.clone();
+        let mut applied_paths = Vec::new();
+
+        if let Some(value) = get_bool(values, &["telegram", "rich_messages"]) {
+            next.telegram_rich_messages = value;
+            applied_paths.push("telegram.rich_messages".to_string());
+        }
+        if let Some(value) = get_bool(values, &["telegram", "trusted_source_only"]) {
+            next.telegram_trusted_source_only = value;
+            applied_paths.push("telegram.trusted_source_only".to_string());
+        }
+        if let Some(value) = get_bool(values, &["telegram", "streaming"]) {
+            next.telegram_streaming = Some(value);
+            applied_paths.push("telegram.streaming".to_string());
+        }
+
+        *self.state.runtime_config.write().await = next;
+        Ok(AppliedRuntimeConfig { applied_paths })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
@@ -146,6 +204,7 @@ struct ManagerState {
 pub struct ConfigManager {
     store: ConfigStore,
     state: Mutex<ManagerState>,
+    runtime_applier: Mutex<Option<RuntimeConfigApplier>>,
 }
 
 impl ConfigManager {
@@ -162,7 +221,12 @@ impl ConfigManager {
                 pending_restart: BTreeSet::new(),
                 last_validation: None,
             }),
+            runtime_applier: Mutex::new(None),
         }
+    }
+
+    pub async fn set_runtime_applier(&self, applier: RuntimeConfigApplier) {
+        *self.runtime_applier.lock().await = Some(applier);
     }
 
     pub async fn read(&self) -> anyhow::Result<ConfigDocument> {
@@ -207,9 +271,44 @@ impl ConfigManager {
         })
     }
 
-    pub async fn mark_reloaded(&self) -> ConfigStatus {
-        self.state.lock().await.pending_restart.clear();
-        self.status().await
+    pub async fn reload(&self) -> anyhow::Result<ReloadConfigResponse> {
+        let values = self.store.load().await?;
+        let validation = self.validate_values(&values).await;
+
+        if !validation.ok {
+            self.state.lock().await.last_validation = Some(validation.clone());
+            return Ok(ReloadConfigResponse {
+                validation,
+                runtime: AppliedRuntimeConfig {
+                    applied_paths: Vec::new(),
+                },
+                status: self.status().await,
+            });
+        }
+
+        let applier = self.runtime_applier.lock().await.clone();
+        let runtime = if let Some(applier) = applier {
+            applier.apply(&values).await?
+        } else {
+            AppliedRuntimeConfig {
+                applied_paths: Vec::new(),
+            }
+        };
+
+        let pending_restart = restart_required_paths(&values);
+        let hash = hash_value(&values)?;
+        {
+            let mut state = self.state.lock().await;
+            state.last_loaded_hash = Some(hash);
+            state.pending_restart = pending_restart.into_iter().collect();
+            state.last_validation = Some(validation.clone());
+        }
+
+        Ok(ReloadConfigResponse {
+            validation,
+            runtime,
+            status: self.status().await,
+        })
     }
 
     pub async fn status(&self) -> ConfigStatus {
@@ -257,8 +356,8 @@ where
 }
 
 async fn get_config(headers: HeaderMap, manager: Arc<ConfigManager>) -> Response {
-    if let Err(resp) = authorize(&headers) {
-        return resp;
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
     }
     match manager.read().await {
         Ok(doc) => Json(doc).into_response(),
@@ -271,8 +370,8 @@ async fn put_config(
     Json(req): Json<UpdateConfigRequest>,
     manager: Arc<ConfigManager>,
 ) -> Response {
-    if let Err(resp) = authorize(&headers) {
-        return resp;
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
     }
     match manager.save(req.values).await {
         Ok(resp) => Json(resp).into_response(),
@@ -285,38 +384,40 @@ async fn validate_config_handler(
     Json(req): Json<UpdateConfigRequest>,
     manager: Arc<ConfigManager>,
 ) -> Response {
-    if let Err(resp) = authorize(&headers) {
-        return resp;
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
     }
     Json(manager.validate_values(&req.values).await).into_response()
 }
 
 async fn reload_config(headers: HeaderMap, manager: Arc<ConfigManager>) -> Response {
-    if let Err(resp) = authorize(&headers) {
-        return resp;
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
     }
-    Json(manager.mark_reloaded().await).into_response()
+    match manager.reload().await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => internal_error(e),
+    }
 }
 
 async fn get_status(headers: HeaderMap, manager: Arc<ConfigManager>) -> Response {
-    if let Err(resp) = authorize(&headers) {
-        return resp;
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
     }
     Json(manager.status().await).into_response()
 }
 
-fn authorize(headers: &HeaderMap) -> Result<(), Response> {
+enum AuthError {
+    TokenNotConfigured,
+    Unauthorized,
+}
+
+fn authorize(headers: &HeaderMap) -> Result<(), AuthError> {
     let expected = std::env::var("GATEWAY_ADMIN_TOKEN")
         .or_else(|_| std::env::var("OPENAB_ADMIN_TOKEN"))
         .ok()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "admin token is not configured" })),
-            )
-                .into_response()
-        })?;
+        .ok_or(AuthError::TokenNotConfigured)?;
 
     let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -329,11 +430,22 @@ fn authorize(headers: &HeaderMap) -> Result<(), Response> {
     if bearer == Some(expected.as_str()) || header_token == Some(expected.as_str()) {
         Ok(())
     } else {
-        Err((
+        Err(AuthError::Unauthorized)
+    }
+}
+
+fn auth_error_response(error: AuthError) -> Response {
+    match error {
+        AuthError::TokenNotConfigured => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "admin token is not configured" })),
+        )
+            .into_response(),
+        AuthError::Unauthorized => (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "invalid or missing admin token" })),
         )
-            .into_response())
+            .into_response(),
     }
 }
 
@@ -427,6 +539,8 @@ fn restart_required_paths(values: &Value) -> Vec<String> {
         "telegram.webhook_path",
         "line.webhook_path",
         "wecom.webhook_path",
+        "wecom.streaming_enabled",
+        "wecom.debounce_secs",
         "googlechat.webhook_path",
         "teams.webhook_path",
         "feishu.webhook_path",
@@ -448,6 +562,8 @@ fn field_metadata() -> Vec<FieldMetadata> {
         "wecom.secret",
         "wecom.token",
         "wecom.encoding_aes_key",
+        "wecom.streaming_enabled",
+        "wecom.debounce_secs",
         "googlechat.sa_key_json",
         "googlechat.access_token",
         "teams.app_secret",
@@ -466,8 +582,6 @@ fn field_metadata() -> Vec<FieldMetadata> {
         "telegram.rich_messages",
         "telegram.trusted_source_only",
         "telegram.streaming",
-        "wecom.streaming_enabled",
-        "wecom.debounce_secs",
     ] {
         metadata.push(FieldMetadata {
             path: path.into(),
@@ -576,5 +690,57 @@ mod tests {
             .await
             .unwrap();
         assert!(store.rollback_available().await);
+    }
+
+    #[tokio::test]
+    async fn reload_applies_runtime_values_and_keeps_restart_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.toml");
+        let store = ConfigStore::new(&path);
+        store
+            .save_atomic(&json!({
+                "telegram": {
+                    "rich_messages": true,
+                    "trusted_source_only": true,
+                    "streaming": false
+                },
+                "line": { "webhook_path": "/hook/line" },
+                "wecom": {
+                    "streaming_enabled": true,
+                    "debounce_secs": 7
+                }
+            }))
+            .await
+            .unwrap();
+
+        let manager = ConfigManager::new(store);
+        let (tx, _rx) = tokio::sync::broadcast::channel(4);
+        let state = Arc::new(crate::AppState::test_default(tx));
+        manager
+            .set_runtime_applier(RuntimeConfigApplier::new(state.clone()))
+            .await;
+
+        let resp = manager.reload().await.unwrap();
+
+        assert!(resp.validation.ok);
+        assert_eq!(
+            resp.runtime.applied_paths,
+            vec![
+                "telegram.rich_messages",
+                "telegram.trusted_source_only",
+                "telegram.streaming"
+            ]
+        );
+        assert_eq!(
+            resp.status.pending_restart,
+            vec![
+                "line.webhook_path",
+                "wecom.debounce_secs",
+                "wecom.streaming_enabled"
+            ]
+        );
+        assert!(state.telegram_rich_messages().await);
+        assert!(state.telegram_trusted_source_only().await);
+        assert_eq!(state.runtime_config.read().await.telegram_streaming, Some(false));
     }
 }
