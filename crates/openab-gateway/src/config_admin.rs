@@ -1,6 +1,6 @@
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -213,13 +213,14 @@ impl ConfigManager {
     }
 
     pub async fn status(&self) -> ConfigStatus {
+        let rollback_available = self.store.rollback_available().await;
         let state = self.state.lock().await;
         ConfigStatus {
             config_path: self.store.path().display().to_string(),
             last_saved_at: state.last_saved_at,
             last_loaded_hash: state.last_loaded_hash.clone(),
             pending_restart: state.pending_restart.iter().cloned().collect(),
-            rollback_available: futures_util::future::ready(()).await; self.store.rollback_available().await,
+            rollback_available,
             last_validation: state.last_validation.clone(),
         }
     }
