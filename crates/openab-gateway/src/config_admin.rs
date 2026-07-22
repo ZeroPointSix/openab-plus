@@ -527,7 +527,7 @@ fn validate_webhook_path(values: &Value, path: &[&str], errors: &mut Vec<Validat
 fn validate_allowlist(values: &Value, section: &str, errors: &mut Vec<ValidationError>) {
     let allow_all = get_bool(values, &[section, "allow_all_users"]);
     let users = get_array(values, &[section, "allowed_users"]);
-    if allow_all == Some(false) && users.is_some_and(|v| v.is_empty()) {
+    if allow_all == Some(false) && users.is_none_or(|v| v.is_empty()) {
         errors.push(ValidationError {
             path: format!("{section}.allowed_users"),
             code: "empty_allowlist".into(),
@@ -762,6 +762,12 @@ mod tests {
     fn allowlist_false_requires_users() {
         let result = validate_config(&json!({
             "telegram": { "allow_all_users": false, "allowed_users": [] }
+        }));
+        assert!(!result.ok);
+        assert_eq!(result.errors[0].code, "empty_allowlist");
+
+        let result = validate_config(&json!({
+            "telegram": { "allow_all_users": false }
         }));
         assert!(!result.ok);
         assert_eq!(result.errors[0].code, "empty_allowlist");
