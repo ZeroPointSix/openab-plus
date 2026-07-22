@@ -243,7 +243,12 @@ impl ConfigManager {
         validate_config(values)
     }
 
-    pub async fn save(&self, values: Value) -> anyhow::Result<UpdateConfigResponse> {
+    pub async fn save(&self, mut values: Value) -> anyhow::Result<UpdateConfigResponse> {
+        if contains_masked_secret(&values) {
+            let current = self.store.load().await?;
+            preserve_masked_secrets(&mut values, &current);
+        }
+
         let validation = self.validate_values(&values).await;
         if !validation.ok {
             self.state.lock().await.last_validation = Some(validation.clone());
@@ -597,6 +602,57 @@ fn mask_secrets(mut value: Value) -> Value {
     value
 }
 
+fn contains_masked_secret(value: &Value) -> bool {
+    contains_masked_secret_value(value, None)
+}
+
+fn contains_masked_secret_value(value: &Value, key: Option<&str>) -> bool {
+    if key.is_some_and(is_secret_key) && value.as_str() == Some(MASKED_SECRET) {
+        return true;
+    }
+
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| contains_masked_secret_value(v, Some(k))),
+        Value::Array(values) => values
+            .iter()
+            .any(|v| contains_masked_secret_value(v, key)),
+        _ => false,
+    }
+}
+
+fn preserve_masked_secrets(value: &mut Value, current: &Value) {
+    preserve_masked_secret_value(value, current, None);
+}
+
+fn preserve_masked_secret_value(value: &mut Value, current: &Value, key: Option<&str>) {
+    if key.is_some_and(is_secret_key) && value.as_str() == Some(MASKED_SECRET) {
+        if !current.is_null() {
+            *value = current.clone();
+        }
+        return;
+    }
+
+    match (value, current) {
+        (Value::Object(map), Value::Object(current_map)) => {
+            for (k, v) in map.iter_mut() {
+                if let Some(current_value) = current_map.get(k) {
+                    preserve_masked_secret_value(v, current_value, Some(k));
+                }
+            }
+        }
+        (Value::Array(values), Value::Array(current_values)) => {
+            for (idx, v) in values.iter_mut().enumerate() {
+                if let Some(current_value) = current_values.get(idx) {
+                    preserve_masked_secret_value(v, current_value, key);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn mask_value(value: &mut Value, key: Option<&str>) {
     if key.is_some_and(is_secret_key) && value.is_string() {
         *value = Value::String(MASKED_SECRET.into());
@@ -655,6 +711,41 @@ mod tests {
         assert_eq!(masked["telegram"]["bot_token"], MASKED_SECRET);
         assert_eq!(masked["telegram"]["rich_messages"], true);
         assert_eq!(masked["nested"][0]["password"], MASKED_SECRET);
+    }
+
+    #[tokio::test]
+    async fn save_preserves_masked_secret_values_from_read_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.toml");
+        let store = ConfigStore::new(&path);
+        store
+            .save_atomic(&json!({
+                "telegram": {
+                    "bot_token": "real-bot-token",
+                    "secret_token": "real-secret-token",
+                    "rich_messages": true
+                },
+                "nested": { "password": "real-password" }
+            }))
+            .await
+            .unwrap();
+
+        let manager = ConfigManager::new(store.clone());
+        let doc = manager.read().await.unwrap();
+        assert_eq!(doc.values["telegram"]["bot_token"], MASKED_SECRET);
+        assert_eq!(doc.values["telegram"]["secret_token"], MASKED_SECRET);
+        assert_eq!(doc.values["nested"]["password"], MASKED_SECRET);
+
+        let mut values = doc.values;
+        values["telegram"]["rich_messages"] = json!(false);
+        let resp = manager.save(values).await.unwrap();
+
+        assert!(resp.validation.ok);
+        let saved = store.load().await.unwrap();
+        assert_eq!(saved["telegram"]["bot_token"], "real-bot-token");
+        assert_eq!(saved["telegram"]["secret_token"], "real-secret-token");
+        assert_eq!(saved["nested"]["password"], "real-password");
+        assert_eq!(saved["telegram"]["rich_messages"], false);
     }
 
     #[test]
