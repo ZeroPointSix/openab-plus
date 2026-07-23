@@ -125,7 +125,7 @@ pub async fn webhook(
         "telegram webhook received"
     );
 
-    if state.telegram_trusted_source_only && !is_telegram_subnet {
+    if state.telegram_trusted_source_only().await && !is_telegram_subnet {
         warn!(source_ip = %source_ip, "webhook rejected: source IP not in Telegram subnet");
         return axum::http::StatusCode::FORBIDDEN;
     }
@@ -342,6 +342,18 @@ fn compute_draft_id(chat_id: &str, thread_id: &Option<String>) -> i64 {
     (chan.wrapping_add(tid)) % 1_000_000 + 1
 }
 
+fn truncate_to_char_boundary(value: &str, max_len: usize) -> &str {
+    if value.len() <= max_len {
+        return value;
+    }
+
+    let mut end = max_len;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 /// Send a rich message via Bot API 10.1 sendRichMessage.
 ///
 /// Design: we pass agent markdown directly via InputRichMessage.markdown.
@@ -475,11 +487,7 @@ pub async fn handle_reply(
                 if reply.content.text.len() < 30 {
                     return;
                 }
-                let text = if reply.content.text.len() > 32768 {
-                    &reply.content.text[..reply.content.text.floor_char_boundary(32768)]
-                } else {
-                    &reply.content.text
-                };
+                let text = truncate_to_char_boundary(&reply.content.text, 32768);
                 // Combine channel + thread to avoid draft_id collision in forum topics
                 let draft_id = compute_draft_id(&reply.channel.id, &reply.channel.thread_id);
                 let _ = send_rich_message_draft(client, bot_token, &reply.channel.id, &reply.channel.thread_id, draft_id, text).await;

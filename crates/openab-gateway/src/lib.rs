@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod config_admin;
 pub(crate) mod media;
 pub mod schema;
 pub mod store;
@@ -6,7 +7,7 @@ pub mod store;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
 
 // --- Reply token cache for LINE hybrid Reply/Push dispatch ---
 
@@ -29,6 +30,27 @@ pub const LINE_WEBHOOK_CONCURRENCY_MAX: usize = 8;
 /// secret is not configured, so it accepts unauthenticated POSTs. See #1356.
 fn l1_unenforceable(active: bool, l1_configured: bool) -> bool {
     active && !l1_configured
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeGatewayConfig {
+    pub telegram_rich_messages: bool,
+    pub telegram_trusted_source_only: bool,
+    pub telegram_streaming: Option<bool>,
+}
+
+impl RuntimeGatewayConfig {
+    fn new(
+        telegram_rich_messages: bool,
+        telegram_trusted_source_only: bool,
+        telegram_streaming: Option<bool>,
+    ) -> Self {
+        Self {
+            telegram_rich_messages,
+            telegram_trusted_source_only,
+            telegram_streaming,
+        }
+    }
 }
 
 pub struct AppState {
@@ -60,6 +82,7 @@ pub struct AppState {
     pub wecom: Option<adapters::wecom::WecomAdapter>,
     pub ws_token: Option<String>,
     pub event_tx: broadcast::Sender<String>,
+    pub runtime_config: RwLock<RuntimeGatewayConfig>,
     pub reply_token_cache: ReplyTokenCache,
     pub line_webhook_semaphore: Arc<Semaphore>,
     pub client: reqwest::Client,
@@ -99,6 +122,7 @@ impl AppState {
             wecom: None,
             ws_token: None,
             event_tx,
+            runtime_config: RwLock::new(RuntimeGatewayConfig::new(false, false, None)),
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
             client: reqwest::Client::new(),
@@ -196,10 +220,34 @@ impl AppState {
             wecom,
             ws_token,
             event_tx,
+            runtime_config: RwLock::new(RuntimeGatewayConfig::new(
+                telegram_rich_messages,
+                telegram_trusted_source_only,
+                telegram_streaming,
+            )),
             reply_token_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
             client,
         }
+    }
+
+    pub async fn telegram_rich_messages(&self) -> bool {
+        self.runtime_config.read().await.telegram_rich_messages
+    }
+
+    pub async fn telegram_trusted_source_only(&self) -> bool {
+        self.runtime_config
+            .read()
+            .await
+            .telegram_trusted_source_only
+    }
+
+    fn sync_runtime_config_from_fields(&mut self) {
+        *self.runtime_config.get_mut() = RuntimeGatewayConfig::new(
+            self.telegram_rich_messages,
+            self.telegram_trusted_source_only,
+            self.telegram_streaming,
+        );
     }
 
     /// Phase 1 L1 audit (#1356): warn loudly for each **active** webhook
@@ -312,6 +360,7 @@ impl AppState {
         self.telegram_rich_messages = cfg.rich_messages;
         self.telegram_trusted_source_only = cfg.trusted_source_only;
         self.telegram_streaming = cfg.streaming;
+        self.sync_runtime_config_from_fields();
     }
 
     /// Apply resolved `[line]` config values, overriding the env-derived
@@ -497,6 +546,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
 
     let (event_tx, _) = broadcast::channel::<String>(256);
     let reply_token_cache: ReplyTokenCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let config_manager = config_admin::ConfigManager::from_env();
 
     let mut app = Router::new()
         .route("/ws", get(ws_handler))
@@ -686,10 +736,22 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         wecom,
         ws_token,
         event_tx,
+        runtime_config: RwLock::new(RuntimeGatewayConfig::new(
+            telegram_rich_messages,
+            std::env::var("TELEGRAM_TRUSTED_SOURCE_ONLY")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            std::env::var("TELEGRAM_STREAMING")
+                .ok()
+                .map(|v| !(v == "0" || v.eq_ignore_ascii_case("false"))),
+        )),
         reply_token_cache,
         line_webhook_semaphore: Arc::new(Semaphore::new(LINE_WEBHOOK_CONCURRENCY_MAX)),
         client,
     });
+    config_manager
+        .set_runtime_applier(config_admin::RuntimeConfigApplier::new(state.clone()))
+        .await;
 
     // Phase 1 L1 audit (#1356): warn if any active webhook platform has no
     // transport authentication configured (identity trust unenforceable).
@@ -742,7 +804,9 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         });
     }
 
-    let app = app.with_state(state.clone());
+    let app = app
+        .merge(config_admin::router(config_manager.clone()))
+        .with_state(state.clone());
 
     // Background: evict expired media files
     tokio::spawn(store::eviction_loop());
@@ -835,13 +899,15 @@ async fn handle_oab_connection(state: Arc<AppState>, socket: axum::extract::ws::
                             #[cfg(feature = "telegram")]
                             "telegram" => {
                                 if let Some(ref token) = state_for_recv.telegram_bot_token {
+                                    let telegram_rich_messages =
+                                        state_for_recv.telegram_rich_messages().await;
                                     adapters::telegram::handle_reply(
                                         &reply,
                                         token,
                                         &client,
                                         &state_for_recv.event_tx,
                                         &reaction_state,
-                                        state_for_recv.telegram_rich_messages,
+                                        telegram_rich_messages,
                                     )
                                     .await;
                                 } else {
