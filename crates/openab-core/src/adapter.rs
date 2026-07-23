@@ -285,10 +285,11 @@ pub(crate) fn profile_session_from_metadata(
     }
 
     let profile_id = first_non_empty(raw, &["profile", "agent_profile"]);
-    let mut overrides = ProfileSessionOverrides::default();
-    overrides.model = first_non_empty(raw, &["profile_model", "model"]);
-    overrides.reasoning_effort =
-        first_non_empty(raw, &["profile_reasoning_effort", "reasoning_effort"]);
+    let mut overrides = ProfileSessionOverrides {
+        model: first_non_empty(raw, &["profile_model", "model"]),
+        reasoning_effort: first_non_empty(raw, &["profile_reasoning_effort", "reasoning_effort"]),
+        ..ProfileSessionOverrides::default()
+    };
 
     for (key, value) in raw {
         let value = value.trim();

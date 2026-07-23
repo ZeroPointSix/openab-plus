@@ -6,32 +6,22 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkdirStrategy {
+    #[default]
     SystemDefault,
     ProfileDefault,
     EphemeralPerSession,
 }
 
-impl Default for WorkdirStrategy {
-    fn default() -> Self {
-        Self::SystemDefault
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryStrategy {
     None,
     RestartProcess,
+    #[default]
     ResumeSession,
-}
-
-impl Default for RecoveryStrategy {
-    fn default() -> Self {
-        Self::ResumeSession
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
