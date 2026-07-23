@@ -14,6 +14,7 @@ use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
+use crate::session_snapshot::SessionStatus;
 
 // --- Output directive parsing ---
 
@@ -793,15 +794,30 @@ impl AdapterRouter {
         let tool_display = self.reactions_config.tool_display;
         let prompt_hard_timeout = self.prompt_hard_timeout;
         let liveness_check_interval = self.liveness_check_interval;
+        let session_pool = self.pool.clone();
+        let session_key = thread_key.to_string();
 
         self.pool
             .with_connection(thread_key, |conn| {
                 let content_blocks = content_blocks.clone();
+                let session_pool = session_pool.clone();
+                let session_key = session_key.clone();
                 Box::pin(async move {
                     let reset = conn.session_reset;
                     conn.session_reset = false;
 
-                    let (mut rx, request_id) = conn.session_prompt(content_blocks).await?;
+                    session_pool
+                        .mark_session_status(&session_key, SessionStatus::Running)
+                        .await;
+                    let (mut rx, request_id) = match conn.session_prompt(content_blocks).await {
+                        Ok(value) => value,
+                        Err(err) => {
+                            session_pool
+                                .mark_session_error(&session_key, err.to_string())
+                                .await;
+                            return Err(err);
+                        }
+                    };
                     if assistant_status {
                         let _ = adapter.set_status(&thread_channel, "Thinking…").await;
                     } else {
@@ -922,6 +938,7 @@ impl AdapterRouter {
                     // messages and abandons cleanly on dead agent / hard ceiling
                     // so late responses cannot leak into the next prompt.
                     let mut response_error: Option<String> = None;
+                    let mut status_failure_recorded = false;
                     let mut turn_result = TurnResult::default();
                     let prompt_start = tokio::time::Instant::now();
                     loop {
@@ -948,23 +965,35 @@ impl AdapterRouter {
                                 // the truncation.
                                 None => {
                                     if response_error.is_none() {
-                                        response_error =
-                                            Some("Agent process exited unexpectedly".into());
+                                        let err = "Agent process exited unexpectedly".to_string();
+                                        response_error = Some(err.clone());
+                                        session_pool
+                                            .mark_session_exited(&session_key, Some(err))
+                                            .await;
+                                        status_failure_recorded = true;
                                     }
                                     break;
                                 }
                             },
                             _ = tokio::time::sleep(liveness_check_interval) => {
                                 if !conn.alive() {
-                                    response_error = Some("Agent process died".into());
+                                    let err = "Agent process died".to_string();
+                                    response_error = Some(err.clone());
+                                    session_pool
+                                        .mark_session_exited(&session_key, Some(err))
+                                        .await;
+                                    status_failure_recorded = true;
                                     conn.abandon_request(request_id).await;
                                     break;
                                 }
                                 if prompt_start.elapsed() > prompt_hard_timeout {
-                                    response_error = Some(format!(
+                                    let err = format!(
                                         "Agent exceeded hard timeout ({}s)",
                                         prompt_hard_timeout.as_secs(),
-                                    ));
+                                    );
+                                    response_error = Some(err.clone());
+                                    session_pool.mark_session_error(&session_key, err).await;
+                                    status_failure_recorded = true;
                                     conn.abandon_request(request_id).await;
                                     break;
                                 }
@@ -981,7 +1010,13 @@ impl AdapterRouter {
                                 continue;
                             }
                             if let Some(ref err) = notification.error {
-                                response_error = Some(format_coded_error(err.code, &err.message, err.data_message()));
+                                let formatted =
+                                    format_coded_error(err.code, &err.message, err.data_message());
+                                response_error = Some(formatted.clone());
+                                session_pool
+                                    .mark_session_error(&session_key, formatted)
+                                    .await;
+                                status_failure_recorded = true;
                             }
                             if let Some(ref result) = notification.result {
                                 turn_result = parse_turn_result(result);
@@ -1121,6 +1156,9 @@ impl AdapterRouter {
                                     }
                                 }
                                 AcpEvent::ConfigUpdate { options } => {
+                                    session_pool
+                                        .record_session_config_update(&session_key, &options)
+                                        .await;
                                     conn.config_options = options;
                                 }
                                 _ => {}
@@ -1404,10 +1442,16 @@ impl AdapterRouter {
                     }
 
                     if delivery_failed {
-                        Err(anyhow::anyhow!(
-                            "streaming finalization had delivery failures; user view is incomplete"
-                        ))
+                        let error =
+                            "streaming finalization had delivery failures; user view is incomplete";
+                        session_pool.mark_session_error(&session_key, error).await;
+                        Err(anyhow::anyhow!(error))
                     } else {
+                        if !status_failure_recorded {
+                            session_pool
+                                .mark_session_status(&session_key, SessionStatus::Idle)
+                                .await;
+                        }
                         Ok(())
                     }
                 })
