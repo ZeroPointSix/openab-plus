@@ -115,7 +115,10 @@ pub fn session_external_url(base_url: Option<&str>, session_id: &str) -> Option<
     if base_url.is_empty() {
         return None;
     }
-    Some(format!("{base_url}/sessions/{}", encode_path_segment(session_id)))
+    Some(format!(
+        "{base_url}/sessions/{}",
+        encode_path_segment(session_id)
+    ))
 }
 
 fn encode_path_segment(value: &str) -> String {
@@ -147,7 +150,29 @@ mod tests {
     fn external_url_encodes_session_id() {
         let url = session_external_url(Some("https://openab.example/"), "slack:1729.42");
 
-        assert_eq!(url.as_deref(), Some("https://openab.example/sessions/slack%3A1729.42"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://openab.example/sessions/slack%3A1729.42")
+        );
+    }
+
+    #[test]
+    fn suspended_status_clears_last_error() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        snapshot.set_error("process failed");
+        snapshot.set_status(SessionStatus::Suspended);
+
+        assert_eq!(snapshot.status, SessionStatus::Suspended);
+        assert_eq!(snapshot.last_error, None);
     }
 
     #[test]

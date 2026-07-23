@@ -126,7 +126,10 @@ impl SessionPool {
             resolved.pool_key.clone()
         };
         let profile_id = resolved.profile.as_ref().map(|profile| profile.id.clone());
-        let profile_name = resolved.profile.as_ref().map(|profile| profile.name.clone());
+        let profile_name = resolved
+            .profile
+            .as_ref()
+            .map(|profile| profile.name.clone());
         let agent = resolved
             .profile
             .as_ref()
@@ -146,7 +149,7 @@ impl SessionPool {
                 self.thread_pools
                     .write()
                     .await
-                    .insert(thread_id.to_string(), pool_key);
+                    .insert(thread_id.to_string(), pool_key.clone());
                 if created {
                     let snapshot = SessionSnapshot::new(
                         thread_id.to_string(),
@@ -159,6 +162,7 @@ impl SessionPool {
                     );
                     self.record_session_created(snapshot).await;
                 }
+                self.sync_pool_snapshot_statuses(&pool_key, &pool).await;
                 Ok(created)
             }
             Err(err) => {
@@ -172,7 +176,7 @@ impl SessionPool {
         if let Some(pool) = self.existing_pool(thread_id).await {
             return pool.has_active_session(thread_id).await;
         }
-        for pool in self.pools_snapshot().await {
+        for (_, pool) in self.pools_snapshot().await {
             if pool.has_active_session(thread_id).await {
                 return true;
             }
@@ -251,7 +255,7 @@ impl SessionPool {
         if let Some(pool) = self.existing_pool(thread_id).await {
             return pool.cancel_session(thread_id).await;
         }
-        for pool in self.pools_snapshot().await {
+        for (_, pool) in self.pools_snapshot().await {
             if pool.cancel_session(thread_id).await.is_ok() {
                 return Ok(());
             }
@@ -268,7 +272,7 @@ impl SessionPool {
             }
             return result;
         }
-        for pool in self.pools_snapshot().await {
+        for (_, pool) in self.pools_snapshot().await {
             if pool.reset_session(thread_id).await.is_ok() {
                 self.thread_pools.write().await.remove(thread_id);
                 self.mark_session_exited(thread_id, None).await;
@@ -279,13 +283,14 @@ impl SessionPool {
     }
 
     pub async fn cleanup_idle(&self, ttl_secs: u64) {
-        for pool in self.pools_snapshot().await {
+        for (pool_key, pool) in self.pools_snapshot().await {
             pool.cleanup_idle(ttl_secs).await;
+            self.sync_pool_snapshot_statuses(&pool_key, &pool).await;
         }
     }
 
     pub async fn shutdown(&self) {
-        for pool in self.pools_snapshot().await {
+        for (_, pool) in self.pools_snapshot().await {
             pool.shutdown().await;
         }
         let session_ids: Vec<_> = self.snapshots.read().await.keys().cloned().collect();
@@ -360,6 +365,36 @@ impl SessionPool {
             .clone()
     }
 
+    async fn sync_pool_snapshot_statuses(&self, pool_key: &str, pool: &PoolHandle) {
+        let session_ids: Vec<String> = {
+            let mappings = self.thread_pools.read().await;
+            let snapshots = self.snapshots.read().await;
+            snapshots
+                .keys()
+                .filter(|session_id| {
+                    mappings
+                        .get(*session_id)
+                        .is_some_and(|mapped_pool| mapped_pool == pool_key)
+                })
+                .cloned()
+                .collect()
+        };
+
+        for session_id in session_ids {
+            match pool.session_entry_status(&session_id).await {
+                pool::SessionEntryStatus::Active => {}
+                pool::SessionEntryStatus::Suspended => {
+                    self.mark_session_status(&session_id, SessionStatus::Suspended)
+                        .await;
+                }
+                pool::SessionEntryStatus::Missing => {
+                    self.thread_pools.write().await.remove(&session_id);
+                    self.mark_session_exited(&session_id, None).await;
+                }
+            }
+        }
+    }
+
     async fn existing_pool(&self, thread_id: &str) -> Option<PoolHandle> {
         let pool_key = {
             let mapping = self.thread_pools.read().await;
@@ -400,8 +435,13 @@ impl SessionPool {
             .clone()
     }
 
-    async fn pools_snapshot(&self) -> Vec<PoolHandle> {
-        self.pools.read().await.values().cloned().collect()
+    async fn pools_snapshot(&self) -> Vec<(String, PoolHandle)> {
+        self.pools
+            .read()
+            .await
+            .iter()
+            .map(|(key, pool)| (key.clone(), pool.clone()))
+            .collect()
     }
 }
 
@@ -440,8 +480,8 @@ fn session_external_base_url_from_env() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::protocol::ConfigOptionValue;
+    use super::*;
 
     fn config_option(id: &str, current_value: &str) -> ConfigOption {
         ConfigOption {
@@ -463,6 +503,42 @@ mod tests {
         ];
 
         assert_eq!(model_from_options(&options).as_deref(), Some("gpt-5"));
+    }
+
+    #[tokio::test]
+    async fn sync_marks_suspended_snapshots() {
+        let pool = Arc::new(pool::SessionPool::new(
+            AgentConfig::default(),
+            2,
+            120,
+            HashMap::new(),
+        ));
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let snapshot = SessionSnapshot::new(
+            "thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        outer
+            .snapshots
+            .write()
+            .await
+            .insert("thread".into(), snapshot);
+        outer
+            .thread_pools
+            .write()
+            .await
+            .insert("thread".into(), "system".into());
+        pool.insert_suspended_for_test("thread", "sid").await;
+
+        outer.sync_pool_snapshot_statuses("system", &pool).await;
+
+        let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
+        assert_eq!(snapshot.status, SessionStatus::Suspended);
     }
 
     #[test]
