@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod agent_profile_admin;
 pub mod config_admin;
 pub(crate) mod media;
 pub mod schema;
@@ -88,7 +89,6 @@ pub struct AppState {
     pub client: reqwest::Client,
 }
 
-
 impl AppState {
     /// Create a minimal AppState for testing. Only requires an `event_tx` sender;
     /// all adapter fields default to `None`/empty. This decouples adapter tests
@@ -165,8 +165,8 @@ impl AppState {
 
         // Feishu
         #[cfg(feature = "feishu")]
-        let feishu = adapters::feishu::FeishuConfig::from_env()
-            .map(adapters::feishu::FeishuAdapter::new);
+        let feishu =
+            adapters::feishu::FeishuConfig::from_env().map(adapters::feishu::FeishuAdapter::new);
 
         // Google Chat
         #[cfg(feature = "googlechat")]
@@ -190,8 +190,8 @@ impl AppState {
 
         // WeCom
         #[cfg(feature = "wecom")]
-        let wecom = adapters::wecom::WecomConfig::from_env()
-            .map(adapters::wecom::WecomAdapter::new);
+        let wecom =
+            adapters::wecom::WecomConfig::from_env().map(adapters::wecom::WecomAdapter::new);
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -381,7 +381,12 @@ impl AppState {
     /// no adapter, matching env-only semantics.
     #[cfg(feature = "wecom")]
     pub fn apply_wecom_config(&mut self, cfg: GatewayWecomConfig) {
-        let streaming = if cfg.streaming_enabled { "true" } else { "false" }.to_string();
+        let streaming = if cfg.streaming_enabled {
+            "true"
+        } else {
+            "false"
+        }
+        .to_string();
         let debounce = cfg.debounce_secs.to_string();
         self.wecom = adapters::wecom::WecomConfig::from_reader(|k| match k {
             "WECOM_CORP_ID" => cfg.corp_id.clone(),
@@ -535,10 +540,16 @@ impl Default for ServeConfig {
 /// Start the standalone gateway server. This is the main entry point extracted
 /// from the gateway binary — the binary becomes a thin wrapper around this.
 pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
-    use axum::{routing::{get, post}, Router};
+    use axum::{
+        routing::{get, post},
+        Router,
+    };
     use tracing::{info, warn};
 
-    let ServeConfig { listen_addr, ws_token } = config;
+    let ServeConfig {
+        listen_addr,
+        ws_token,
+    } = config;
 
     if ws_token.is_none() {
         warn!("GATEWAY_WS_TOKEN not set — WebSocket connections are NOT authenticated (insecure)");
@@ -547,6 +558,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     let (event_tx, _) = broadcast::channel::<String>(256);
     let reply_token_cache: ReplyTokenCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let config_manager = config_admin::ConfigManager::from_env();
+    let profile_service = Arc::new(openab_core::agent_profile::AgentProfileService::from_env());
 
     let mut app = Router::new()
         .route("/ws", get(ws_handler))
@@ -653,7 +665,11 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
             let api_base = f.config.api_base();
             let idle_ms = f.config.card_idle_finalize_ms;
             tokio::spawn(adapters::feishu::run_idle_reaper(
-                sessions, token_cache, client, api_base, idle_ms,
+                sessions,
+                token_cache,
+                client,
+                api_base,
+                idle_ms,
             ));
             info!(idle_ms, "feishu card-streaming idle reaper started");
         }
@@ -661,8 +677,8 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
 
     // Google Chat adapter
     #[cfg(feature = "googlechat")]
-    let googlechat_webhook_path = std::env::var("GOOGLE_CHAT_WEBHOOK_PATH")
-        .unwrap_or_else(|_| "/webhook/googlechat".into());
+    let googlechat_webhook_path =
+        std::env::var("GOOGLE_CHAT_WEBHOOK_PATH").unwrap_or_else(|_| "/webhook/googlechat".into());
     #[cfg(feature = "googlechat")]
     let google_chat = {
         let enabled = std::env::var("GOOGLE_CHAT_ENABLED")
@@ -670,7 +686,10 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
             .unwrap_or(false);
         if enabled {
             info!(path = %googlechat_webhook_path, "googlechat adapter enabled");
-            app = app.route(&googlechat_webhook_path, post(adapters::googlechat::webhook));
+            app = app.route(
+                &googlechat_webhook_path,
+                post(adapters::googlechat::webhook),
+            );
             Some(adapters::googlechat::GoogleChatAdapter::from_parts(
                 std::env::var("GOOGLE_CHAT_SA_KEY_JSON").ok(),
                 std::env::var("GOOGLE_CHAT_SA_KEY_FILE").ok(),
@@ -781,7 +800,11 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
                 cache.retain(|_, (_, t)| t.elapsed().as_secs() < REPLY_TOKEN_TTL_SECS);
                 let after = cache.len();
                 if before != after {
-                    info!(removed = before - after, remaining = after, "reply token cache sweep");
+                    info!(
+                        removed = before - after,
+                        remaining = after,
+                        "reply token cache sweep"
+                    );
                 }
             }
         });
@@ -798,13 +821,18 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
                 urls.retain(|_, (_, t)| t.elapsed().as_secs() < 4 * 3600);
                 let after = urls.len();
                 if before != after {
-                    info!(removed = before - after, remaining = after, "teams service_url cache cleanup");
+                    info!(
+                        removed = before - after,
+                        remaining = after,
+                        "teams service_url cache cleanup"
+                    );
                 }
             }
         });
     }
 
     let app = app
+        .merge(agent_profile_admin::router(profile_service.clone()))
         .merge(config_admin::router(config_manager.clone()))
         .with_state(state.clone());
 

@@ -1,0 +1,995 @@
+use crate::config::AgentConfig;
+use crate::profile_store::ProfileStore;
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashMap};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkdirStrategy {
+    SystemDefault,
+    ProfileDefault,
+    EphemeralPerSession,
+}
+
+impl Default for WorkdirStrategy {
+    fn default() -> Self {
+        Self::SystemDefault
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStrategy {
+    None,
+    RestartProcess,
+    ResumeSession,
+}
+
+impl Default for RecoveryStrategy {
+    fn default() -> Self {
+        Self::ResumeSession
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfile {
+    pub id: String,
+    pub name: String,
+    pub agent_type: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub workdir_strategy: WorkdirStrategy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env_refs: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub recovery_strategy: RecoveryStrategy,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub config_options: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+impl AgentProfile {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        agent_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            agent_type: agent_type.into(),
+            enabled: true,
+            command: None,
+            args: Vec::new(),
+            default_model: None,
+            reasoning_effort: None,
+            workdir_strategy: WorkdirStrategy::default(),
+            working_dir: None,
+            env_refs: HashMap::new(),
+            inherit_env: Vec::new(),
+            timeout_secs: None,
+            recovery_strategy: RecoveryStrategy::default(),
+            config_options: HashMap::new(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfileDocument {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<AgentProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileValidationError {
+    pub path: String,
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileValidationResult {
+    pub ok: bool,
+    pub errors: Vec<ProfileValidationError>,
+}
+
+impl ProfileValidationResult {
+    pub fn ok() -> Self {
+        Self {
+            ok: true,
+            errors: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileSessionOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub config_options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProfileSnapshot {
+    pub id: String,
+    pub name: String,
+    pub agent_type: String,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedAgentProfile {
+    pub pool_key: String,
+    pub profile: Option<AgentProfileSnapshot>,
+    pub config: AgentConfig,
+    pub config_options: HashMap<String, String>,
+    pub timeout_secs: Option<u64>,
+    pub recovery_strategy: RecoveryStrategy,
+    pub applied_layers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentSummary {
+    pub agent_type: String,
+    pub profile_count: usize,
+    pub enabled_profile_count: usize,
+    pub default_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentConfigField {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    pub dynamic: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentConfigSchema {
+    pub agent_type: String,
+    pub source: String,
+    pub generated_at: DateTime<Utc>,
+    pub fields: Vec<AgentConfigField>,
+}
+
+#[derive(Clone)]
+pub struct AgentProfileService {
+    store: ProfileStore,
+}
+
+impl AgentProfileService {
+    pub fn from_env() -> Self {
+        Self::new(ProfileStore::from_env())
+    }
+
+    pub fn new(store: ProfileStore) -> Self {
+        Self { store }
+    }
+
+    pub fn store(&self) -> &ProfileStore {
+        &self.store
+    }
+
+    pub async fn list(&self) -> Result<AgentProfileDocument> {
+        self.store.load().await
+    }
+
+    pub async fn get(&self, id: &str) -> Result<Option<AgentProfile>> {
+        Ok(self
+            .store
+            .load()
+            .await?
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id == id))
+    }
+
+    pub async fn upsert(&self, mut profile: AgentProfile) -> Result<AgentProfileDocument> {
+        let mut doc = self.store.load().await?;
+        let now = Utc::now();
+        match doc
+            .profiles
+            .iter_mut()
+            .find(|current| current.id == profile.id)
+        {
+            Some(current) => {
+                profile.created_at = current.created_at.or(Some(now));
+                profile.updated_at = Some(now);
+                *current = profile;
+            }
+            None => {
+                profile.created_at = Some(now);
+                profile.updated_at = Some(now);
+                doc.profiles.push(profile);
+            }
+        }
+        sort_profiles(&mut doc);
+        let validation = validate_document(&doc);
+        if !validation.ok {
+            return Err(anyhow!(
+                "invalid agent profile document: {:?}",
+                validation.errors
+            ));
+        }
+        self.store.save_atomic(&doc).await?;
+        Ok(doc)
+    }
+
+    pub async fn delete(&self, id: &str) -> Result<bool> {
+        let mut doc = self.store.load().await?;
+        let before = doc.profiles.len();
+        doc.profiles.retain(|profile| profile.id != id);
+        let deleted = doc.profiles.len() != before;
+        if doc.default_profile.as_deref() == Some(id) {
+            doc.default_profile = None;
+        }
+        if deleted {
+            self.store.save_atomic(&doc).await?;
+        }
+        Ok(deleted)
+    }
+
+    pub async fn set_default(&self, id: Option<String>) -> Result<AgentProfileDocument> {
+        let mut doc = self.store.load().await?;
+        doc.default_profile = id;
+        let validation = validate_document(&doc);
+        if !validation.ok {
+            return Err(anyhow!("invalid default profile: {:?}", validation.errors));
+        }
+        self.store.save_atomic(&doc).await?;
+        Ok(doc)
+    }
+
+    pub fn validate_profile(&self, profile: &AgentProfile) -> ProfileValidationResult {
+        validate_profiles(None, std::slice::from_ref(profile))
+    }
+
+    pub async fn validate_existing(&self, id: &str) -> Result<ProfileValidationResult> {
+        match self.get(id).await? {
+            Some(profile) => Ok(self.validate_profile(&profile)),
+            None => Err(anyhow!("agent profile not found: {id}")),
+        }
+    }
+
+    pub async fn validate_all(&self) -> Result<ProfileValidationResult> {
+        Ok(validate_document(&self.store.load().await?))
+    }
+
+    pub async fn resolve_for_session(
+        &self,
+        base_config: &AgentConfig,
+        base_options: &HashMap<String, String>,
+        specified_profile_id: Option<&str>,
+        overrides: Option<&ProfileSessionOverrides>,
+    ) -> Result<ResolvedAgentProfile> {
+        let doc = self.store.load().await?;
+        let validation = validate_document(&doc);
+        if !validation.ok {
+            return Err(anyhow!(
+                "invalid agent profile document: {:?}",
+                validation.errors
+            ));
+        }
+
+        let mut config = clone_agent_config(base_config);
+        let mut config_options = base_options.clone();
+        let mut applied_layers = vec!["system_default".to_string()];
+        let mut profile_snapshot = None;
+        let mut timeout_secs = None;
+        let mut recovery_strategy = RecoveryStrategy::default();
+
+        if let Some(default_id) = doc.default_profile.as_deref() {
+            if let Some(default_profile) = find_enabled_profile(&doc, default_id)? {
+                apply_profile(
+                    &mut config,
+                    &mut config_options,
+                    default_profile,
+                    &mut timeout_secs,
+                    &mut recovery_strategy,
+                );
+                applied_layers.push(format!("default_profile:{default_id}"));
+                profile_snapshot = Some(snapshot(default_profile));
+            }
+        }
+
+        if let Some(profile_id) = specified_profile_id {
+            let Some(profile) = find_enabled_profile(&doc, profile_id)? else {
+                return Err(anyhow!("specified profile is not enabled: {profile_id}"));
+            };
+            apply_profile(
+                &mut config,
+                &mut config_options,
+                profile,
+                &mut timeout_secs,
+                &mut recovery_strategy,
+            );
+            applied_layers.push(format!("specified_profile:{profile_id}"));
+            profile_snapshot = Some(snapshot(profile));
+        }
+
+        if let Some(overrides) = overrides {
+            apply_overrides(&mut config, &mut config_options, overrides);
+            applied_layers.push("entry_override".to_string());
+        }
+
+        let pool_key = profile_pool_key(
+            profile_snapshot.as_ref(),
+            &config,
+            &config_options,
+            timeout_secs,
+            &recovery_strategy,
+        );
+
+        Ok(ResolvedAgentProfile {
+            pool_key,
+            profile: profile_snapshot,
+            config,
+            config_options,
+            timeout_secs,
+            recovery_strategy,
+            applied_layers,
+        })
+    }
+
+    pub async fn list_agents(&self) -> Result<Vec<AgentSummary>> {
+        let doc = self.store.load().await?;
+        let mut agent_types = BTreeSet::new();
+        for profile in &doc.profiles {
+            agent_types.insert(profile.agent_type.clone());
+        }
+        if agent_types.is_empty() {
+            agent_types.insert("system-default".to_string());
+        }
+
+        Ok(agent_types
+            .into_iter()
+            .map(|agent_type| {
+                let profiles: Vec<_> = doc
+                    .profiles
+                    .iter()
+                    .filter(|profile| profile.agent_type == agent_type)
+                    .collect();
+                AgentSummary {
+                    agent_type,
+                    profile_count: profiles.len(),
+                    enabled_profile_count: profiles
+                        .iter()
+                        .filter(|profile| profile.enabled)
+                        .count(),
+                    default_profile: doc.default_profile.clone(),
+                }
+            })
+            .collect())
+    }
+
+    pub async fn config_schema(&self, agent_type: &str) -> Result<AgentConfigSchema> {
+        let doc = self.store.load().await?;
+        Ok(AgentCapabilityResolver::new(doc).config_schema(agent_type))
+    }
+}
+
+pub struct AgentCapabilityResolver {
+    document: AgentProfileDocument,
+}
+
+impl AgentCapabilityResolver {
+    pub fn new(document: AgentProfileDocument) -> Self {
+        Self { document }
+    }
+
+    pub fn config_schema(&self, agent_type: &str) -> AgentConfigSchema {
+        let mut models = BTreeSet::new();
+        let mut efforts = BTreeSet::new();
+        let mut options = BTreeSet::new();
+
+        for profile in self
+            .document
+            .profiles
+            .iter()
+            .filter(|profile| profile.agent_type == agent_type)
+        {
+            if let Some(model) = profile.default_model.as_deref() {
+                models.insert(model.to_string());
+            }
+            if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
+                efforts.insert(reasoning_effort.to_string());
+            }
+            for key in profile.config_options.keys() {
+                options.insert(key.to_string());
+            }
+        }
+
+        let mut fields = vec![
+            AgentConfigField {
+                id: "command".into(),
+                label: "Startup command".into(),
+                kind: "string".into(),
+                options: Vec::new(),
+                dynamic: false,
+            },
+            AgentConfigField {
+                id: "working_dir".into(),
+                label: "Working directory".into(),
+                kind: "string".into(),
+                options: Vec::new(),
+                dynamic: false,
+            },
+            AgentConfigField {
+                id: "model".into(),
+                label: "Model".into(),
+                kind: "enum".into(),
+                options: models.into_iter().collect(),
+                dynamic: true,
+            },
+            AgentConfigField {
+                id: "reasoning_effort".into(),
+                label: "Reasoning effort".into(),
+                kind: "enum".into(),
+                options: efforts.into_iter().collect(),
+                dynamic: true,
+            },
+        ];
+
+        for option in options {
+            if option != "model" && option != "reasoning_effort" {
+                fields.push(AgentConfigField {
+                    id: option.clone(),
+                    label: option,
+                    kind: "string".into(),
+                    options: Vec::new(),
+                    dynamic: true,
+                });
+            }
+        }
+
+        AgentConfigSchema {
+            agent_type: agent_type.to_string(),
+            source: "agent-profile-service".into(),
+            generated_at: Utc::now(),
+            fields,
+        }
+    }
+}
+
+pub fn validate_document(document: &AgentProfileDocument) -> ProfileValidationResult {
+    validate_profiles(document.default_profile.as_deref(), &document.profiles)
+}
+
+fn validate_profiles(
+    default_profile: Option<&str>,
+    profiles: &[AgentProfile],
+) -> ProfileValidationResult {
+    let mut errors = Vec::new();
+    let mut ids = BTreeSet::new();
+
+    for (index, profile) in profiles.iter().enumerate() {
+        let base = format!("profiles[{index}]");
+        if profile.id.trim().is_empty() {
+            push_error(
+                &mut errors,
+                format!("{base}.id"),
+                "required",
+                "profile id is required",
+            );
+        } else if !profile
+            .id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            push_error(
+                &mut errors,
+                format!("{base}.id"),
+                "invalid_id",
+                "profile id may contain only ascii letters, numbers, dash, underscore, or dot",
+            );
+        }
+        if !ids.insert(profile.id.clone()) {
+            push_error(
+                &mut errors,
+                format!("{base}.id"),
+                "duplicate_id",
+                "profile id must be unique",
+            );
+        }
+        if profile.name.trim().is_empty() {
+            push_error(
+                &mut errors,
+                format!("{base}.name"),
+                "required",
+                "profile name is required",
+            );
+        }
+        if profile.agent_type.trim().is_empty() {
+            push_error(
+                &mut errors,
+                format!("{base}.agent_type"),
+                "required",
+                "agent type is required",
+            );
+        }
+        if profile
+            .command
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            push_error(
+                &mut errors,
+                format!("{base}.command"),
+                "empty_command",
+                "startup command must not be empty",
+            );
+        }
+        if profile
+            .default_model
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            push_error(
+                &mut errors,
+                format!("{base}.default_model"),
+                "empty_model",
+                "default model must not be empty",
+            );
+        }
+        if profile
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            push_error(
+                &mut errors,
+                format!("{base}.reasoning_effort"),
+                "empty_reasoning_effort",
+                "reasoning effort must not be empty",
+            );
+        }
+        if let Some(timeout) = profile.timeout_secs {
+            if !(5..=86_400).contains(&timeout) {
+                push_error(
+                    &mut errors,
+                    format!("{base}.timeout_secs"),
+                    "invalid_timeout",
+                    "timeout must be between 5 and 86400 seconds",
+                );
+            }
+        }
+        for (key, value) in &profile.env_refs {
+            if key.trim().is_empty() {
+                push_error(
+                    &mut errors,
+                    format!("{base}.env_refs"),
+                    "empty_env_key",
+                    "environment variable key must not be empty",
+                );
+            }
+            if !is_external_secret_ref(value) {
+                push_error(
+                    &mut errors,
+                    format!("{base}.env_refs.{key}"),
+                    "plain_secret_rejected",
+                    "environment values must reference an external secret or environment variable",
+                );
+            }
+        }
+        for (key, value) in &profile.config_options {
+            if key.trim().is_empty() || value.trim().is_empty() {
+                push_error(
+                    &mut errors,
+                    format!("{base}.config_options"),
+                    "empty_config_option",
+                    "config option keys and values must not be empty",
+                );
+            }
+        }
+        for (idx, value) in profile.inherit_env.iter().enumerate() {
+            if value.trim().is_empty() {
+                push_error(
+                    &mut errors,
+                    format!("{base}.inherit_env[{idx}]"),
+                    "empty_inherit_env",
+                    "inherited environment names must not be empty",
+                );
+            }
+        }
+    }
+
+    if let Some(default_id) = default_profile {
+        match profiles.iter().find(|profile| profile.id == default_id) {
+            Some(profile) if profile.enabled => {}
+            Some(_) => push_error(
+                &mut errors,
+                "default_profile",
+                "default_disabled",
+                "default profile must be enabled",
+            ),
+            None => push_error(
+                &mut errors,
+                "default_profile",
+                "default_missing",
+                "default profile must refer to an existing profile",
+            ),
+        }
+    }
+
+    ProfileValidationResult {
+        ok: errors.is_empty(),
+        errors,
+    }
+}
+
+fn push_error(
+    errors: &mut Vec<ProfileValidationError>,
+    path: impl Into<String>,
+    code: impl Into<String>,
+    message: impl Into<String>,
+) {
+    errors.push(ProfileValidationError {
+        path: path.into(),
+        code: code.into(),
+        message: message.into(),
+    });
+}
+
+fn sort_profiles(document: &mut AgentProfileDocument) {
+    document.profiles.sort_by(|a, b| a.id.cmp(&b.id));
+}
+
+fn find_enabled_profile<'a>(
+    doc: &'a AgentProfileDocument,
+    id: &str,
+) -> Result<Option<&'a AgentProfile>> {
+    let profile = doc.profiles.iter().find(|profile| profile.id == id);
+    if let Some(profile) = profile {
+        if profile.enabled {
+            Ok(Some(profile))
+        } else {
+            Err(anyhow!("agent profile is disabled: {id}"))
+        }
+    } else {
+        Err(anyhow!("agent profile not found: {id}"))
+    }
+}
+
+fn snapshot(profile: &AgentProfile) -> AgentProfileSnapshot {
+    AgentProfileSnapshot {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        agent_type: profile.agent_type.clone(),
+        updated_at: profile.updated_at,
+    }
+}
+
+fn clone_agent_config(config: &AgentConfig) -> AgentConfig {
+    AgentConfig {
+        command: config.command.clone(),
+        args: config.args.clone(),
+        working_dir: config.working_dir.clone(),
+        env: config.env.clone(),
+        inherit_env: config.inherit_env.clone(),
+        command_explicit: config.command_explicit,
+    }
+}
+
+fn apply_profile(
+    config: &mut AgentConfig,
+    config_options: &mut HashMap<String, String>,
+    profile: &AgentProfile,
+    timeout_secs: &mut Option<u64>,
+    recovery_strategy: &mut RecoveryStrategy,
+) {
+    if let Some(command) = profile.command.as_deref() {
+        apply_startup_command(config, command, &profile.args);
+    } else if !profile.args.is_empty() {
+        config.args = profile.args.clone();
+    }
+    if matches!(
+        profile.workdir_strategy,
+        WorkdirStrategy::ProfileDefault | WorkdirStrategy::EphemeralPerSession
+    ) {
+        if let Some(working_dir) = profile.working_dir.as_deref() {
+            config.working_dir = working_dir.to_string();
+        }
+    }
+    for (key, value) in &profile.env_refs {
+        config.env.insert(key.clone(), resolve_secret_ref(value));
+    }
+    for key in &profile.inherit_env {
+        if !config.inherit_env.iter().any(|existing| existing == key) {
+            config.inherit_env.push(key.clone());
+        }
+    }
+    if let Some(model) = profile.default_model.as_deref() {
+        config_options.insert("model".to_string(), model.to_string());
+    }
+    if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
+        config_options.insert("reasoning_effort".to_string(), reasoning_effort.to_string());
+    }
+    for (key, value) in &profile.config_options {
+        config_options.insert(key.clone(), value.clone());
+    }
+    if profile.timeout_secs.is_some() {
+        *timeout_secs = profile.timeout_secs;
+    }
+    *recovery_strategy = profile.recovery_strategy.clone();
+}
+
+fn apply_overrides(
+    config: &mut AgentConfig,
+    config_options: &mut HashMap<String, String>,
+    overrides: &ProfileSessionOverrides,
+) {
+    if let Some(command) = overrides.command.as_deref() {
+        apply_startup_command(config, command, &overrides.args);
+    } else if !overrides.args.is_empty() {
+        config.args = overrides.args.clone();
+    }
+    if let Some(working_dir) = overrides.working_dir.as_deref() {
+        config.working_dir = working_dir.to_string();
+    }
+    if let Some(model) = overrides.model.as_deref() {
+        config_options.insert("model".to_string(), model.to_string());
+    }
+    if let Some(reasoning_effort) = overrides.reasoning_effort.as_deref() {
+        config_options.insert("reasoning_effort".to_string(), reasoning_effort.to_string());
+    }
+    for (key, value) in &overrides.env {
+        config.env.insert(key.clone(), value.clone());
+    }
+    for (key, value) in &overrides.config_options {
+        config_options.insert(key.clone(), value.clone());
+    }
+}
+
+fn apply_startup_command(config: &mut AgentConfig, command: &str, args: &[String]) {
+    if args.is_empty() {
+        let mut parts = command.split_whitespace();
+        if let Some(program) = parts.next() {
+            config.command = program.to_string();
+            config.args = parts.map(ToString::to_string).collect();
+            config.command_explicit = true;
+        }
+    } else {
+        config.command = command.to_string();
+        config.args = args.to_vec();
+        config.command_explicit = true;
+    }
+}
+
+fn is_external_secret_ref(value: &str) -> bool {
+    let value = value.trim();
+    (value.starts_with("${") && value.ends_with('}'))
+        || value.starts_with("env://")
+        || value.starts_with("aws-sm://")
+        || value.starts_with("vault://")
+        || value.starts_with("gcp-sm://")
+        || value.starts_with("azure-kv://")
+        || value.starts_with("exec://")
+}
+
+fn resolve_secret_ref(value: &str) -> String {
+    let value = value.trim();
+    if let Some(name) = value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
+        let name = name.strip_prefix("env:").unwrap_or(name);
+        std::env::var(name).unwrap_or_else(|_| value.to_string())
+    } else if let Some(name) = value.strip_prefix("env://") {
+        std::env::var(name).unwrap_or_else(|_| value.to_string())
+    } else {
+        value.to_string()
+    }
+}
+
+fn profile_pool_key(
+    profile: Option<&AgentProfileSnapshot>,
+    config: &AgentConfig,
+    options: &HashMap<String, String>,
+    timeout_secs: Option<u64>,
+    recovery_strategy: &RecoveryStrategy,
+) -> String {
+    let mut digest = Sha256::new();
+    digest.update(config.command.as_bytes());
+    digest.update(b"\0");
+    for arg in &config.args {
+        digest.update(arg.as_bytes());
+        digest.update(b"\0");
+    }
+    digest.update(config.working_dir.as_bytes());
+    digest.update(b"\0");
+    for (key, value) in sorted_pairs(&config.env) {
+        digest.update(key.as_bytes());
+        digest.update(b"=");
+        digest.update(value.as_bytes());
+        digest.update(b"\0");
+    }
+    for key in &config.inherit_env {
+        digest.update(key.as_bytes());
+        digest.update(b"\0");
+    }
+    for (key, value) in sorted_pairs(options) {
+        digest.update(key.as_bytes());
+        digest.update(b"=");
+        digest.update(value.as_bytes());
+        digest.update(b"\0");
+    }
+    if let Some(timeout) = timeout_secs {
+        digest.update(timeout.to_string().as_bytes());
+    }
+    digest.update(format!("{recovery_strategy:?}").as_bytes());
+    let prefix = profile
+        .map(|profile| format!("profile:{}", profile.id))
+        .unwrap_or_else(|| "system".to_string());
+    format!("{prefix}:{:x}", digest.finalize())
+}
+
+fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(&String, &String)> {
+    let mut pairs: Vec<_> = map.iter().collect();
+    pairs.sort_by(|a, b| a.0.cmp(b.0));
+    pairs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_config() -> AgentConfig {
+        AgentConfig {
+            command: "kiro-cli".into(),
+            args: vec!["acp".into()],
+            working_dir: "/workspace".into(),
+            env: HashMap::new(),
+            inherit_env: Vec::new(),
+            command_explicit: false,
+        }
+    }
+
+    #[test]
+    fn rejects_plain_secret_values() {
+        let mut profile = AgentProfile::new("codex", "Codex", "codex");
+        profile
+            .env_refs
+            .insert("OPENAI_API_KEY".into(), "plain".into());
+
+        let result = validate_profiles(None, &[profile]);
+
+        assert!(!result.ok);
+        assert_eq!(result.errors[0].code, "plain_secret_rejected");
+    }
+
+    #[test]
+    fn validates_default_profile_integrity() {
+        let doc = AgentProfileDocument {
+            default_profile: Some("missing".into()),
+            profiles: vec![AgentProfile::new("codex", "Codex", "codex")],
+        };
+
+        let result = validate_document(&doc);
+
+        assert!(!result.ok);
+        assert_eq!(result.errors[0].code, "default_missing");
+    }
+
+    #[tokio::test]
+    async fn resolves_precedence_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::new(dir.path().join("profiles.toml"));
+        let mut default = AgentProfile::new("default", "Default", "codex");
+        default.default_model = Some("gpt-5".into());
+        default
+            .config_options
+            .insert("mode".into(), "standard".into());
+        let mut specified = AgentProfile::new("deep", "Deep", "codex");
+        specified.reasoning_effort = Some("high".into());
+        specified
+            .env_refs
+            .insert("OPENAI_API_KEY".into(), "${OPENAI_API_KEY}".into());
+        store
+            .save_atomic(&AgentProfileDocument {
+                default_profile: Some("default".into()),
+                profiles: vec![default, specified],
+            })
+            .await
+            .unwrap();
+        let service = AgentProfileService::new(store);
+        let mut overrides = ProfileSessionOverrides::default();
+        overrides.model = Some("gpt-5.1".into());
+
+        let resolved = service
+            .resolve_for_session(
+                &base_config(),
+                &HashMap::new(),
+                Some("deep"),
+                Some(&overrides),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.config.command, "kiro-cli");
+        assert_eq!(resolved.config_options.get("mode").unwrap(), "standard");
+        assert_eq!(resolved.config_options.get("model").unwrap(), "gpt-5.1");
+        assert_eq!(
+            resolved.config_options.get("reasoning_effort").unwrap(),
+            "high"
+        );
+        assert!(resolved
+            .applied_layers
+            .contains(&"default_profile:default".to_string()));
+        assert!(resolved
+            .applied_layers
+            .contains(&"specified_profile:deep".to_string()));
+    }
+
+    #[test]
+    fn startup_command_can_be_exact_command_line() {
+        let mut config = base_config();
+        apply_startup_command(&mut config, "opencode acp", &[]);
+
+        assert_eq!(config.command, "opencode");
+        assert_eq!(config.args, vec!["acp"]);
+        assert!(config.command_explicit);
+    }
+
+    #[test]
+    fn capability_schema_is_profile_derived() {
+        let mut profile = AgentProfile::new("codex", "Codex", "codex");
+        profile.default_model = Some("gpt-5".into());
+        profile.reasoning_effort = Some("medium".into());
+        profile
+            .config_options
+            .insert("approval_policy".into(), "never".into());
+        let resolver = AgentCapabilityResolver::new(AgentProfileDocument {
+            default_profile: Some("codex".into()),
+            profiles: vec![profile],
+        });
+
+        let schema = resolver.config_schema("codex");
+
+        assert!(schema.fields.iter().any(|field| field.id == "model"
+            && field.options == vec!["gpt-5".to_string()]
+            && field.dynamic));
+        assert!(schema
+            .fields
+            .iter()
+            .any(|field| field.id == "approval_policy" && field.dynamic));
+    }
+}

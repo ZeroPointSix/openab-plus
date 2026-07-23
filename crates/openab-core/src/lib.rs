@@ -1,11 +1,14 @@
 pub mod acp;
 pub mod adapter;
+pub mod agent_profile;
 pub mod bot_turns;
 pub mod config;
 pub mod cron;
 pub mod directives;
 pub mod dispatch;
 pub mod error_display;
+#[cfg(feature = "filestore")]
+pub mod filestore;
 pub mod format;
 pub mod gateway;
 pub mod hooks;
@@ -14,8 +17,7 @@ pub mod media;
 pub mod multibot_cache;
 #[cfg(feature = "pre-seed")]
 pub mod pre_seed;
-#[cfg(feature = "filestore")]
-pub mod filestore;
+pub mod profile_store;
 pub mod reactions;
 #[cfg(feature = "discord")]
 pub mod remind;
@@ -26,8 +28,8 @@ pub mod timestamp;
 pub mod trust;
 
 #[cfg(feature = "discord")]
-pub mod discord;
-#[cfg(feature = "discord")]
 pub mod ambient;
+#[cfg(feature = "discord")]
+pub mod discord;
 #[cfg(feature = "slack")]
 pub mod slack;
