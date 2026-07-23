@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use tracing::warn;
 
 static DIRECTIVE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^\s*\[\[([a-z_]+):([^\]]*)\]\]").unwrap());
+    LazyLock::new(|| Regex::new(r"^\s*\[\[([a-z][a-z0-9_]*):([^\]]*)\]\]").unwrap());
 
 /// Parsed control directives from a session's first message.
 #[derive(Debug, Clone, Default)]

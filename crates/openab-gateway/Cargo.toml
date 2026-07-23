@@ -1,6 +1,6 @@
 [package]
 name = "openab-gateway"
-version = "0.5.4"
+version = "0.5.6"
 edition = "2021"
 license = "MIT"
 
@@ -16,6 +16,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+openab-core = { path = "../openab-core", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 hmac = "0.12"

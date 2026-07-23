@@ -1,10 +1,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{error, warn};
 
-use crate::acp::{classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult};
+use crate::acp::{
+    classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult,
+};
+use crate::agent_profile::ProfileSessionOverrides;
 use crate::config::{ReactionsConfig, ToolDisplay};
 use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
@@ -39,7 +43,12 @@ pub fn parse_output_directives(content: &str) -> (OutputDirectives, String) {
                         "reply_to" => {
                             let v = value.trim();
                             // Validate: non-empty, reasonable length, no whitespace/control chars
-                            if !v.is_empty() && v.len() <= 64 && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_') {
+                            if !v.is_empty()
+                                && v.len() <= 64
+                                && v.chars().all(|c| {
+                                    c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'
+                                })
+                            {
                                 directives.reply_to = Some(v.to_string());
                             }
                         }
@@ -256,6 +265,52 @@ pub struct MessageContext {
     pub extra_blocks: Vec<ContentBlock>,
     pub trigger_msg: MessageRef,
     pub other_bot_present: bool,
+}
+
+/// Convert safe session directives into profile selection data.
+///
+/// Chat input is allowed to select a profile and override ACP config options
+/// for the new session. Process-level controls such as command, args, env, and
+/// working_dir intentionally stay out of this path; workspace selection keeps
+/// using the existing validated `[[ws:...]]` directive.
+pub(crate) fn profile_session_from_metadata(
+    raw: &HashMap<String, String>,
+) -> (Option<String>, Option<ProfileSessionOverrides>) {
+    fn first_non_empty(raw: &HashMap<String, String>, keys: &[&str]) -> Option<String> {
+        keys.iter()
+            .filter_map(|key| raw.get(*key))
+            .map(|value| value.trim())
+            .find(|value| !value.is_empty())
+            .map(ToString::to_string)
+    }
+
+    let profile_id = first_non_empty(raw, &["profile", "agent_profile"]);
+    let mut overrides = ProfileSessionOverrides {
+        model: first_non_empty(raw, &["profile_model", "model"]),
+        reasoning_effort: first_non_empty(raw, &["profile_reasoning_effort", "reasoning_effort"]),
+        ..ProfileSessionOverrides::default()
+    };
+
+    for (key, value) in raw {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(config_key) = key.strip_prefix("profile_config_") {
+            let config_key = config_key.trim();
+            if !config_key.is_empty() {
+                overrides
+                    .config_options
+                    .insert(config_key.to_string(), value.to_string());
+            }
+        }
+    }
+
+    let has_overrides = overrides.model.is_some()
+        || overrides.reasoning_effort.is_some()
+        || !overrides.config_options.is_empty();
+
+    (profile_id, has_overrides.then_some(overrides))
 }
 
 /// Sender identity injected into prompts for downstream agent context.
@@ -570,26 +625,56 @@ impl AdapterRouter {
     ) -> Result<()> {
         tracing::debug!(platform = adapter.platform(), "processing message");
 
-        let content_blocks =
-            Self::pack_arrival_event(&ctx.sender_json, &ctx.prompt, ctx.extra_blocks);
+        let MessageContext {
+            thread_channel,
+            sender_json,
+            prompt,
+            extra_blocks,
+            trigger_msg,
+            other_bot_present,
+        } = ctx;
+
+        let parse_result = crate::directives::parse_directives(&prompt);
+        let has_session_directives = !parse_result.metadata.raw.is_empty();
+        let (profile_id, profile_overrides) =
+            profile_session_from_metadata(&parse_result.metadata.raw);
 
         let thread_key = format!(
             "{}:{}",
             adapter.platform(),
-            ctx.thread_channel
+            thread_channel
                 .thread_id
                 .as_deref()
-                .unwrap_or(&ctx.thread_channel.channel_id)
+                .unwrap_or(&thread_channel.channel_id)
         );
 
-        if let Err(e) = self.pool.get_or_create(&thread_key, None).await {
-            let msg = format_user_error(&e.to_string());
-            let _ = adapter
-                .send_message(&ctx.thread_channel, &format!("⚠️ {msg}"))
-                .await;
-            error!("pool error: {e}");
-            return Err(e);
-        }
+        let created_now = match self
+            .pool
+            .get_or_create_with_profile(
+                &thread_key,
+                None,
+                profile_id.as_deref(),
+                profile_overrides.as_ref(),
+            )
+            .await
+        {
+            Ok(created) => created,
+            Err(e) => {
+                let msg = format_user_error(&e.to_string());
+                let _ = adapter
+                    .send_message(&thread_channel, &format!("⚠️ {msg}"))
+                    .await;
+                error!("pool error: {e}");
+                return Err(e);
+            }
+        };
+
+        let prompt = if created_now && has_session_directives {
+            parse_result.prompt
+        } else {
+            prompt
+        };
+        let content_blocks = Self::pack_arrival_event(&sender_json, &prompt, extra_blocks);
 
         // In assistant-status mode (e.g. Slack assistant_mode), status is conveyed
         // via assistant.threads.setStatus, so the emoji-reaction lifecycle is skipped
@@ -599,7 +684,7 @@ impl AdapterRouter {
         let reactions = Arc::new(StatusReactionController::new(
             self.reactions_config.enabled,
             adapter.clone(),
-            ctx.trigger_msg.clone(),
+            trigger_msg.clone(),
             self.reactions_config.emojis.clone(),
             self.reactions_config.timing.clone(),
         ));
@@ -612,9 +697,9 @@ impl AdapterRouter {
                 adapter,
                 &thread_key,
                 content_blocks,
-                &ctx.thread_channel,
+                &thread_channel,
                 reactions.clone(),
-                ctx.other_bot_present,
+                other_bot_present,
             )
             .await;
 
@@ -640,7 +725,7 @@ impl AdapterRouter {
 
         if let Err(ref e) = result {
             let _ = adapter
-                .send_message(&ctx.thread_channel, &format!("⚠️ {e}"))
+                .send_message(&thread_channel, &format!("⚠️ {e}"))
                 .await;
         }
 
@@ -1341,16 +1426,17 @@ fn contains_bot_mention(content: &str) -> bool {
     while i + 2 < bytes.len() {
         if bytes[i] == b'<' && bytes[i + 1] == b'@' {
             // Skip optional '!' (nickname mention) or '&' (role mention)
-            let start = if i + 2 < bytes.len()
-                && (bytes[i + 2] == b'!' || bytes[i + 2] == b'&')
-            {
+            let start = if i + 2 < bytes.len() && (bytes[i + 2] == b'!' || bytes[i + 2] == b'&') {
                 i + 3
             } else {
                 i + 2
             };
             if start < bytes.len() && bytes[start].is_ascii_digit() {
                 if let Some(end) = content[start..].find('>') {
-                    if content[start..start + end].chars().all(|c| c.is_ascii_digit()) {
+                    if content[start..start + end]
+                        .chars()
+                        .all(|c| c.is_ascii_digit())
+                    {
                         return true;
                     }
                 }
@@ -1560,8 +1646,7 @@ fn compose_display(
                         // matches the sibling finished-fallback summary and
                         // the pre-PR raw-count behaviour that users are used
                         // to. A hidden group of `a×2` contributes 2, not 1.
-                        let hidden_groups =
-                            running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
+                        let hidden_groups = running_groups.len() - TOOL_COLLAPSE_THRESHOLD;
                         let hidden_calls: usize = running_groups
                             .iter()
                             .take(hidden_groups)
@@ -1670,7 +1755,11 @@ fn propagate_mentions_to_chunks(
             } else {
                 let footer = format!(
                     "\n{}",
-                    missing.iter().map(|m| m.as_str()).collect::<Vec<_>>().join(" ")
+                    missing
+                        .iter()
+                        .map(|m| m.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 );
                 if chunk.chars().count() + footer.chars().count() <= limit {
                     format!("{chunk}{footer}")
@@ -1685,6 +1774,24 @@ fn propagate_mentions_to_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_metadata_converts_to_safe_session_overrides() {
+        let parsed = crate::directives::parse_directives(
+            "[[profile:deep]] [[model:gpt-5.1]] [[reasoning_effort:high]] [[profile_config_mode:review]]\nhello",
+        );
+        let (profile_id, overrides) = profile_session_from_metadata(&parsed.metadata.raw);
+        let overrides = overrides.expect("expected session overrides");
+
+        assert_eq!(profile_id.as_deref(), Some("deep"));
+        assert_eq!(overrides.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(overrides.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            overrides.config_options.get("mode").map(String::as_str),
+            Some("review")
+        );
+        assert_eq!(parsed.prompt, "hello");
+    }
 
     #[test]
     fn select_delivery_text_send_once_keeps_only_final_block() {
@@ -2009,7 +2116,10 @@ mod tests {
             tool("3", "grep", ToolState::Completed),
         ];
         let out = compose_display(&tools, "done", false, ToolDisplay::Full);
-        assert!(!out.contains("(×"), "should not collapse across order: {out}");
+        assert!(
+            !out.contains("(×"),
+            "should not collapse across order: {out}"
+        );
         assert_eq!(out.matches("`grep`").count(), 2, "output: {out}");
         assert_eq!(out.matches("`curl`").count(), 1, "output: {out}");
     }
