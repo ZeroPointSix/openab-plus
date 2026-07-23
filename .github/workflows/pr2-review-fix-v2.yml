@@ -4,12 +4,17 @@ on:
   push:
     branches:
       - feat/pr2-agent-profiles
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   fix-pr2-review-gaps-v2:
+    if: ${{ github.event_name == 'push' || (github.event.pull_request.head.ref == 'feat/pr2-agent-profiles' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR branch
