@@ -1,15 +1,16 @@
 pub mod adapters;
 pub mod agent_profile_admin;
 pub mod config_admin;
-pub mod session_admin;
 pub(crate) mod media;
 pub mod schema;
+pub mod session_admin;
 pub mod store;
+pub mod web_admin;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{broadcast, Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore, broadcast};
 
 // --- Reply token cache for LINE hybrid Reply/Push dispatch ---
 
@@ -833,6 +834,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     }
 
     let app = app
+        .merge(web_admin::router())
         .merge(agent_profile_admin::router(profile_service.clone()))
         .merge(config_admin::router(config_manager.clone()))
         .with_state(state.clone());

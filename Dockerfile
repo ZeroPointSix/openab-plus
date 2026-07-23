@@ -18,6 +18,7 @@ RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
     && rm -rf src crates/openab-core/src crates/openab-gateway/src
 COPY crates/ crates/
 COPY src/ src/
+COPY web/ web/
 RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/lib.rs && \
     if [ "$BUILD_MODE" = "unified" ]; then \
       cargo build --release --features unified; \

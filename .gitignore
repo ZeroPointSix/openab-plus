@@ -10,3 +10,7 @@ config.toml
 CLAUDE.md
 .claude/
 .claude.local.md
+
+# Web admin local tooling
+web/node_modules/
+web/dist/

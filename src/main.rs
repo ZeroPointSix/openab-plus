@@ -1036,6 +1036,7 @@ async fn main() -> anyhow::Result<()> {
             // Build axum router with platform webhook routes
             let mut app = axum::Router::new()
                 .route("/health", axum::routing::get(|| async { "ok" }))
+                .merge(openab_gateway::web_admin::router())
                 .merge(openab_gateway::session_admin::router(pool.clone()));
 
             #[cfg(feature = "telegram")]

@@ -25,6 +25,7 @@ RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
     && rm -rf src crates/openab-core/src crates/openab-gateway/src
 COPY crates/ crates/
 COPY src/ src/
+COPY web/ web/
 RUN touch crates/openab-gateway/src/main.rs crates/openab-gateway/src/lib.rs && \
     if [ -n "$FEATURES" ]; then \
       cargo build --release -p openab-gateway --no-default-features --features "$FEATURES"; \
