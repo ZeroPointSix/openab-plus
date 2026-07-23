@@ -142,6 +142,23 @@ impl SessionPool {
         }
     }
 
+    pub async fn config_schema_for_thread(
+        &self,
+        thread_id: &str,
+        agent_type: &str,
+    ) -> Option<crate::agent_profile::AgentConfigSchema> {
+        let options = self.get_config_options(thread_id).await;
+        if options.is_empty() {
+            None
+        } else {
+            Some(
+                crate::agent_profile::AgentCapabilityResolver::config_schema_from_options(
+                    agent_type, &options,
+                ),
+            )
+        }
+    }
+
     pub async fn set_config_option(
         &self,
         thread_id: &str,

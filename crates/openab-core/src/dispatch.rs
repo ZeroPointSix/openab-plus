@@ -18,7 +18,10 @@ use async_trait::async_trait;
 use tracing::{debug, error, info, info_span, warn};
 
 use crate::acp::ContentBlock;
-use crate::adapter::{AdapterRouter, ChannelRef, ChatAdapter, MessageRef};
+use crate::adapter::{
+    profile_session_from_metadata, AdapterRouter, ChannelRef, ChatAdapter, MessageRef,
+};
+use crate::agent_profile::ProfileSessionOverrides;
 use crate::config::ReactionsConfig;
 use crate::error_display::format_user_error;
 use crate::reactions::StatusReactionController;
@@ -132,7 +135,13 @@ pub trait DispatchTarget: Send + Sync + 'static {
 
     /// Ensure the ACP session for `session_key` exists (idempotent).
     /// Returns `true` if a new session was created, `false` if it already existed.
-    async fn ensure_session(&self, session_key: &str, working_dir: Option<&str>) -> Result<bool>;
+    async fn ensure_session(
+        &self,
+        session_key: &str,
+        working_dir: Option<&str>,
+        profile_id: Option<&str>,
+        overrides: Option<&ProfileSessionOverrides>,
+    ) -> Result<bool>;
 
     /// Destroy the session for `session_key` (used to rollback on directive failure).
     async fn reset_session(&self, session_key: &str);
@@ -165,8 +174,16 @@ impl DispatchTarget for AdapterRouter {
         self.bot_home_path()
     }
 
-    async fn ensure_session(&self, session_key: &str, working_dir: Option<&str>) -> Result<bool> {
-        self.pool().get_or_create(session_key, working_dir).await
+    async fn ensure_session(
+        &self,
+        session_key: &str,
+        working_dir: Option<&str>,
+        profile_id: Option<&str>,
+        overrides: Option<&ProfileSessionOverrides>,
+    ) -> Result<bool> {
+        self.pool()
+            .get_or_create_with_profile(session_key, working_dir, profile_id, overrides)
+            .await
     }
 
     async fn reset_session(&self, session_key: &str) {
@@ -676,6 +693,10 @@ async fn dispatch_batch(
     let parse_result = batch
         .first()
         .map(|first_msg| crate::directives::parse_directives(&first_msg.prompt));
+    let (profile_id, profile_overrides) = parse_result
+        .as_ref()
+        .map(|pr| profile_session_from_metadata(&pr.metadata.raw))
+        .unwrap_or_else(|| (None, None));
 
     // Tentatively resolve [[ws:...]] — if resolution fails and the session turns out to
     // be new, we abort. If the session already existed, resolution failure is irrelevant.
@@ -695,7 +716,12 @@ async fn dispatch_batch(
     // Ensure session exists. The create_gate mutex inside get_or_create serializes
     // concurrent callers — only the winner gets created_now == true.
     let created_now = match target
-        .ensure_session(&session_key, workspace_override.as_deref())
+        .ensure_session(
+            &session_key,
+            workspace_override.as_deref(),
+            profile_id.as_deref(),
+            profile_overrides.as_ref(),
+        )
         .await
     {
         Ok(created) => created,
@@ -1369,12 +1395,20 @@ mod tests {
         block_count: usize,
         other_bot_present: bool,
         dispatch_channel: ChannelRef,
+        texts: Vec<String>,
+    }
+
+    #[derive(Clone)]
+    struct RecordedEnsure {
+        profile_id: Option<String>,
+        overrides: Option<ProfileSessionOverrides>,
     }
 
     /// Mock `DispatchTarget` — records calls; never touches a real session pool.
     struct MockDispatchTarget {
         reactions: ReactionsConfig,
         calls: Mutex<Vec<RecordedDispatch>>,
+        ensure_calls: Mutex<Vec<RecordedEnsure>>,
         /// If set, `ensure_session` returns this error once.
         ensure_err: Mutex<Option<String>>,
         /// If set, `stream_prompt_blocks` returns this error once.
@@ -1386,6 +1420,7 @@ mod tests {
             Self {
                 reactions: ReactionsConfig::default(),
                 calls: Mutex::new(Vec::new()),
+                ensure_calls: Mutex::new(Vec::new()),
                 ensure_err: Mutex::new(None),
                 stream_err: Mutex::new(None),
             }
@@ -1393,6 +1428,10 @@ mod tests {
 
         fn calls(&self) -> Vec<RecordedDispatch> {
             self.calls.lock().unwrap().clone()
+        }
+
+        fn ensure_calls(&self) -> Vec<RecordedEnsure> {
+            self.ensure_calls.lock().unwrap().clone()
         }
     }
 
@@ -1414,7 +1453,13 @@ mod tests {
             &self,
             _session_key: &str,
             _working_dir: Option<&str>,
+            profile_id: Option<&str>,
+            overrides: Option<&ProfileSessionOverrides>,
         ) -> Result<bool> {
+            self.ensure_calls.lock().unwrap().push(RecordedEnsure {
+                profile_id: profile_id.map(ToString::to_string),
+                overrides: overrides.cloned(),
+            });
             if let Some(msg) = self.ensure_err.lock().unwrap().take() {
                 return Err(anyhow::anyhow!(msg));
             }
@@ -1433,10 +1478,18 @@ mod tests {
             other_bot_present: bool,
             _recipient: Option<(String, String)>,
         ) -> Result<()> {
+            let texts = content_blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    ContentBlock::Image { .. } => None,
+                })
+                .collect();
             self.calls.lock().unwrap().push(RecordedDispatch {
                 block_count: content_blocks.len(),
                 other_bot_present,
                 dispatch_channel: thread_channel.clone(),
+                texts,
             });
             if let Some(msg) = self.stream_err.lock().unwrap().take() {
                 return Err(anyhow::anyhow!(msg));
@@ -1543,6 +1596,58 @@ mod tests {
         .await;
 
         mock.calls()
+    }
+
+    #[tokio::test]
+    async fn consumer_passes_profile_directives_to_session_creation() {
+        let mock = Arc::new(MockDispatchTarget::new());
+        let target: Arc<dyn DispatchTarget> = mock.clone();
+        let adapter: Arc<dyn ChatAdapter> = Arc::new(MockChatAdapter);
+        let (tx, rx) = tokio::sync::mpsc::channel::<BufferedMessage>(1);
+        tx.send(make_msg(
+            "[[profile:deep]] [[model:gpt-5.1]] [[reasoning_effort:high]] [[profile_config_approval_policy:never]]\nhello",
+            10,
+        ))
+        .await
+        .unwrap();
+        drop(tx);
+
+        consumer_loop(
+            "mock:T".into(),
+            make_channel("T"),
+            rx,
+            target,
+            adapter,
+            10,
+            24_000,
+            Duration::from_secs(60),
+        )
+        .await;
+
+        let ensure_calls = mock.ensure_calls();
+        assert_eq!(ensure_calls.len(), 1);
+        assert_eq!(ensure_calls[0].profile_id.as_deref(), Some("deep"));
+        let overrides = ensure_calls[0]
+            .overrides
+            .as_ref()
+            .expect("expected profile overrides");
+        assert_eq!(overrides.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(overrides.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            overrides
+                .config_options
+                .get("approval_policy")
+                .map(String::as_str),
+            Some("never")
+        );
+
+        let calls = mock.calls();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].texts.iter().any(|text| text == "hello"));
+        assert!(!calls[0]
+            .texts
+            .iter()
+            .any(|text| text.contains("[[profile:")));
     }
 
     #[tokio::test]

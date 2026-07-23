@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use openab_core::agent_profile::{AgentProfile, AgentProfileService};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -18,6 +18,10 @@ where
     let update_service = service.clone();
     let delete_service = service.clone();
     let validate_service = service.clone();
+    let get_default_service = service.clone();
+    let set_default_service = service.clone();
+    let set_default_path_service = service.clone();
+    let clear_default_service = service.clone();
     let agents_service = service.clone();
     let schema_service = service;
 
@@ -26,6 +30,22 @@ where
             "/api/v1/agent-profiles",
             get(move |headers| list_profiles(headers, list_service.clone()))
                 .post(move |headers, body| create_profile(headers, body, create_service.clone())),
+        )
+        .route(
+            "/api/v1/agent-profiles/default",
+            get(move |headers| get_default_profile(headers, get_default_service.clone()))
+                .put(move |headers, body| {
+                    set_default_profile(headers, body, set_default_service.clone())
+                })
+                .delete(move |headers| {
+                    clear_default_profile(headers, clear_default_service.clone())
+                }),
+        )
+        .route(
+            "/api/v1/agent-profiles/default/{profile_id}",
+            axum::routing::put(move |headers, path| {
+                set_default_profile_path(headers, path, set_default_path_service.clone())
+            }),
         )
         .route(
             "/api/v1/agent-profiles/{profile_id}",
@@ -134,6 +154,66 @@ async fn delete_profile(
     }
 }
 
+async fn get_default_profile(headers: HeaderMap, service: Arc<AgentProfileService>) -> Response {
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
+    }
+    match service.list().await {
+        Ok(document) => Json(DefaultProfile {
+            default_profile: document.default_profile,
+        })
+        .into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
+async fn set_default_profile(
+    headers: HeaderMap,
+    Json(request): Json<SetDefaultRequest>,
+    service: Arc<AgentProfileService>,
+) -> Response {
+    set_default_common(headers, request.profile_id, service).await
+}
+
+async fn set_default_profile_path(
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    service: Arc<AgentProfileService>,
+) -> Response {
+    set_default_common(headers, Some(profile_id), service).await
+}
+
+async fn clear_default_profile(headers: HeaderMap, service: Arc<AgentProfileService>) -> Response {
+    set_default_common(headers, None, service).await
+}
+
+async fn set_default_common(
+    headers: HeaderMap,
+    profile_id: Option<String>,
+    service: Arc<AgentProfileService>,
+) -> Response {
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
+    }
+    let profile_id = profile_id.and_then(|id| {
+        let id = id.trim().to_string();
+        if id.is_empty() {
+            None
+        } else {
+            Some(id)
+        }
+    });
+    match service.set_default(profile_id).await {
+        Ok(document) => Json(document).into_response(),
+        Err(e) if e.to_string().contains("invalid default profile") => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(e) => internal_error(e),
+    }
+}
+
 async fn validate_profile(
     headers: HeaderMap,
     Path(profile_id): Path<String>,
@@ -171,6 +251,16 @@ async fn config_schema(
         Ok(schema) => Json(schema).into_response(),
         Err(e) => internal_error(e),
     }
+}
+
+#[derive(Deserialize)]
+struct SetDefaultRequest {
+    profile_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DefaultProfile {
+    default_profile: Option<String>,
 }
 
 #[derive(Serialize)]

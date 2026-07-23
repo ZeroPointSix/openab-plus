@@ -419,6 +419,33 @@ impl AgentCapabilityResolver {
         Self { document }
     }
 
+    pub fn config_schema_from_options(
+        agent_type: &str,
+        options: &[crate::acp::protocol::ConfigOption],
+    ) -> AgentConfigSchema {
+        let fields = options
+            .iter()
+            .map(|option| AgentConfigField {
+                id: option.id.clone(),
+                label: option.name.clone(),
+                kind: option.option_type.clone(),
+                options: option
+                    .options
+                    .iter()
+                    .map(|value| value.value.clone())
+                    .collect(),
+                dynamic: true,
+            })
+            .collect();
+
+        AgentConfigSchema {
+            agent_type: agent_type.to_string(),
+            source: "agent-session-config-options".into(),
+            generated_at: Utc::now(),
+            fields,
+        }
+    }
+
     pub fn config_schema(&self, agent_type: &str) -> AgentConfigSchema {
         let mut models = BTreeSet::new();
         let mut efforts = BTreeSet::new();
@@ -486,7 +513,7 @@ impl AgentCapabilityResolver {
 
         AgentConfigSchema {
             agent_type: agent_type.to_string(),
-            source: "agent-profile-service".into(),
+            source: "profile-store-fallback".into(),
             generated_at: Utc::now(),
             fields,
         }
@@ -970,6 +997,33 @@ mod tests {
     }
 
     #[test]
+    fn capability_schema_can_reflect_live_config_options() {
+        let options = vec![crate::acp::protocol::ConfigOption {
+            id: "model".into(),
+            name: "Model".into(),
+            description: Some("AI model selection".into()),
+            category: Some("model".into()),
+            option_type: "enum".into(),
+            current_value: "gpt-5".into(),
+            options: vec![crate::acp::protocol::ConfigOptionValue {
+                value: "gpt-5".into(),
+                name: "GPT-5".into(),
+                description: None,
+            }],
+        }];
+
+        let schema = AgentCapabilityResolver::config_schema_from_options("codex", &options);
+
+        assert_eq!(schema.source, "agent-session-config-options");
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].id, "model");
+        assert_eq!(schema.fields[0].label, "Model");
+        assert_eq!(schema.fields[0].kind, "enum");
+        assert_eq!(schema.fields[0].options, vec!["gpt-5".to_string()]);
+        assert!(schema.fields[0].dynamic);
+    }
+
+    #[test]
     fn capability_schema_is_profile_derived() {
         let mut profile = AgentProfile::new("codex", "Codex", "codex");
         profile.default_model = Some("gpt-5".into());
@@ -984,6 +1038,7 @@ mod tests {
 
         let schema = resolver.config_schema("codex");
 
+        assert_eq!(schema.source, "profile-store-fallback");
         assert!(schema.fields.iter().any(|field| field.id == "model"
             && field.options == vec!["gpt-5".to_string()]
             && field.dynamic));
