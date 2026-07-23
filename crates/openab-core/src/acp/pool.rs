@@ -59,6 +59,13 @@ type CancelHandle = (Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>, String
 type ActiveSnapshot = Vec<(String, Arc<Mutex<AcpConnection>>)>;
 type EvictionCandidate = (String, Arc<Mutex<AcpConnection>>, Instant, Option<String>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEntryStatus {
+    Active,
+    Suspended,
+    Missing,
+}
+
 fn remove_if_same_handle<T>(
     map: &mut HashMap<String, Arc<Mutex<T>>>,
     key: &str,
@@ -511,6 +518,29 @@ impl SessionPool {
         Ok(is_fresh)
     }
 
+    pub async fn session_entry_status(&self, thread_id: &str) -> SessionEntryStatus {
+        let state = self.state.read().await;
+        if state.active.contains_key(thread_id) {
+            SessionEntryStatus::Active
+        } else if state.suspended.contains_key(thread_id) || state.persisted.contains_key(thread_id)
+        {
+            SessionEntryStatus::Suspended
+        } else {
+            SessionEntryStatus::Missing
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_suspended_for_test(&self, thread_id: &str, session_id: &str) {
+        let mut state = self.state.write().await;
+        state
+            .persisted
+            .insert(thread_id.to_string(), session_id.to_string());
+        state
+            .suspended
+            .insert(thread_id.to_string(), session_id.to_string());
+    }
+
     /// Get mutable access to a connection. Caller must have called get_or_create first.
     ///
     /// Only the per-connection `Mutex` is held during `f`; the pool-level
@@ -810,13 +840,22 @@ impl SessionPool {
 mod tests {
     use super::{
         better_candidate, classify_hung, classify_idle, get_or_insert_gate, purge_session_entries,
-        remove_if_same_handle, PoolState,
+        remove_if_same_handle, PoolState, SessionEntryStatus, SessionPool,
     };
     use crate::acp::connection::SessionActivity;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use tokio::time::Instant;
+
+    fn test_pool() -> SessionPool {
+        SessionPool::new(
+            crate::config::AgentConfig::default(),
+            4,
+            120,
+            HashMap::new(),
+        )
+    }
 
     #[test]
     fn remove_if_same_handle_removes_matching_entry() {
@@ -972,6 +1011,16 @@ mod tests {
             Some(&"session-other".to_string())
         );
         assert!(state.activity.contains_key("other"));
+    }
+
+    #[tokio::test]
+    async fn session_entry_status_reports_missing_sessions() {
+        let pool = test_pool();
+
+        assert_eq!(
+            pool.session_entry_status("missing-thread").await,
+            SessionEntryStatus::Missing
+        );
     }
 
     #[test]

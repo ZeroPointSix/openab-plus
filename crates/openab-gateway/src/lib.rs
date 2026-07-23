@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod agent_profile_admin;
 pub mod config_admin;
+pub mod session_admin;
 pub(crate) mod media;
 pub mod schema;
 pub mod store;

@@ -1034,8 +1034,9 @@ async fn main() -> anyhow::Result<()> {
             gw_state.warn_unenforceable_l1(true);
 
             // Build axum router with platform webhook routes
-            let mut app =
-                axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
+            let mut app = axum::Router::new()
+                .route("/health", axum::routing::get(|| async { "ok" }))
+                .merge(openab_gateway::session_admin::router(pool.clone()));
 
             #[cfg(feature = "telegram")]
             if gw_state.telegram_bot_token.is_some() {
