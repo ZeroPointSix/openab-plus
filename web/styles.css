@@ -380,6 +380,13 @@ td {
   color: var(--primary-strong);
 }
 
+.status-pill.warning {
+  color: #9a5b00;
+  background: #fff4df;
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
 .readonly-banner {
   margin-bottom: 16px;
   padding: 12px 14px;
