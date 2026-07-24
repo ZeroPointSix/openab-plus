@@ -439,7 +439,13 @@ function mapToLines(map) {
 }
 
 function bindProfilesPage(content, context) {
+  const form = content.querySelector("#profile-form");
+  if (form) {
+    form.dataset.initialSnapshot = profileFormSnapshot(form);
+  }
+
   content.querySelector("[data-profile-create]")?.addEventListener("click", () => {
+    if (!confirmProfileNavigation(form)) return;
     profileEditorState.selectedId = "__new__";
     profileEditorState.draft = newProfileDraft(collectAgentTypes(context.profiles, null)[0] || "opencode");
     profileEditorState.notice = null;
@@ -448,7 +454,10 @@ function bindProfilesPage(content, context) {
 
   content.querySelectorAll("[data-profile-select]").forEach((button) => {
     button.addEventListener("click", () => {
-      profileEditorState.selectedId = button.dataset.profileSelect;
+      const nextProfileId = button.dataset.profileSelect;
+      if (nextProfileId === profileEditorState.selectedId) return;
+      if (!confirmProfileNavigation(form)) return;
+      profileEditorState.selectedId = nextProfileId;
       profileEditorState.draft = null;
       profileEditorState.notice = null;
       renderProfiles(content);
@@ -473,7 +482,6 @@ function bindProfilesPage(content, context) {
     });
   });
 
-  const form = content.querySelector("#profile-form");
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
     await saveProfile(content, context.defaultProfileId);
@@ -484,18 +492,70 @@ function bindProfilesPage(content, context) {
     renderValidation(form, result);
   });
 
-  form?.querySelector('[name="agent_type"]')?.addEventListener("change", async () => {
-    await refreshDynamicFields(form);
+  const agentTypeInput = form?.querySelector('[name="agent_type"]');
+  if (agentTypeInput) {
+    const refreshAgentTypeFields = debounce(() => {
+      refreshDynamicFields(form);
+    }, 250);
+
+    agentTypeInput.addEventListener("input", refreshAgentTypeFields);
+    agentTypeInput.addEventListener("change", async () => {
+      refreshAgentTypeFields.cancel();
+      await refreshDynamicFields(form);
+    });
+  }
+}
+
+function confirmProfileNavigation(form) {
+  if (!hasUnsavedProfileChanges(form)) return true;
+  return window.confirm("当前 Profile 有未保存修改，继续切换会丢失这些修改。");
+}
+
+function hasUnsavedProfileChanges(form) {
+  return Boolean(form?.dataset.initialSnapshot && form.dataset.initialSnapshot !== profileFormSnapshot(form));
+}
+
+function profileFormSnapshot(form) {
+  const fields = [];
+  for (const [key, value] of new FormData(form).entries()) {
+    fields.push([key, String(value)]);
+  }
+  form.querySelectorAll("[data-config-field]").forEach((input) => {
+    fields.push([
+      `config:${input.dataset.configId || ""}`,
+      input.type === "checkbox" ? String(input.checked) : String(input.value || ""),
+    ]);
   });
+  fields.sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]));
+  return JSON.stringify(fields);
+}
+
+function debounce(callback, wait) {
+  let timeoutId = null;
+  const debounced = (...args) => {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    timeoutId = window.setTimeout(() => {
+      timeoutId = null;
+      callback(...args);
+    }, wait);
+  };
+  debounced.cancel = () => {
+    if (timeoutId) window.clearTimeout(timeoutId);
+    timeoutId = null;
+  };
+  return debounced;
 }
 
 async function refreshDynamicFields(form) {
   const draft = collectProfileForm(form);
+  const requestedAgentType = draft.agent_type;
   profileEditorState.draft = draft;
   const target = form.querySelector("#profile-config-fields");
   if (!target) return;
   target.innerHTML = `<div class="empty-state wide">正在加载配置字段。</div>`;
-  const schema = await fetchProfileSchema(draft.agent_type);
+  const schema = await fetchProfileSchema(requestedAgentType);
+  const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
+  if (currentAgentType !== requestedAgentType) return;
   target.innerHTML = configFieldsHtml(schema, draft);
 }
 
