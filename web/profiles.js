@@ -59,7 +59,7 @@ async function renderProfiles(content) {
     apiMaybe("/api/v1/agents"),
   ]);
 
-  if (!profileDoc || !Array.isArray(profileDoc.profiles)) {
+  if (!profileDoc) {
     content.innerHTML = `
       <section class="panel">
         <div class="panel-header"><h2>Agent Profiles</h2></div>
@@ -70,7 +70,7 @@ async function renderProfiles(content) {
     return;
   }
 
-  const profiles = profileDoc.profiles.map(normalizeProfile);
+  const profiles = Array.isArray(profileDoc.profiles) ? profileDoc.profiles.map(normalizeProfile) : [];
   const defaultProfileId = profileDoc.default_profile || "";
   const agentTypes = collectAgentTypes(profiles, agents);
   const selectedProfile = pickSelectedProfile(profiles, agentTypes);
