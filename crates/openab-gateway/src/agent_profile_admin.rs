@@ -3,12 +3,42 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use openab_core::agent_profile::{AgentProfile, AgentProfileService};
+use openab_core::agent_profile::{AgentConfigSchema, AgentProfile, AgentProfileService};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
+type CoreSessionPool = Arc<openab_core::acp::SessionPool>;
+type LiveConfigSchemaResolver = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<AgentConfigSchema>> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub fn router<S>(service: Arc<AgentProfileService>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router_with_live_schema_resolver(service, None)
+}
+
+pub fn router_with_pool<S>(service: Arc<AgentProfileService>, pool: CoreSessionPool) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let resolver: LiveConfigSchemaResolver = Arc::new(move |agent: String| {
+        let pool = pool.clone();
+        Box::pin(async move { pool.config_schema_for_agent(&agent).await })
+    });
+    router_with_live_schema_resolver(service, Some(resolver))
+}
+
+pub fn router_with_live_schema_resolver<S>(
+    service: Arc<AgentProfileService>,
+    live_schema: Option<LiveConfigSchemaResolver>,
+) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -24,6 +54,7 @@ where
     let clear_default_service = service.clone();
     let agents_service = service.clone();
     let schema_service = service;
+    let schema_live_resolver = live_schema;
 
     Router::new()
         .route(
@@ -65,7 +96,14 @@ where
         )
         .route(
             "/api/v1/agents/{agent}/config-schema",
-            get(move |headers, path| config_schema(headers, path, schema_service.clone())),
+            get(move |headers, path| {
+                config_schema(
+                    headers,
+                    path,
+                    schema_service.clone(),
+                    schema_live_resolver.clone(),
+                )
+            }),
         )
 }
 
@@ -243,9 +281,15 @@ async fn config_schema(
     headers: HeaderMap,
     Path(agent): Path<String>,
     service: Arc<AgentProfileService>,
+    live_schema: Option<LiveConfigSchemaResolver>,
 ) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
+    }
+    if let Some(resolve_live_schema) = live_schema {
+        if let Some(schema) = resolve_live_schema(agent.clone()).await {
+            return Json(schema).into_response();
+        }
     }
     match service.config_schema(&agent).await {
         Ok(schema) => Json(schema).into_response(),

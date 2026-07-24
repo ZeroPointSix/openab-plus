@@ -28,6 +28,8 @@ pub struct SessionPool {
     session_events: SessionEventBus,
     snapshots: RwLock<HashMap<String, SessionSnapshot>>,
     external_base_url: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    config_options_for_test: RwLock<HashMap<String, Vec<ConfigOption>>>,
 }
 
 impl SessionPool {
@@ -58,6 +60,8 @@ impl SessionPool {
             session_events: SessionEventBus::default(),
             snapshots: RwLock::new(HashMap::new()),
             external_base_url,
+            #[cfg(any(test, feature = "test-support"))]
+            config_options_for_test: RwLock::new(HashMap::new()),
         }
     }
 
@@ -75,9 +79,17 @@ impl SessionPool {
     }
 
     /// Seed a session snapshot and emit `session.created` for integration tests.
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn seed_session_snapshot_for_test(&self, snapshot: SessionSnapshot) {
         self.record_session_created(snapshot).await;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_config_options_for_test(&self, thread_id: &str, options: Vec<ConfigOption>) {
+        self.config_options_for_test
+            .write()
+            .await
+            .insert(thread_id.to_string(), options);
     }
 
     pub async fn list_session_snapshots(&self) -> Vec<SessionSnapshot> {
@@ -204,10 +216,50 @@ impl SessionPool {
     }
 
     pub async fn get_config_options(&self, thread_id: &str) -> Vec<ConfigOption> {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            if let Some(options) = self
+                .config_options_for_test
+                .read()
+                .await
+                .get(thread_id)
+                .cloned()
+            {
+                return options;
+            }
+        }
+
         match self.existing_pool(thread_id).await {
             Some(pool) => pool.get_config_options(thread_id).await,
             None => Vec::new(),
         }
+    }
+
+    pub async fn config_schema_for_agent(
+        &self,
+        agent_type: &str,
+    ) -> Option<crate::agent_profile::AgentConfigSchema> {
+        for snapshot in self
+            .list_session_snapshots()
+            .await
+            .into_iter()
+            .filter(|snapshot| {
+                snapshot.agent == agent_type
+                    && matches!(
+                        snapshot.status,
+                        SessionStatus::Starting | SessionStatus::Idle | SessionStatus::Running
+                    )
+            })
+        {
+            if let Some(schema) = self
+                .config_schema_for_thread(&snapshot.session_id, agent_type)
+                .await
+            {
+                return Some(schema);
+            }
+        }
+
+        None
     }
 
     pub async fn config_schema_for_thread(
@@ -501,6 +553,30 @@ mod tests {
         }
     }
 
+    fn enum_config_option(
+        id: &str,
+        name: &str,
+        current_value: &str,
+        values: &[&str],
+    ) -> ConfigOption {
+        ConfigOption {
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            category: None,
+            option_type: "enum".into(),
+            current_value: current_value.into(),
+            options: values
+                .iter()
+                .map(|value| ConfigOptionValue {
+                    value: (*value).into(),
+                    name: (*value).into(),
+                    description: None,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn extracts_model_from_config_options() {
         let options = vec![
@@ -545,6 +621,67 @@ mod tests {
 
         let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
         assert_eq!(snapshot.status, SessionStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn config_schema_for_agent_uses_live_options_from_matching_session() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let mut snapshot = SessionSnapshot::new(
+            "slack:live-opencode".into(),
+            "opencode".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.set_status(SessionStatus::Running);
+        outer.seed_session_snapshot_for_test(snapshot).await;
+        outer
+            .seed_config_options_for_test(
+                "slack:live-opencode",
+                vec![enum_config_option(
+                    "model",
+                    "Model",
+                    "opencode/latest",
+                    &["opencode/latest", "opencode/canary"],
+                )],
+            )
+            .await;
+
+        let schema = outer
+            .config_schema_for_agent("opencode")
+            .await
+            .expect("live schema");
+
+        assert_eq!(schema.source, "agent-session-config-options");
+        assert!(schema.fields.iter().any(|field| {
+            field.id == "model" && field.options.contains(&"opencode/canary".to_string())
+        }));
+    }
+
+    #[tokio::test]
+    async fn config_schema_for_agent_ignores_other_agent_snapshots() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        outer
+            .seed_session_snapshot_for_test(SessionSnapshot::new(
+                "slack:codex".into(),
+                "codex".into(),
+                "/workspace".into(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await;
+        outer
+            .seed_config_options_for_test(
+                "slack:codex",
+                vec![enum_config_option("model", "Model", "gpt-5", &["gpt-5"])],
+            )
+            .await;
+
+        assert!(outer.config_schema_for_agent("opencode").await.is_none());
     }
 
     #[test]
