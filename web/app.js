@@ -648,7 +648,8 @@ async function runSessionEventStream({ getToken, signal, onOpen, onClose, onEven
 }
 
 function consumeSSEBuffer(buffer, onEvent) {
-  const chunks = buffer.split("\n\n");
+  const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const chunks = normalized.split("\n\n");
   const rest = chunks.pop() || "";
 
   for (const chunk of chunks) {
@@ -668,7 +669,7 @@ function consumeSSEBuffer(buffer, onEvent) {
 }
 
 function parseSSEChunk(chunk) {
-  const lines = chunk.split("\n");
+  const lines = chunk.split(/\r?\n/);
   const dataLines = [];
   let event = "";
 
