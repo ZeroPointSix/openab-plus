@@ -551,8 +551,9 @@ async function deleteProfile(content, profileId) {
 
 function collectProfileForm(form) {
   const fields = new FormData(form);
+  const rawId = String(fields.get("id") || "").trim();
   const profile = normalizeProfile({
-    id: String(fields.get("id") || profileEditorState.selectedId || "").trim(),
+    id: rawId || (profileEditorState.selectedId === "__new__" ? "" : profileEditorState.selectedId || ""),
     name: String(fields.get("name") || "").trim(),
     agent_type: String(fields.get("agent_type") || "").trim(),
     enabled: fields.get("enabled") === "on",
