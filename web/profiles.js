@@ -89,7 +89,7 @@ async function renderProfiles(content) {
           </div>
         </div>
         <div class="profile-list-scroll">
-          ${profilesTable(profiles, defaultProfileId)}
+          ${profileListHtml(profiles, defaultProfileId)}
         </div>
       </div>
 
@@ -185,7 +185,7 @@ async function fetchProfileSchema(agentType) {
   return schema;
 }
 
-function profilesTable(profiles, defaultProfileId) {
+function profileListHtml(profiles, defaultProfileId) {
   if (!profiles.length) {
     return `<div class="empty-state">暂无 Profile。点击“新建”开始配置。</div>`;
   }
@@ -274,7 +274,7 @@ function profileEditorHtml(profile, { defaultProfileId, agentTypes, schema, isNe
           </div>
         </div>
         <div class="panel-body">
-          <div id="profile-config-fields" class="form-grid">
+          <div id="profile-config-fields" class="form-grid" data-schema-agent="${escapeHtml(profile.agent_type || "")}">
             ${configFieldsHtml(schema, profile)}
           </div>
         </div>
@@ -374,11 +374,14 @@ function profileConfigFields(schema, profile) {
     }));
 
   const existingKeys = new Set(normalized.map((field) => field.id));
-  if (!existingKeys.has("model") && profile.default_model) {
+  if (!existingKeys.has("model")) {
     normalized.unshift({ id: "model", label: "Model", kind: "string", options: [], dynamic: true });
+    existingKeys.add("model");
   }
-  if (!existingKeys.has("reasoning_effort") && profile.reasoning_effort) {
-    normalized.push({ id: "reasoning_effort", label: "Reasoning effort", kind: "string", options: [], dynamic: true });
+  if (!existingKeys.has("reasoning_effort")) {
+    const modelIndex = normalized.findIndex((field) => field.id === "model");
+    normalized.splice(modelIndex + 1, 0, { id: "reasoning_effort", label: "Reasoning effort", kind: "string", options: [], dynamic: true });
+    existingKeys.add("reasoning_effort");
   }
   for (const permissionField of PERMISSION_CONFIG_FIELDS) {
     if (!normalized.some((field) => field.id === permissionField.id)) {
@@ -499,10 +502,13 @@ function bindProfilesPage(content, context) {
     }, 250);
 
     agentTypeInput.addEventListener("input", refreshAgentTypeFields);
-    agentTypeInput.addEventListener("change", async () => {
+    const refreshAgentTypeNow = async () => {
       refreshAgentTypeFields.cancel();
       await refreshDynamicFields(form);
-    });
+    };
+
+    agentTypeInput.addEventListener("change", refreshAgentTypeNow);
+    agentTypeInput.addEventListener("blur", refreshAgentTypeNow);
   }
 }
 
@@ -556,12 +562,28 @@ async function refreshDynamicFields(form) {
   const schema = await fetchProfileSchema(requestedAgentType);
   const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
   if (currentAgentType !== requestedAgentType) return;
+  target.dataset.schemaAgent = requestedAgentType || "";
   target.innerHTML = configFieldsHtml(schema, draft);
+}
+
+async function ensureDynamicFieldsFresh(form) {
+  const target = form.querySelector("#profile-config-fields");
+  const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
+  if (!target || target.dataset.schemaAgent === currentAgentType) return false;
+  await refreshDynamicFields(form);
+  return true;
 }
 
 async function saveProfile(content, defaultProfileId) {
   const form = content.querySelector("#profile-form");
   if (!form) return;
+  if (await ensureDynamicFieldsFresh(form)) {
+    renderValidation(form, {
+      ok: false,
+      errors: [{ path: "agent_type", message: "配置字段已根据 Agent 类型刷新，请确认动态配置后再次保存。" }],
+    });
+    return;
+  }
   const profile = collectProfileForm(form);
   const wantsDefault = form.querySelector('[name="default_profile"]')?.checked || false;
   const validation = validateProfileDraft(profile, { wantsDefault });
@@ -610,13 +632,16 @@ async function setDefaultProfile(content, profileId) {
 async function validateSavedProfile(content, profileId) {
   if (!profileId) return;
   try {
-    const validation = await profileRequest(`/api/v1/agent-profiles/${encodeURIComponent(profileId)}/validate`, { method: "POST" });
+    const validation = normalizeValidation(await profileRequest(`/api/v1/agent-profiles/${encodeURIComponent(profileId)}/validate`, { method: "POST" }));
     profileEditorState.notice = validation.ok
       ? { tone: "success", message: `${profileId} 服务端校验通过。` }
-      : { tone: "danger", message: `${profileId} 服务端校验未通过：${validation.errors?.length || 0} 个问题。` };
+      : { tone: "danger", message: `${profileId} 服务端校验未通过。`, errors: validation.errors };
     await renderProfiles(content);
   } catch (error) {
-    profileEditorState.notice = { tone: "danger", message: error.message || "校验失败。" };
+    const validation = normalizeValidation(error.responsePayload?.validation);
+    profileEditorState.notice = validation.errors.length
+      ? { tone: "danger", message: error.message || "校验失败。", errors: validation.errors }
+      : { tone: "danger", message: error.message || "校验失败。" };
     await renderProfiles(content);
   }
 }
@@ -660,10 +685,13 @@ function collectProfileForm(form) {
   form.querySelectorAll("[data-config-field]").forEach((input) => {
     const key = input.dataset.configId;
     if (!key) return;
-    const value = input.type === "checkbox"
-      ? (input.checked ? "true" : "false")
-      : String(input.value || "").trim();
-    if (!value && input.type !== "checkbox") return;
+    if (input.type === "checkbox") {
+      if (!input.checked) return;
+      assignConfigField(profile, key, "true");
+      return;
+    }
+    const value = String(input.value || "").trim();
+    if (!value) return;
     assignConfigField(profile, key, value);
   });
 
@@ -758,7 +786,10 @@ function renderValidation(form, validation) {
 
 function profileNoticeHtml(notice) {
   if (!notice) return "";
-  return `<div class="profile-message ${notice.tone || "success"}">${escapeHtml(notice.message)}</div>`;
+  const errors = Array.isArray(notice.errors) && notice.errors.length
+    ? `<ul>${notice.errors.map((error) => `<li><span class="code-ish">${escapeHtml(error.path || "-")}</span> ${escapeHtml(error.message || error.code || "无效字段")}</li>`).join("")}</ul>`
+    : "";
+  return `<div class="profile-message ${notice.tone || "success"}">${escapeHtml(notice.message)}${errors}</div>`;
 }
 
 async function profileRequest(path, options = {}) {
