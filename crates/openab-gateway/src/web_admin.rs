@@ -38,6 +38,7 @@ async fn admin_styles() -> Response {
 fn asset_response(content_type: &'static str, body: &'static str) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     (headers, body).into_response()
 }
 
@@ -49,5 +50,14 @@ mod tests {
     fn embedded_index_references_admin_assets() {
         assert!(INDEX_HTML.contains("/admin/app.js"));
         assert!(INDEX_HTML.contains("/admin/styles.css"));
+    }
+
+    #[test]
+    fn asset_response_sets_no_cache() {
+        let response = asset_response("text/plain; charset=utf-8", "ok");
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-cache"))
+        );
     }
 }

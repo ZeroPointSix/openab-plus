@@ -6,6 +6,12 @@ const ROUTES = {
   config: "Gateway 配置",
 };
 
+const AUTH_PROBE_PATHS = [
+  "/api/v1/sessions",
+  "/api/v1/agent-profiles",
+  "/api/v1/config/status",
+];
+
 const state = {
   token: sessionStorage.getItem(TOKEN_KEY) || "",
   route: currentRoute(),
@@ -23,8 +29,7 @@ window.addEventListener("hashchange", () => {
 
 document.addEventListener("DOMContentLoaded", () => {
   if (state.token) {
-    renderShell();
-    loadRoute();
+    bootstrapStoredToken();
   } else {
     renderLogin();
   }
@@ -66,7 +71,7 @@ function renderLogin(error = "") {
 
     state.token = token;
     try {
-      await api("/api/v1/sessions");
+      await validateAdminToken();
       sessionStorage.setItem(TOKEN_KEY, token);
       if (!window.location.hash) setRoute("overview");
       renderShell();
@@ -77,6 +82,21 @@ function renderLogin(error = "") {
       renderLogin(readableError(error));
     }
   });
+}
+
+async function bootstrapStoredToken() {
+  renderShell();
+  const content = document.querySelector("#content");
+  content.innerHTML = skeletonPanel("验证登录");
+
+  try {
+    await validateAdminToken();
+    loadRoute();
+  } catch (error) {
+    state.token = "";
+    sessionStorage.removeItem(TOKEN_KEY);
+    renderLogin(readableError(error));
+  }
 }
 
 function renderShell() {
@@ -128,11 +148,11 @@ async function loadRoute() {
 }
 
 async function renderOverview(content) {
-  const sessions = await fetchSessions();
+  const sessions = await fetchSessions({ optional: true }) || [];
   const profileDoc = await apiMaybe("/api/v1/agent-profiles");
   const status = await apiMaybe("/api/v1/config/status");
   const profiles = Array.isArray(profileDoc?.profiles) ? profileDoc.profiles : [];
-  const activeCount = sessions.filter((session) => !String(valueOf(session, ["status", "state", "phase"]) || "").match(/closed|ended|stopped/i)).length;
+  const activeCount = sessions.filter(isActiveSession).length;
 
   content.innerHTML = `
     <section class="metrics-grid">
@@ -153,7 +173,12 @@ async function renderOverview(content) {
 }
 
 async function renderSessions(content) {
-  const sessions = await fetchSessions();
+  const sessions = await fetchSessions({ optional: true });
+  if (!sessions) {
+    content.innerHTML = sessionsUnavailablePanel();
+    return;
+  }
+
   content.innerHTML = `
     <section class="panel">
       <div class="panel-header"><h2>会话列表</h2><button class="ghost-button" id="refresh-sessions">刷新</button></div>
@@ -195,11 +220,53 @@ async function renderConfig(content) {
     </section>`;
 }
 
-async function fetchSessions() {
-  const data = await api("/api/v1/sessions");
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data.sessions)) return data.sessions;
-  return [];
+async function fetchSessions({ optional = false } = {}) {
+  try {
+    const data = await api("/api/v1/sessions");
+    if (Array.isArray(data)) return data;
+    if (Array.isArray(data.sessions)) return data.sessions;
+    return [];
+  } catch (error) {
+    if (error.name === "AuthError") throw error;
+    if (optional && error.status === 404) return null;
+    throw error;
+  }
+}
+
+async function validateAdminToken() {
+  let sawMissingProbe = false;
+
+  for (const path of AUTH_PROBE_PATHS) {
+    const result = await apiProbe(path);
+    if (result.ok) return;
+    if (result.status === 404) {
+      sawMissingProbe = true;
+      continue;
+    }
+
+    const error = new Error(result.message || "Admin token 校验失败。");
+    error.status = result.status;
+    throw error;
+  }
+
+  const error = new Error(sawMissingProbe ? "当前网关没有可用的 admin API。" : "Admin token 校验失败。");
+  error.status = 404;
+  throw error;
+}
+
+async function apiProbe(path) {
+  const headers = new Headers();
+  headers.set("Authorization", `Bearer ${state.token}`);
+
+  const response = await fetch(path, { headers });
+  const payload = await parsePayload(response);
+  if (response.ok) return { ok: true, status: response.status };
+
+  return {
+    ok: false,
+    status: response.status,
+    message: payload?.error || payload?.message || response.statusText,
+  };
 }
 
 async function api(path, options = {}) {
@@ -266,6 +333,14 @@ function errorPanel(message) {
   return `<section class="panel"><div class="panel-header"><h2>加载失败</h2></div><div class="panel-body"><div class="error-box">${escapeHtml(message)}</div></div></section>`;
 }
 
+function sessionsUnavailablePanel() {
+  return `
+    <section class="panel">
+      <div class="panel-header"><h2>会话列表</h2></div>
+      <div class="panel-body"><div class="empty-state">当前运行形态未挂载会话 API。</div></div>
+    </section>`;
+}
+
 function sessionListPreview(sessions) {
   if (!sessions.length) return `<div class="empty-state">暂无会话。</div>`;
   return sessions.slice(0, 5).map((session) => {
@@ -279,8 +354,8 @@ function sessionsTable(sessions) {
   if (!sessions.length) return `<div class="empty-state">暂无会话。</div>`;
   const rows = sessions.map((session) => {
     const id = valueOf(session, ["id", "session_id", "sessionId"]) || "unknown";
-    const platform = valueOf(session, ["platform", "adapter", "source_platform"]) || "-";
-    const channel = valueOf(session, ["channel_id", "channelId", "thread_id", "threadId"]) || "-";
+    const platform = valueOf(session, ["platform", "adapter", "source_platform", "source.platform"]) || "-";
+    const channel = valueOf(session, ["channel_id", "channelId", "thread_id", "threadId", "source.channel_id", "source.channelId", "source.thread_id", "source.threadId"]) || "-";
     const status = valueOf(session, ["status", "state", "phase"]) || "active";
     const updated = valueOf(session, ["updated_at", "last_active_at", "lastActivityAt", "created_at"]) || "-";
     return `<tr><td class="code-ish">${escapeHtml(String(id))}</td><td>${escapeHtml(String(platform))}</td><td class="code-ish">${escapeHtml(String(channel))}</td><td><span class="badge">${escapeHtml(String(status))}</span></td><td>${escapeHtml(String(updated))}</td></tr>`;
@@ -314,12 +389,22 @@ function statusSummary(status) {
 
 function valueOf(object, keys) {
   for (const key of keys) {
-    if (object && object[key] !== undefined && object[key] !== null) return object[key];
+    const value = key.split(".").reduce((current, segment) => {
+      if (current === undefined || current === null) return undefined;
+      return current[segment];
+    }, object);
+    if (value !== undefined && value !== null) return value;
   }
   return undefined;
 }
 
+function isActiveSession(session) {
+  const status = String(valueOf(session, ["status", "state", "phase"]) || "active");
+  return !status.match(/closed|ended|stopped|exited|error|failed|cancelled|canceled/i);
+}
+
 function readableError(error) {
+  if (error?.status === 404) return "当前网关没有可用的 admin API。";
   if (error?.status === 503) return "服务端未配置 admin token。";
   if (error?.message) return error.message;
   return "请求失败。";
