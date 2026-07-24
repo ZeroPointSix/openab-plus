@@ -28,30 +28,6 @@ const COMMON_AGENT_TYPES = [
   "system-default",
 ];
 
-const PERMISSION_CONFIG_FIELDS = [
-  {
-    id: "approval_policy",
-    label: "Approval policy",
-    kind: "enum",
-    options: ["untrusted", "on-request", "on-failure", "never"],
-    dynamic: true,
-  },
-  {
-    id: "sandbox_mode",
-    label: "Sandbox mode",
-    kind: "enum",
-    options: ["read-only", "workspace-write", "danger-full-access"],
-    dynamic: true,
-  },
-  {
-    id: "network_access",
-    label: "Network access",
-    kind: "enum",
-    options: ["disabled", "enabled"],
-    dynamic: true,
-  },
-];
-
 const RESERVED_CONFIG_FIELDS = new Set(["command", "working_dir"]);
 
 async function renderProfiles(content) {
@@ -174,10 +150,10 @@ function collectAgentTypes(profiles, agents) {
   return [...types].sort();
 }
 
-async function fetchProfileSchema(agentType) {
+async function fetchProfileSchema(agentType, { force = false } = {}) {
   const key = String(agentType || "").trim();
   if (!key) return null;
-  if (profileEditorState.schemaCache.has(key)) {
+  if (!force && profileEditorState.schemaCache.has(key)) {
     return profileEditorState.schemaCache.get(key);
   }
 
@@ -271,7 +247,7 @@ function profileEditorHtml(profile, { defaultProfileId, agentTypes, schema, isNe
         <div class="panel-header">
           <div>
             <h2>动态配置</h2>
-            <p class="panel-subtitle">${schemaSubtitle(schema, profile.agent_type)}</p>
+            <p id="profile-schema-source" class="panel-subtitle">${schemaSubtitle(schema, profile.agent_type)}</p>
           </div>
         </div>
         <div class="panel-body">
@@ -383,11 +359,6 @@ function profileConfigFields(schema, profile) {
     const modelIndex = normalized.findIndex((field) => field.id === "model");
     normalized.splice(modelIndex + 1, 0, { id: "reasoning_effort", label: "Reasoning effort", kind: "string", options: [], dynamic: true });
     existingKeys.add("reasoning_effort");
-  }
-  for (const permissionField of PERMISSION_CONFIG_FIELDS) {
-    if (!normalized.some((field) => field.id === permissionField.id)) {
-      normalized.push(permissionField);
-    }
   }
   return normalized;
 }
@@ -556,6 +527,7 @@ function debounce(callback, wait) {
 async function refreshDynamicFields(form, retryDepth = 0) {
   const refreshId = ++profileEditorState.schemaRefreshSeq;
   const target = form.querySelector("#profile-config-fields");
+  const sourceTarget = form.querySelector("#profile-schema-source");
   if (!target) return;
 
   try {
@@ -563,23 +535,35 @@ async function refreshDynamicFields(form, retryDepth = 0) {
     const requestedAgentType = String(draft.agent_type || "").trim();
     profileEditorState.draft = draft;
     target.innerHTML = `<div class="empty-state wide">正在加载配置字段。</div>`;
-    const schema = await fetchProfileSchema(requestedAgentType);
+    const schema = await fetchProfileSchema(requestedAgentType, {
+      force: target.dataset.schemaAgent !== requestedAgentType,
+    });
     if (refreshId !== profileEditorState.schemaRefreshSeq) return;
 
     const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
     if (currentAgentType !== requestedAgentType) {
-      if (retryDepth >= 4) {
+      if (retryDepth < 4) {
+        return refreshDynamicFields(form, retryDepth + 1);
+      }
+      const currentDraft = collectProfileForm(form, { prune: false });
+      const currentSchema = await fetchProfileSchema(currentAgentType, { force: true });
+      if (refreshId !== profileEditorState.schemaRefreshSeq) return;
+      if (currentAgentType === String(form.querySelector('[name="agent_type"]')?.value || "").trim()) {
         target.dataset.schemaAgent = currentAgentType || "";
-        target.innerHTML = configFieldsHtml(schema, collectProfileForm(form, { prune: false }));
+        if (sourceTarget) sourceTarget.textContent = schemaSubtitle(currentSchema, currentAgentType);
+        target.innerHTML = configFieldsHtml(currentSchema, currentDraft);
         return;
       }
-      return refreshDynamicFields(form, retryDepth + 1);
+      return;
     }
 
     target.dataset.schemaAgent = currentAgentType || "";
+    if (sourceTarget) sourceTarget.textContent = schemaSubtitle(schema, currentAgentType);
     target.innerHTML = configFieldsHtml(schema, collectProfileForm(form, { prune: false }));
   } catch (error) {
     if (refreshId !== profileEditorState.schemaRefreshSeq) return;
+    const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
+    if (sourceTarget) sourceTarget.textContent = schemaSubtitle(null, currentAgentType);
     target.innerHTML = `<div class="empty-state wide">配置字段加载失败：${escapeHtml(error.message || "未知错误")}</div>`;
   }
 }
