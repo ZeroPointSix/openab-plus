@@ -74,6 +74,12 @@ impl SessionPool {
         self.session_events.clone()
     }
 
+    /// Seed a session snapshot and emit `session.created` for integration tests.
+    #[cfg(feature = "test-support")]
+    pub async fn seed_session_snapshot_for_test(&self, snapshot: SessionSnapshot) {
+        self.record_session_created(snapshot).await;
+    }
+
     pub async fn list_session_snapshots(&self) -> Vec<SessionSnapshot> {
         let mut snapshots: Vec<_> = self.snapshots.read().await.values().cloned().collect();
         snapshots.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.updated_at));

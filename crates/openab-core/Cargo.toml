@@ -57,6 +57,7 @@ tokio = { version = "1", features = ["test-util"] }
 
 [features]
 default = ["discord", "slack", "secrets-aws", "agentcore", "config-s3"]
+test-support = []
 discord = ["dep:serenity"]
 slack = []
 secrets-aws = ["dep:aws-sdk-secretsmanager", "dep:aws-config"]
