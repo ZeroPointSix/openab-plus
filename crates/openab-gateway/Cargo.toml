@@ -36,9 +36,13 @@ urlencoding = "2"
 [dev-dependencies]
 wiremock = "0.6"
 tempfile = "3.27.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+openab-core = { path = "../openab-core", default-features = false, features = ["test-support"] }
 
 [features]
 default = ["telegram", "line", "feishu", "googlechat", "wecom", "teams"]
+test-support = ["openab-core/test-support"]
 telegram = []
 line = []
 feishu = []

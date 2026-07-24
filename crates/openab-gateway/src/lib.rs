@@ -524,6 +524,13 @@ pub struct GatewayFeishuConfig {
 
 // --- Public serve() entry point ---
 
+/// Whether standalone [`serve`] mounts the session admin API.
+///
+/// The unified `openab` binary merges [`session_admin::router`]; standalone
+/// `openab-gateway::serve` intentionally omits it (sessions live in the core
+/// process pool, not the sidecar gateway).
+pub const STANDALONE_SESSION_ADMIN_MOUNTED: bool = false;
+
 /// Configuration for the standalone gateway server.
 pub struct ServeConfig {
     pub listen_addr: String,
