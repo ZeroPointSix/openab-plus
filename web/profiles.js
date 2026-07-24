@@ -27,6 +27,30 @@ const COMMON_AGENT_TYPES = [
   "system-default",
 ];
 
+const PERMISSION_CONFIG_FIELDS = [
+  {
+    id: "approval_policy",
+    label: "Approval policy",
+    kind: "enum",
+    options: ["untrusted", "on-request", "on-failure", "never"],
+    dynamic: true,
+  },
+  {
+    id: "sandbox_mode",
+    label: "Sandbox mode",
+    kind: "enum",
+    options: ["read-only", "workspace-write", "danger-full-access"],
+    dynamic: true,
+  },
+  {
+    id: "network_access",
+    label: "Network access",
+    kind: "enum",
+    options: ["disabled", "enabled"],
+    dynamic: true,
+  },
+];
+
 const RESERVED_CONFIG_FIELDS = new Set(["command", "working_dir"]);
 
 async function renderProfiles(content) {
@@ -356,6 +380,11 @@ function profileConfigFields(schema, profile) {
   if (!existingKeys.has("reasoning_effort") && profile.reasoning_effort) {
     normalized.push({ id: "reasoning_effort", label: "Reasoning effort", kind: "string", options: [], dynamic: true });
   }
+  for (const permissionField of PERMISSION_CONFIG_FIELDS) {
+    if (!normalized.some((field) => field.id === permissionField.id)) {
+      normalized.push(permissionField);
+    }
+  }
   return normalized;
 }
 
@@ -624,8 +653,12 @@ function validateProfileDraft(profile, { wantsDefault = false } = {}) {
   if (wantsDefault && profile.enabled === false) {
     pushProfileError(errors, "default_profile", "默认 Profile 必须保持启用。");
   }
-  if (profile.timeout_secs !== undefined && profile.timeout_secs !== "" && !(profile.timeout_secs >= 5 && profile.timeout_secs <= 86400)) {
-    pushProfileError(errors, "timeout_secs", "超时时间必须在 5 到 86400 秒之间。");
+  if (profile.timeout_secs !== undefined && profile.timeout_secs !== "") {
+    if (!Number.isInteger(profile.timeout_secs)) {
+      pushProfileError(errors, "timeout_secs", "超时时间必须是整数秒。");
+    } else if (!(profile.timeout_secs >= 5 && profile.timeout_secs <= 86400)) {
+      pushProfileError(errors, "timeout_secs", "超时时间必须在 5 到 86400 秒之间。");
+    }
   }
   for (const [key, value] of Object.entries(profile.env_refs || {})) {
     if (!key.trim()) pushProfileError(errors, "env_refs", "环境变量名不能为空。");
