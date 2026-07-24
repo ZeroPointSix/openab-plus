@@ -3,6 +3,7 @@ const profileEditorState = {
   draft: null,
   notice: null,
   schemaCache: new Map(),
+  schemaRefreshSeq: 0,
 };
 
 const WORKDIR_STRATEGIES = [
@@ -426,12 +427,12 @@ function configFieldHtml(field, value) {
 function configFieldValue(profile, fieldId) {
   if (fieldId === "model") return profile.default_model || "";
   if (fieldId === "reasoning_effort") return profile.reasoning_effort || "";
-  return profile.config_options[fieldId] || "";
+  return profile.config_options?.[fieldId] || "";
 }
 
 function extraConfigLines(schema, profile) {
   const visible = new Set(profileConfigFields(schema, profile).map((field) => field.id));
-  return Object.entries(profile.config_options)
+  return Object.entries(profile.config_options || {})
     .filter(([key]) => !visible.has(key))
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
@@ -552,18 +553,35 @@ function debounce(callback, wait) {
   return debounced;
 }
 
-async function refreshDynamicFields(form) {
-  const draft = collectProfileForm(form);
-  const requestedAgentType = draft.agent_type;
-  profileEditorState.draft = draft;
+async function refreshDynamicFields(form, retryDepth = 0) {
+  const refreshId = ++profileEditorState.schemaRefreshSeq;
   const target = form.querySelector("#profile-config-fields");
   if (!target) return;
-  target.innerHTML = `<div class="empty-state wide">正在加载配置字段。</div>`;
-  const schema = await fetchProfileSchema(requestedAgentType);
-  const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
-  if (currentAgentType !== requestedAgentType) return;
-  target.dataset.schemaAgent = requestedAgentType || "";
-  target.innerHTML = configFieldsHtml(schema, draft);
+
+  try {
+    const draft = collectProfileForm(form, { prune: false });
+    const requestedAgentType = String(draft.agent_type || "").trim();
+    profileEditorState.draft = draft;
+    target.innerHTML = `<div class="empty-state wide">正在加载配置字段。</div>`;
+    const schema = await fetchProfileSchema(requestedAgentType);
+    if (refreshId !== profileEditorState.schemaRefreshSeq) return;
+
+    const currentAgentType = String(form.querySelector('[name="agent_type"]')?.value || "").trim();
+    if (currentAgentType !== requestedAgentType) {
+      if (retryDepth >= 4) {
+        target.dataset.schemaAgent = currentAgentType || "";
+        target.innerHTML = configFieldsHtml(schema, collectProfileForm(form, { prune: false }));
+        return;
+      }
+      return refreshDynamicFields(form, retryDepth + 1);
+    }
+
+    target.dataset.schemaAgent = currentAgentType || "";
+    target.innerHTML = configFieldsHtml(schema, collectProfileForm(form, { prune: false }));
+  } catch (error) {
+    if (refreshId !== profileEditorState.schemaRefreshSeq) return;
+    target.innerHTML = `<div class="empty-state wide">配置字段加载失败：${escapeHtml(error.message || "未知错误")}</div>`;
+  }
 }
 
 async function ensureDynamicFieldsFresh(form) {
@@ -663,7 +681,7 @@ async function deleteProfile(content, profileId) {
   }
 }
 
-function collectProfileForm(form) {
+function collectProfileForm(form, { prune = true } = {}) {
   const fields = new FormData(form);
   const rawId = String(fields.get("id") || "").trim();
   const profile = normalizeProfile({
@@ -700,7 +718,7 @@ function collectProfileForm(form) {
     assignConfigField(profile, key, value);
   }
 
-  return pruneProfile(profile);
+  return prune ? pruneProfile(profile) : profile;
 }
 
 function assignConfigField(profile, key, value) {
@@ -709,6 +727,7 @@ function assignConfigField(profile, key, value) {
   } else if (key === "reasoning_effort") {
     profile.reasoning_effort = value;
   } else {
+    if (!profile.config_options) profile.config_options = {};
     profile.config_options[key] = value;
   }
 }
