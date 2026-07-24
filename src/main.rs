@@ -1045,7 +1045,10 @@ async fn main() -> anyhow::Result<()> {
                 .route("/health", axum::routing::get(|| async { "ok" }))
                 .merge(openab_gateway::web_admin::router())
                 .merge(openab_gateway::session_admin::router(pool.clone()))
-                .merge(openab_gateway::agent_profile_admin::router(profile_service.clone()))
+                .merge(openab_gateway::agent_profile_admin::router_with_pool(
+                    profile_service.clone(),
+                    pool.clone(),
+                ))
                 .merge(openab_gateway::config_admin::router(config_manager.clone()));
 
             #[cfg(feature = "telegram")]

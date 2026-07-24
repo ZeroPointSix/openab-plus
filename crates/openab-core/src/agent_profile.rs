@@ -2,6 +2,7 @@ use crate::config::AgentConfig;
 use crate::profile_store::ProfileStore;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashMap};
@@ -166,14 +167,38 @@ pub struct AgentSummary {
     pub default_profile: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct AgentConfigField {
+    #[serde(alias = "key")]
     pub id: String,
     pub label: String,
+    #[serde(alias = "type")]
     pub kind: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub options: Vec<String>,
+    #[serde(default)]
     pub dynamic: bool,
+}
+
+impl Serialize for AgentConfigField {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let field_count = if self.options.is_empty() { 7 } else { 8 };
+        let mut state = serializer.serialize_struct("AgentConfigField", field_count)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("key", &self.id)?;
+        state.serialize_field("label", &self.label)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("type", &self.kind)?;
+        if !self.options.is_empty() {
+            state.serialize_field("options", &self.options)?;
+        }
+        state.serialize_field("dynamic", &self.dynamic)?;
+        state.serialize_field("apply_after_start", &false)?;
+        state.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1014,6 +1039,26 @@ mod tests {
     }
 
     #[test]
+    fn config_field_serializes_legacy_and_gateway_schema_names() {
+        let field = AgentConfigField {
+            id: "reasoning_effort".into(),
+            label: "Reasoning Effort".into(),
+            kind: "select".into(),
+            options: vec!["low".into(), "medium".into(), "high".into()],
+            dynamic: true,
+        };
+
+        let value = serde_json::to_value(field).expect("serialize field");
+
+        assert_eq!(value["id"], "reasoning_effort");
+        assert_eq!(value["key"], "reasoning_effort");
+        assert_eq!(value["kind"], "select");
+        assert_eq!(value["type"], "select");
+        assert_eq!(value["apply_after_start"], false);
+        assert_eq!(value["options"], json_vec(["low", "medium", "high"]));
+    }
+
+    #[test]
     fn capability_schema_is_profile_derived() {
         let mut profile = AgentProfile::new("codex", "Codex", "codex");
         profile.default_model = Some("gpt-5".into());
@@ -1036,5 +1081,14 @@ mod tests {
             .fields
             .iter()
             .any(|field| field.id == "approval_policy" && field.dynamic));
+    }
+
+    fn json_vec(values: [&str; 3]) -> serde_json::Value {
+        serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| serde_json::Value::String(value.to_string()))
+                .collect(),
+        )
     }
 }

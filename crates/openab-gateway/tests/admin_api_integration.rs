@@ -6,10 +6,30 @@
 mod common;
 
 use common::{spawn_admin_server, AdminTestEnv};
+use openab_core::acp::protocol::{ConfigOption, ConfigOptionValue};
 use openab_core::agent_profile::AgentProfile;
 use openab_core::session_event::SessionEventKind;
-use openab_core::session_snapshot::SessionSnapshot;
+use openab_core::session_snapshot::{SessionSnapshot, SessionStatus};
 use serde_json::{json, Value};
+
+fn config_option(id: &str, name: &str, current_value: &str, values: &[&str]) -> ConfigOption {
+    ConfigOption {
+        id: id.into(),
+        name: name.into(),
+        description: None,
+        category: None,
+        option_type: "enum".into(),
+        current_value: current_value.into(),
+        options: values
+            .iter()
+            .map(|value| ConfigOptionValue {
+                value: (*value).into(),
+                name: (*value).into(),
+                description: None,
+            })
+            .collect(),
+    }
+}
 
 #[tokio::test]
 async fn sessions_list_and_detail_happy_path() {
@@ -264,6 +284,125 @@ async fn profiles_auth_rejects_missing_and_invalid_tokens() {
         .await
         .expect("profiles bad token");
     assert_eq!(bad_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn config_schema_prefers_live_agent_options() {
+    let env = AdminTestEnv::new().await;
+    let pool = env.pool();
+    let mut fallback_profile = AgentProfile::new("opencode-static", "OpenCode Static", "opencode");
+    fallback_profile.default_model = Some("static-only".into());
+    env.profile_service()
+        .upsert(fallback_profile)
+        .await
+        .expect("seed fallback profile");
+
+    let mut snapshot = SessionSnapshot::new(
+        "slack:live-opencode".into(),
+        "opencode".into(),
+        "/workspace".into(),
+        None,
+        None,
+        Some("opencode/latest".into()),
+        None,
+    );
+    snapshot.set_status(SessionStatus::Running);
+    pool.seed_session_snapshot_for_test(snapshot).await;
+    pool.seed_config_options_for_test(
+        "slack:live-opencode",
+        vec![
+            config_option(
+                "model",
+                "Model",
+                "opencode/latest",
+                &["opencode/latest", "opencode/canary"],
+            ),
+            config_option(
+                "reasoning_effort",
+                "Reasoning Effort",
+                "medium",
+                &["low", "medium", "high"],
+            ),
+        ],
+    )
+    .await;
+
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let schema = client
+        .get(format!(
+            "{}/api/v1/agents/opencode/config-schema",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("config schema")
+        .json::<Value>()
+        .await
+        .expect("schema json");
+
+    assert_eq!(schema["source"], "agent-session-config-options");
+    let fields = schema["fields"].as_array().expect("schema fields");
+    let model = fields
+        .iter()
+        .find(|field| field["key"] == "model")
+        .expect("model field");
+    assert_eq!(model["id"], "model");
+    assert_eq!(model["kind"], "enum");
+    assert_eq!(model["type"], "enum");
+    assert_eq!(model["apply_after_start"], false);
+    let model_options = model["options"].as_array().expect("model options");
+    assert!(model_options
+        .iter()
+        .any(|value| value.as_str() == Some("opencode/canary")));
+    assert!(!model_options
+        .iter()
+        .any(|value| value.as_str() == Some("static-only")));
+    assert!(fields
+        .iter()
+        .any(|field| field["key"] == "reasoning_effort" && field["type"] == "enum"));
+}
+
+#[tokio::test]
+async fn config_schema_falls_back_without_live_agent() {
+    let env = AdminTestEnv::new().await;
+    let mut profile = AgentProfile::new("codex-main", "Codex Main", "codex");
+    profile.default_model = Some("gpt-5".into());
+    env.profile_service()
+        .upsert(profile)
+        .await
+        .expect("seed fallback profile");
+
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let schema = client
+        .get(format!(
+            "{}/api/v1/agents/codex/config-schema",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("config schema")
+        .json::<Value>()
+        .await
+        .expect("schema json");
+
+    assert_eq!(schema["source"], "profile-store-fallback");
+    let fields = schema["fields"].as_array().expect("schema fields");
+    let model = fields
+        .iter()
+        .find(|field| field["key"] == "model")
+        .expect("model field");
+    assert_eq!(model["id"], "model");
+    assert_eq!(model["type"], "enum");
+    assert_eq!(model["apply_after_start"], false);
+    assert!(model["options"]
+        .as_array()
+        .expect("model options")
+        .iter()
+        .any(|value| value.as_str() == Some("gpt-5")));
 }
 
 #[tokio::test]

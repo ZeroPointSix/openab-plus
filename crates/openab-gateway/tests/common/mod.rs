@@ -101,8 +101,8 @@ pub fn unified_admin_router(
 ) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .merge(session_admin::router(pool))
-        .merge(agent_profile_admin::router(profile_service))
+        .merge(session_admin::router(pool.clone()))
+        .merge(agent_profile_admin::router_with_pool(profile_service, pool))
 }
 
 pub async fn spawn_admin_server(env: &AdminTestEnv) -> TestServer {
