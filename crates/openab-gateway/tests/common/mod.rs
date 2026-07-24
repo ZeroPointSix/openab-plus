@@ -9,9 +9,13 @@ use openab_core::profile_store::ProfileStore;
 use openab_gateway::{agent_profile_admin, session_admin};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tempfile::TempDir;
+use tokio::sync::{Mutex, MutexGuard};
 
+/// Serializes env mutation across integration tests. The guard must live for the
+/// whole `AdminTestEnv` lifetime so concurrent tests cannot restore env vars
+/// while another test's HTTP server is still handling requests.
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn env_lock() -> &'static Mutex<()> {
@@ -20,21 +24,24 @@ fn env_lock() -> &'static Mutex<()> {
 
 pub struct AdminTestEnv {
     _profile_dir: TempDir,
-    _env_guard: EnvGuard,
+    _env_lock: MutexGuard<'static, ()>,
+    previous_admin_token: Option<String>,
+    previous_profiles_path: Option<String>,
     pool: Arc<SessionPool>,
     profile_service: Arc<AgentProfileService>,
     pub token: String,
 }
 
-struct EnvGuard {
-    previous_admin_token: Option<String>,
-    previous_profiles_path: Option<String>,
-}
-
-impl Drop for EnvGuard {
+impl Drop for AdminTestEnv {
     fn drop(&mut self) {
-        restore_env("GATEWAY_ADMIN_TOKEN", self.previous_admin_token.take());
-        restore_env("OPENAB_AGENT_PROFILES_PATH", self.previous_profiles_path.take());
+        restore_env(
+            "GATEWAY_ADMIN_TOKEN",
+            self.previous_admin_token.take(),
+        );
+        restore_env(
+            "OPENAB_AGENT_PROFILES_PATH",
+            self.previous_profiles_path.take(),
+        );
     }
 }
 
@@ -47,7 +54,7 @@ fn restore_env(key: &str, value: Option<String>) {
 
 impl AdminTestEnv {
     pub async fn new() -> Self {
-        let _guard = env_lock().lock().expect("env lock");
+        let env_lock = env_lock().lock().await;
         let previous_admin_token = std::env::var("GATEWAY_ADMIN_TOKEN").ok();
         let previous_profiles_path = std::env::var("OPENAB_AGENT_PROFILES_PATH").ok();
 
@@ -65,10 +72,9 @@ impl AdminTestEnv {
 
         Self {
             _profile_dir: profile_dir,
-            _env_guard: EnvGuard {
-                previous_admin_token,
-                previous_profiles_path,
-            },
+            _env_lock: env_lock,
+            previous_admin_token,
+            previous_profiles_path,
             pool,
             profile_service,
             token,
