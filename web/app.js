@@ -30,6 +30,7 @@ const sessionStore = {
   sseAbort: null,
   sseConnected: false,
   unavailable: false,
+  streamNotice: "",
 
   subscribe(listener) {
     this.listeners.add(listener);
@@ -46,6 +47,7 @@ const sessionStore = {
     this.timelines.clear();
     this.unavailable = false;
     this.sseConnected = false;
+    this.streamNotice = "";
     this.notify();
   },
 
@@ -75,18 +77,43 @@ const sessionStore = {
   upsert(snapshot, eventName = null) {
     const id = sessionIdOf(snapshot);
     if (!id) return;
-    this.sessions.set(id, normalizeSession(snapshot));
+
+    const normalized = normalizeSession(snapshot);
+    this.sessions.set(id, normalized);
+
     if (eventName) {
-      const timeline = this.timelines.get(id) || [];
-      timeline.push({
-        at: snapshot.updated_at || snapshot.created_at || new Date().toISOString(),
-        event: eventName,
-        status: sessionStatus(snapshot),
-        error: snapshot.last_error || null,
-      });
-      this.timelines.set(id, timeline.slice(-20));
+      this.recordTimeline(id, normalized, eventName);
     }
     this.notify();
+  },
+
+  recordTimeline(sessionId, session, eventName) {
+    const timeline = this.timelines.get(sessionId) || [];
+
+    if (!timeline.length && session.created_at) {
+      timeline.push({
+        at: session.created_at,
+        event: "session.created",
+        status: sessionStatus(session),
+        error: null,
+      });
+    }
+
+    const isDuplicateCreated =
+      eventName === "session.created" &&
+      timeline.length === 1 &&
+      timeline[0].event === "session.created";
+
+    if (!isDuplicateCreated) {
+      timeline.push({
+        at: session.updated_at || session.created_at || new Date().toISOString(),
+        event: eventName,
+        status: sessionStatus(session),
+        error: session.last_error || null,
+      });
+    }
+
+    this.timelines.set(sessionId, timeline.slice(-20));
   },
 
   timeline(sessionId) {
@@ -114,6 +141,7 @@ const sessionStore = {
       this.notify();
       return false;
     }
+
     this.unavailable = false;
     this.sessions.clear();
     for (const session of sessions) this.upsert(session);
@@ -125,15 +153,20 @@ const sessionStore = {
     this.stopSSE();
     const controller = new AbortController();
     this.sseAbort = controller;
+    this.streamNotice = "";
+
     void runSessionEventStream({
       getToken,
       signal: controller.signal,
       onOpen: () => {
         this.sseConnected = true;
+        this.streamNotice = "";
+        updateTopbarMeta();
         this.notify();
       },
       onClose: () => {
         this.sseConnected = false;
+        updateTopbarMeta();
         this.notify();
       },
       onEvent: (eventName, payload) => this.handleSSEEvent(eventName, payload),
@@ -153,13 +186,26 @@ const sessionStore = {
 
   handleSSEEvent(eventName, payload) {
     if (!payload || typeof payload !== "object") return;
-    if (payload.error && !payload.snapshot) return;
-    if (payload.snapshot) {
-      this.upsert(payload.snapshot, eventName || payload.event || "update");
+
+    if (payload.error && !payload.snapshot) {
+      this.streamNotice = payload.error;
+      if (payload.skipped !== undefined || eventName === "error") {
+        void this.sync();
+      } else {
+        this.notify();
+      }
       return;
     }
-    if (payload.session_id || payload.sessionId) {
-      const existing = this.get(payload.session_id || payload.sessionId);
+
+    if (payload.snapshot) {
+      const event = eventName || payload.event || "update";
+      this.upsert(payload.snapshot, event);
+      return;
+    }
+
+    const id = payload.session_id || payload.sessionId;
+    if (id) {
+      const existing = this.get(id);
       if (existing) {
         this.upsert({ ...existing, ...payload }, eventName || "update");
       }
@@ -274,8 +320,10 @@ async function bootstrapStoredToken() {
 async function enterDashboard() {
   applyRouteFromHash();
   renderShell();
-  await sessionStore.sync();
-  sessionStore.startSSE(() => state.token);
+  const hasSessionApi = await sessionStore.sync();
+  if (hasSessionApi) {
+    sessionStore.startSSE(() => state.token);
+  }
   loadRoute();
 }
 
@@ -306,10 +354,7 @@ function renderShell() {
         <header class="topbar">
           <div>
             <h1>${escapeHtml(pageTitle)}</h1>
-            <div class="topbar-meta">
-              <span class="status-pill"><span class="status-dot"></span>Admin token 已启用</span>
-              ${sessionStore.sseConnected ? '<span class="status-pill live"><span class="status-dot"></span>SSE 已连接</span>' : ""}
-            </div>
+            <div class="topbar-meta">${topbarMetaHtml()}</div>
           </div>
           <button id="logout-button" class="ghost-button" type="button">退出</button>
         </header>
@@ -318,6 +363,18 @@ function renderShell() {
     </div>`;
 
   document.querySelector("#logout-button").addEventListener("click", () => logout());
+}
+
+function updateTopbarMeta() {
+  const meta = document.querySelector(".topbar-meta");
+  if (meta) meta.innerHTML = topbarMetaHtml();
+}
+
+function topbarMetaHtml() {
+  return `
+    <span class="status-pill"><span class="status-dot"></span>Admin token 已启用</span>
+    ${sessionStore.sseConnected ? '<span class="status-pill live"><span class="status-dot"></span>SSE 已连接</span>' : ""}
+    ${sessionStore.streamNotice ? `<span class="status-pill warning">${escapeHtml(sessionStore.streamNotice)}</span>` : ""}`;
 }
 
 function navActiveClass(key) {
@@ -476,16 +533,7 @@ async function renderSessionDetail(content) {
           <button class="ghost-button" type="button" data-back-sessions>返回列表</button>
         </div>
       </div>
-      <div class="panel-body detail-grid">
-        <div><strong>Agent</strong><p>${escapeHtml(sessionAgent(session))}</p></div>
-        <div><strong>来源</strong><p>${escapeHtml(sessionPlatform(session))}</p></div>
-        <div><strong>Thread</strong><p class="code-ish">${escapeHtml(sessionThread(session))}</p></div>
-        <div><strong>工作目录</strong><p class="code-ish">${escapeHtml(session.workdir || "-")}</p></div>
-        <div><strong>Profile</strong><p>${escapeHtml(session.profile_name || session.profile_id || "-")}</p></div>
-        <div><strong>模型</strong><p>${escapeHtml(session.model || "-")}</p></div>
-        <div><strong>创建时间</strong><p>${escapeHtml(formatTime(session.created_at))}</p></div>
-        <div><strong>最近活动</strong><p>${escapeHtml(formatTime(session.updated_at))}</p></div>
-      </div>
+      <div class="panel-body detail-grid">${sessionDetailGrid(session)}</div>
     </section>
     <section class="panel">
       <div class="panel-header"><h2>配置快照</h2></div>
@@ -565,8 +613,12 @@ async function runSessionEventStream({ getToken, signal, onOpen, onClose, onEven
         logout("Admin token 已失效或没有权限。");
         return;
       }
+      if (response.status === 404) return;
       if (!response.ok) {
         throw new Error(`SSE unavailable (${response.status})`);
+      }
+      if (!response.body) {
+        throw new Error("SSE response has no body");
       }
 
       attempt = 0;
@@ -617,13 +669,15 @@ function consumeSSEBuffer(buffer, onEvent) {
 
 function parseSSEChunk(chunk) {
   const lines = chunk.split("\n");
+  const dataLines = [];
   let event = "";
-  let data = "";
+
   for (const line of lines) {
     if (line.startsWith("event:")) event = line.slice(6).trim();
-    if (line.startsWith("data:")) data += line.slice(5).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
   }
-  return { event, data };
+
+  return { event, data: dataLines.join("\n") };
 }
 
 async function validateAdminToken() {
@@ -733,6 +787,10 @@ function sessionIdOf(session) {
   return valueOf(session, ["session_id", "id", "sessionId"]) || "";
 }
 
+function sessionAcpId(session) {
+  return valueOf(session, ["acp_session_id", "acpSessionId", "acp.id"]) || "-";
+}
+
 function sessionStatus(session) {
   return String(valueOf(session, ["status", "state", "phase"]) || "unknown").toLowerCase();
 }
@@ -746,7 +804,15 @@ function sessionPlatform(session) {
 }
 
 function sessionThread(session) {
-  return valueOf(session, ["source.thread_id", "thread_id", "threadId", "channel_id", "channelId"]) || "-";
+  return valueOf(session, ["source.thread_id", "thread_id", "threadId"]) || "-";
+}
+
+function sessionChannel(session) {
+  return valueOf(session, ["source.channel_id", "source.channelId", "channel_id", "channelId"]) || "-";
+}
+
+function sessionUser(session) {
+  return valueOf(session, ["source.user_id", "source.userId", "user_id", "userId"]) || "-";
 }
 
 function compareSessions(a, b) {
@@ -779,15 +845,50 @@ function filterSelect(name, label, values, current) {
     </label>`;
 }
 
+function sessionDetailGrid(session) {
+  const items = [
+    ["Session ID", sessionIdOf(session), true],
+    ["ACP Session", sessionAcpId(session), true],
+    ["Agent", sessionAgent(session), false],
+    ["Profile", session.profile_name || session.profile_id || "-", false],
+    ["工作目录", session.workdir || "-", true],
+    ["来源", sessionPlatform(session), false],
+    ["Channel", sessionChannel(session), true],
+    ["Thread", sessionThread(session), true],
+    ["User", sessionUser(session), true],
+    ["模型", session.model || "-", false],
+    ["创建时间", formatTime(session.created_at), false],
+    ["最近活动", formatTime(session.updated_at), false],
+  ];
+
+  return items.map(([label, value, code]) => `
+    <div>
+      <strong>${escapeHtml(label)}</strong>
+      <p class="${code ? "code-ish" : ""}">${escapeHtml(value)}</p>
+    </div>`).join("");
+}
+
 function configSnapshot(session) {
-  return {
+  const snapshot = {
     model: session.model || null,
+    reasoning_effort: valueOf(session, ["reasoning_effort", "reasoningEffort", "config.reasoning_effort"]) || null,
     profile_id: session.profile_id || null,
     profile_name: session.profile_name || null,
     status: sessionStatus(session),
     workdir: session.workdir || null,
     source: session.source || null,
   };
+
+  const acpSessionId = sessionAcpId(session);
+  if (acpSessionId !== "-") snapshot.acp_session_id = acpSessionId;
+  if (session.external_url) snapshot.external_url = session.external_url;
+
+  for (const key of ["approval_policy", "sandbox_mode", "network_access"]) {
+    const value = valueOf(session, [key, `config.${key}`]);
+    if (value !== undefined) snapshot[key] = value;
+  }
+
+  return snapshot;
 }
 
 function metricCard(label, value) {
