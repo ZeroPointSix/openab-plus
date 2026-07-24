@@ -1024,6 +1024,13 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
             let gw_state = Arc::new(gw_state_inner);
+            let profile_service = Arc::new(openab_core::agent_profile::AgentProfileService::from_env());
+            let config_manager = openab_gateway::config_admin::ConfigManager::from_env();
+            config_manager
+                .set_runtime_applier(openab_gateway::config_admin::RuntimeConfigApplier::new(
+                    gw_state.clone(),
+                ))
+                .await;
 
             // Phase 1 L1 audit (#1356): warn if any active webhook platform has
             // no transport authentication configured. Called after
@@ -1036,7 +1043,10 @@ async fn main() -> anyhow::Result<()> {
             // Build axum router with platform webhook routes
             let mut app = axum::Router::new()
                 .route("/health", axum::routing::get(|| async { "ok" }))
-                .merge(openab_gateway::session_admin::router(pool.clone()));
+                .merge(openab_gateway::web_admin::router())
+                .merge(openab_gateway::session_admin::router(pool.clone()))
+                .merge(openab_gateway::agent_profile_admin::router(profile_service.clone()))
+                .merge(openab_gateway::config_admin::router(config_manager.clone()));
 
             #[cfg(feature = "telegram")]
             if gw_state.telegram_bot_token.is_some() {

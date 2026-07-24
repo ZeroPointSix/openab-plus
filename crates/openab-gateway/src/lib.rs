@@ -5,6 +5,7 @@ pub mod session_admin;
 pub(crate) mod media;
 pub mod schema;
 pub mod store;
+pub mod web_admin;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -833,6 +834,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     }
 
     let app = app
+        .merge(web_admin::router())
         .merge(agent_profile_admin::router(profile_service.clone()))
         .merge(config_admin::router(config_manager.clone()))
         .with_state(state.clone());
