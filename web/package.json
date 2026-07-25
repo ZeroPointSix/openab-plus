@@ -4,6 +4,7 @@
   "version": "0.1.9",
   "type": "module",
   "scripts": {
-    "lint": "node --check app.js && node --check profiles.js"
+    "lint": "node --check app.js && node --check profiles.js",
+    "test:profile-schema": "node ../scripts/profile-ui-schema-smoke.mjs"
   }
 }
