@@ -3585,6 +3585,10 @@ mod tests {
         assert!(text.contains("url: https://cdn.discordapp.com/attachments/demo.mp4"));
     }
 
+    fn display_content_type(content_type: Option<&str>) -> &str {
+        content_type.unwrap_or("unknown")
+    }
+
     #[test]
     fn image_attachment_block_includes_url_and_metadata() {
         // Simulates the format string used in the image attachment handler.
@@ -3596,7 +3600,7 @@ mod tests {
         let text = format!(
             "[Image attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {} (expires ~24h)",
             filename,
-            content_type.unwrap_or("unknown"),
+            display_content_type(content_type),
             size,
             url,
         );
@@ -3615,7 +3619,7 @@ mod tests {
         let text = format!(
             "[Image attachment]\nfilename: {}\ncontent_type: {}\nsize_bytes: {}\nurl: {} (expires ~24h)",
             "photo.jpg",
-            content_type.unwrap_or("unknown"),
+            display_content_type(content_type),
             99999,
             "https://cdn.discordapp.com/attachments/1/2/photo.jpg",
         );

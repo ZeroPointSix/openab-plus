@@ -973,8 +973,10 @@ mod tests {
             .await
             .unwrap();
         let service = AgentProfileService::new(store);
-        let mut overrides = ProfileSessionOverrides::default();
-        overrides.model = Some("gpt-5.1".into());
+        let overrides = ProfileSessionOverrides {
+            model: Some("gpt-5.1".into()),
+            ..Default::default()
+        };
 
         let resolved = service
             .resolve_for_session(

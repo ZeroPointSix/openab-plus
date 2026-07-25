@@ -102,6 +102,27 @@ impl SessionPool {
         self.snapshots.read().await.get(session_id).cloned()
     }
 
+    pub async fn mark_profile_deleted(&self, profile_id: &str) {
+        let updated_snapshots: Vec<_> = {
+            let mut snapshots = self.snapshots.write().await;
+            snapshots
+                .values_mut()
+                .filter_map(|snapshot| {
+                    if snapshot.mark_profile_deleted(profile_id) {
+                        Some(snapshot.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for snapshot in updated_snapshots {
+            self.session_events
+                .publish(SessionEventKind::ConfigChanged, snapshot);
+        }
+    }
+
     pub async fn get_or_create(
         &self,
         thread_id: &str,
@@ -621,6 +642,35 @@ mod tests {
 
         let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
         assert_eq!(snapshot.status, SessionStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn mark_profile_deleted_preserves_existing_session_snapshot() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        outer
+            .seed_session_snapshot_for_test(SessionSnapshot::new(
+                "slack:profile-thread".into(),
+                "codex".into(),
+                "/workspace".into(),
+                Some("codex-main".into()),
+                Some("Codex Main".into()),
+                Some("gpt-5".into()),
+                None,
+            ))
+            .await;
+
+        outer.mark_profile_deleted("codex-main").await;
+
+        let snapshot = outer
+            .session_snapshot("slack:profile-thread")
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.profile_id.as_deref(), Some("codex-main"));
+        assert_eq!(snapshot.profile_name.as_deref(), Some("Codex Main"));
+        assert_eq!(
+            snapshot.profile_status,
+            Some(crate::session_snapshot::ProfileSnapshotStatus::Deleted)
+        );
     }
 
     #[tokio::test]

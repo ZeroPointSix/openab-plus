@@ -12,6 +12,12 @@ pub enum SessionStatus {
     Exited,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSnapshotStatus {
+    Deleted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSource {
     pub platform: String,
@@ -43,6 +49,8 @@ pub struct SessionSnapshot {
     pub profile_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_status: Option<ProfileSnapshotStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub status: SessionStatus,
@@ -73,6 +81,7 @@ impl SessionSnapshot {
             workdir,
             profile_id,
             profile_name,
+            profile_status: None,
             model,
             status: SessionStatus::Idle,
             last_error: None,
@@ -107,6 +116,18 @@ impl SessionSnapshot {
     pub fn set_model(&mut self, model: Option<String>) {
         self.model = model;
         self.updated_at = Utc::now();
+    }
+
+    pub fn mark_profile_deleted(&mut self, deleted_profile_id: &str) -> bool {
+        if self.profile_id.as_deref() != Some(deleted_profile_id) {
+            return false;
+        }
+        if self.profile_status == Some(ProfileSnapshotStatus::Deleted) {
+            return false;
+        }
+        self.profile_status = Some(ProfileSnapshotStatus::Deleted);
+        self.updated_at = Utc::now();
+        true
     }
 }
 
@@ -154,6 +175,28 @@ mod tests {
             url.as_deref(),
             Some("https://openab.example/sessions/slack%3A1729.42")
         );
+    }
+
+    #[test]
+    fn profile_deleted_marker_preserves_snapshot_copy() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            Some("codex-default".into()),
+            Some("Codex Default".into()),
+            Some("gpt-5".into()),
+            None,
+        );
+
+        assert!(snapshot.mark_profile_deleted("codex-default"));
+        assert_eq!(snapshot.profile_id.as_deref(), Some("codex-default"));
+        assert_eq!(snapshot.profile_name.as_deref(), Some("Codex Default"));
+        assert_eq!(
+            snapshot.profile_status,
+            Some(ProfileSnapshotStatus::Deleted)
+        );
+        assert!(!snapshot.mark_profile_deleted("other-profile"));
     }
 
     #[test]
