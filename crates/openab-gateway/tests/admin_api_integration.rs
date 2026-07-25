@@ -70,7 +70,9 @@ async fn sessions_list_and_detail_happy_path() {
         .expect("sessions json");
     assert_eq!(list.len(), 2);
     assert!(list.iter().any(|row| row["session_id"] == "slack:thread-1"));
-    assert!(list.iter().any(|row| row["session_id"] == "discord:thread-2"));
+    assert!(list
+        .iter()
+        .any(|row| row["session_id"] == "discord:thread-2"));
 
     // Optional query params are accepted (currently ignored by the handler).
     let filtered = client
@@ -155,7 +157,9 @@ async fn profiles_crud_default_and_validate() {
     assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
     let body = invalid.json::<Value>().await.expect("validation body");
     assert_eq!(body["validation"]["ok"], false);
-    assert!(body["validation"]["errors"].as_array().is_some_and(|e| !e.is_empty()));
+    assert!(body["validation"]["errors"]
+        .as_array()
+        .is_some_and(|e| !e.is_empty()));
 
     let created = client
         .post(format!("{}/api/v1/agent-profiles", server.base_url))
@@ -262,6 +266,99 @@ async fn profiles_crud_default_and_validate() {
         .await
         .expect("read deleted");
     assert_eq!(gone.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_profile_marks_existing_session_snapshot_deleted() {
+    let env = AdminTestEnv::new().await;
+    env.profile_service()
+        .upsert(AgentProfile::new("codex-main", "Codex Main", "codex"))
+        .await
+        .expect("seed profile");
+    env.pool()
+        .seed_session_snapshot_for_test(SessionSnapshot::new(
+            "slack:thread-profile".into(),
+            "codex".into(),
+            "/workspace".into(),
+            Some("codex-main".into()),
+            Some("Codex Main".into()),
+            Some("gpt-5".into()),
+            None,
+        ))
+        .await;
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+
+    let deleted = client
+        .delete(format!(
+            "{}/api/v1/agent-profiles/codex-main",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("delete profile")
+        .json::<Value>()
+        .await
+        .expect("delete json");
+    assert_eq!(deleted["deleted"], true);
+
+    let detail = client
+        .get(format!(
+            "{}/api/v1/sessions/{}",
+            server.base_url,
+            urlencoding::encode("slack:thread-profile")
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get session")
+        .json::<Value>()
+        .await
+        .expect("detail json");
+    assert_eq!(detail["profile_id"], "codex-main");
+    assert_eq!(detail["profile_name"], "Codex Main");
+    assert_eq!(detail["profile_status"], "deleted");
+
+    let sessions = client
+        .get(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("list sessions")
+        .json::<Vec<Value>>()
+        .await
+        .expect("sessions json");
+    let listed_session = sessions
+        .iter()
+        .find(|session| session["session_id"] == "slack:thread-profile")
+        .expect("listed session");
+    assert_eq!(listed_session["profile_id"], "codex-main");
+    assert_eq!(listed_session["profile_name"], "Codex Main");
+    assert_eq!(listed_session["profile_status"], "deleted");
+
+    let profiles = client
+        .get(format!("{}/api/v1/agent-profiles", server.base_url))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("list profiles")
+        .json::<Value>()
+        .await
+        .expect("profiles json");
+    if let Some(listed_profiles) = profiles["profiles"].as_array() {
+        assert!(
+            listed_profiles
+                .iter()
+                .all(|profile| profile["id"] != "codex-main"),
+            "deleted profile should not remain in list: {profiles:?}"
+        );
+    } else {
+        assert!(
+            profiles.get("profiles").is_none(),
+            "unexpected profiles response: {profiles:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -420,13 +517,11 @@ async fn sse_emits_session_created_with_id_and_status() {
         .await
         .expect("open sse");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert!(
-        response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.contains("text/event-stream"))
-    );
+    assert!(response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream")));
 
     let snapshot = SessionSnapshot::new(
         "slack:sse-thread".into(),
@@ -465,10 +560,12 @@ async fn sse_emits_session_created_with_id_and_status() {
 
 #[tokio::test]
 async fn unified_router_mounts_session_and_profile_admin_routes() {
-    assert!(
-        !openab_gateway::STANDALONE_SESSION_ADMIN_MOUNTED,
-        "standalone gateway must not mount session admin routes"
-    );
+    const {
+        assert!(
+            !openab_gateway::STANDALONE_SESSION_ADMIN_MOUNTED,
+            "standalone gateway must not mount session admin routes"
+        );
+    };
 
     let env = AdminTestEnv::new().await;
     let server = spawn_admin_server(&env).await;

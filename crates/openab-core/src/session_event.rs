@@ -12,6 +12,7 @@ pub enum SessionEventKind {
     StatusChanged,
     ConfigChanged,
     Error,
+    ProfileChanged,
     Exited,
 }
 
@@ -22,6 +23,7 @@ impl SessionEventKind {
             Self::StatusChanged => "status_changed",
             Self::ConfigChanged => "config_changed",
             Self::Error => "error",
+            Self::ProfileChanged => "profile_changed",
             Self::Exited => "exited",
         }
     }
@@ -89,10 +91,23 @@ mod tests {
 
     #[test]
     fn event_names_match_sse_contract() {
-        assert_eq!(SessionEventKind::SessionCreated.as_sse_event(), "session.created");
-        assert_eq!(SessionEventKind::StatusChanged.as_sse_event(), "status_changed");
-        assert_eq!(SessionEventKind::ConfigChanged.as_sse_event(), "config_changed");
+        assert_eq!(
+            SessionEventKind::SessionCreated.as_sse_event(),
+            "session.created"
+        );
+        assert_eq!(
+            SessionEventKind::StatusChanged.as_sse_event(),
+            "status_changed"
+        );
+        assert_eq!(
+            SessionEventKind::ConfigChanged.as_sse_event(),
+            "config_changed"
+        );
         assert_eq!(SessionEventKind::Error.as_sse_event(), "error");
+        assert_eq!(
+            SessionEventKind::ProfileChanged.as_sse_event(),
+            "profile_changed"
+        );
         assert_eq!(SessionEventKind::Exited.as_sse_event(), "exited");
     }
 

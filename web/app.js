@@ -851,7 +851,7 @@ function sessionDetailGrid(session) {
     ["Session ID", sessionIdOf(session), true],
     ["ACP Session", sessionAcpId(session), true],
     ["Agent", sessionAgent(session), false],
-    ["Profile", session.profile_name || session.profile_id || "-", false],
+    ["Profile", sessionProfileLabel(session), false],
     ["工作目录", session.workdir || "-", true],
     ["来源", sessionPlatform(session), false],
     ["Channel", sessionChannel(session), true],
@@ -875,6 +875,7 @@ function configSnapshot(session) {
     reasoning_effort: valueOf(session, ["reasoning_effort", "reasoningEffort", "config.reasoning_effort"]) || null,
     profile_id: session.profile_id || null,
     profile_name: session.profile_name || null,
+    profile_status: sessionProfileStatus(session) || null,
     status: sessionStatus(session),
     workdir: session.workdir || null,
     source: session.source || null,
@@ -946,7 +947,7 @@ function sessionsTable(sessions, { clickable = false } = {}) {
       <td>${escapeHtml(sessionAgent(session))}</td>
       <td>${escapeHtml(sessionPlatform(session))}</td>
       <td class="code-ish">${escapeHtml(session.workdir || "-")}</td>
-      <td>${escapeHtml(session.profile_name || session.profile_id || "-")}</td>
+      <td>${escapeHtml(sessionProfileLabel(session))}</td>
       <td>${escapeHtml(session.model || "-")}</td>
       <td>${escapeHtml(formatTime(session.updated_at || session.created_at))}</td>
     </tr>`;
@@ -989,6 +990,17 @@ function timelinePanel(events) {
       </div>
       ${entry.error ? `<p class="timeline-error">${escapeHtml(entry.error)}</p>` : ""}
     </li>`).join("")}</ol>`;
+}
+
+function sessionProfileStatus(session) {
+  return String(valueOf(session, ["profile_status", "profileStatus"]) || "").toLowerCase();
+}
+
+function sessionProfileLabel(session) {
+  const label = session.profile_name || session.profile_id || "-";
+  if (label === "-") return label;
+  if (sessionProfileStatus(session) === "deleted") return `${label} (deleted)`;
+  return label;
 }
 
 function statusBadge(status) {

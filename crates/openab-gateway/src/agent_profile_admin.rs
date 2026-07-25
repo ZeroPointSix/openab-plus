@@ -12,32 +12,32 @@ use std::sync::Arc;
 
 type CoreSessionPool = Arc<openab_core::acp::SessionPool>;
 type LiveConfigSchemaResolver = Arc<
-    dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<AgentConfigSchema>> + Send>>
-        + Send
-        + Sync,
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<AgentConfigSchema>> + Send>> + Send + Sync,
 >;
 
 pub fn router<S>(service: Arc<AgentProfileService>) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    router_with_live_schema_resolver(service, None)
+    router_with_live_schema_resolver(service, None, None)
 }
 
 pub fn router_with_pool<S>(service: Arc<AgentProfileService>, pool: CoreSessionPool) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
+    let profile_status_pool = Some(pool.clone());
     let resolver: LiveConfigSchemaResolver = Arc::new(move |agent: String| {
         let pool = pool.clone();
         Box::pin(async move { pool.config_schema_for_agent(&agent).await })
     });
-    router_with_live_schema_resolver(service, Some(resolver))
+    router_with_live_schema_resolver(service, Some(resolver), profile_status_pool)
 }
 
 pub fn router_with_live_schema_resolver<S>(
     service: Arc<AgentProfileService>,
     live_schema: Option<LiveConfigSchemaResolver>,
+    profile_status_pool: Option<CoreSessionPool>,
 ) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -47,6 +47,7 @@ where
     let get_service = service.clone();
     let update_service = service.clone();
     let delete_service = service.clone();
+    let delete_profile_status_pool = profile_status_pool;
     let validate_service = service.clone();
     let get_default_service = service.clone();
     let set_default_service = service.clone();
@@ -84,7 +85,14 @@ where
                 .put(move |headers, path, body| {
                     update_profile(headers, path, body, update_service.clone())
                 })
-                .delete(move |headers, path| delete_profile(headers, path, delete_service.clone())),
+                .delete(move |headers, path| {
+                    delete_profile(
+                        headers,
+                        path,
+                        delete_service.clone(),
+                        delete_profile_status_pool.clone(),
+                    )
+                }),
         )
         .route(
             "/api/v1/agent-profiles/{profile_id}/validate",
@@ -181,12 +189,18 @@ async fn delete_profile(
     headers: HeaderMap,
     Path(profile_id): Path<String>,
     service: Arc<AgentProfileService>,
+    pool: Option<CoreSessionPool>,
 ) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
     match service.delete(&profile_id).await {
-        Ok(true) => Json(Deleted { deleted: true }).into_response(),
+        Ok(true) => {
+            if let Some(pool) = pool {
+                pool.mark_profile_deleted(&profile_id).await;
+            }
+            Json(Deleted { deleted: true }).into_response()
+        }
         Ok(false) => not_found("agent profile not found"),
         Err(e) => internal_error(e),
     }
