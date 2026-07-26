@@ -20,11 +20,19 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
   ALL_VARIANTS: 'default,agentcore,antigravity,claude,codex,copilot,cursor,devin,gemini,grok,hermes,kimi,mimocode,native,opencode,pi'
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.ghcr.outputs.image_name }}
+    steps:
+      - uses: ./.github/actions/ghcr-image-name
+        id: ghcr
+
   matrix:
+    needs: prepare
     runs-on: ubuntu-latest
     outputs:
       variants: ${{ steps.resolve.outputs.variants }}
@@ -59,7 +67,7 @@ jobs:
           fi
 
   build:
-    needs: matrix
+    needs: [prepare, matrix]
     strategy:
       fail-fast: false
       matrix:
@@ -99,6 +107,8 @@ jobs:
 
       - name: Build and push by digest
         id: build
+        env:
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -123,7 +133,7 @@ jobs:
           retention-days: 1
 
   merge:
-    needs: [matrix, build]
+    needs: [prepare, matrix, build]
     strategy:
       matrix:
         variant: ${{ fromJson(needs.matrix.outputs.variants) }}
@@ -162,6 +172,7 @@ jobs:
         env:
           SUFFIX: ${{ steps.df.outputs.suffix }}
           TAG: ${{ needs.matrix.outputs.tag }}
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME}${SUFFIX}"
           docker buildx imagetools create \
@@ -172,6 +183,7 @@ jobs:
         env:
           SUFFIX: ${{ steps.df.outputs.suffix }}
           TAG: ${{ needs.matrix.outputs.tag }}
+          IMAGE_NAME: ${{ needs.prepare.outputs.image_name }}
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME}${SUFFIX}"
           echo "### 📦 \`${IMAGE}:${TAG}\`" >> "$GITHUB_STEP_SUMMARY"

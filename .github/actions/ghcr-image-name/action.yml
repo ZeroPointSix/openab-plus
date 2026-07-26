@@ -1,0 +1,12 @@
+name: GHCR image name
+description: Lowercase github.repository for GHCR image paths (Docker requires lowercase).
+outputs:
+  image_name:
+    description: Lowercase owner/repo suitable for ghcr.io
+    value: ${{ steps.out.outputs.image_name }}
+runs:
+  using: composite
+  steps:
+    - id: out
+      shell: bash
+      run: echo "image_name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"

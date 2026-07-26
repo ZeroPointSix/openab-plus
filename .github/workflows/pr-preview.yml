@@ -34,7 +34,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   resolve-pr:
@@ -49,7 +48,11 @@ jobs:
       build_args: ${{ steps.df.outputs.build_args }}
       tag_suffix: ${{ steps.df.outputs.tag_suffix }}
       target: ${{ steps.df.outputs.target }}
+      image_name: ${{ steps.ghcr.outputs.image_name }}
     steps:
+      - uses: ./.github/actions/ghcr-image-name
+        id: ghcr
+
       - name: Get PR branch
         id: pr
         env:
@@ -128,6 +131,8 @@ jobs:
 
       - name: Build and push by digest
         id: build
+        env:
+          IMAGE_NAME: ${{ needs.resolve-pr.outputs.image_name }}
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -180,6 +185,7 @@ jobs:
           SUFFIX: ${{ needs.resolve-pr.outputs.suffix }}
           TAG_SUFFIX: ${{ needs.resolve-pr.outputs.tag_suffix }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          IMAGE_NAME: ${{ needs.resolve-pr.outputs.image_name }}
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME}${SUFFIX}"
           docker buildx imagetools create \
