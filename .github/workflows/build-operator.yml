@@ -43,6 +43,8 @@ jobs:
       agents: ${{ steps.resolve.outputs.agents }}
       image_name: ${{ steps.ghcr.outputs.image_name }}
     steps:
+      - uses: actions/checkout@v6
+
       - uses: ./.github/actions/ghcr-image-name
         id: ghcr
 

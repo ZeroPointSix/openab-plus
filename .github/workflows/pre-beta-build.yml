@@ -27,6 +27,8 @@ jobs:
       should_run: ${{ steps.check.outputs.should_run }}
       image_name: ${{ steps.ghcr.outputs.image_name }}
     steps:
+      - uses: actions/checkout@v6
+
       - uses: ./.github/actions/ghcr-image-name
         id: ghcr
 
