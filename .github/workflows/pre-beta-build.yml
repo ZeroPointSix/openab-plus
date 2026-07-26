@@ -60,6 +60,10 @@ jobs:
           if [ -n "$INPUT_IMAGE_TAG" ]; then
             IMAGE_LABEL="$INPUT_IMAGE_TAG"
           fi
+          # Docker tags cannot contain '/' (e.g. test/zer-178 → test-zer-178)
+          if [ -n "$IMAGE_LABEL" ]; then
+            IMAGE_LABEL=$(echo "$IMAGE_LABEL" | tr '/' '-')
+          fi
           echo "ref_type=${REF_TYPE}" >> "$GITHUB_OUTPUT"
           echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
           echo "image_label=${IMAGE_LABEL}" >> "$GITHUB_OUTPUT"
