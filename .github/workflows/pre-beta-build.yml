@@ -5,6 +5,12 @@ on:
     - cron: '0 * * * *'      # hourly; gate job skips the build if no commit in the last ~70min
   push:
     branches: [main]
+  # Push a semver or test tag on any branch to build pinned GHCR images for QA.
+  # Example: git tag v0.9.4-beta.zer178 && git push origin v0.9.4-beta.zer178
+  #          git tag test/zer-178 && git push origin test/zer-178  (agentcore only, faster)
+    tags:
+      - 'v*'
+      - 'test/*'
   workflow_dispatch:
     inputs:
       agents:
@@ -12,6 +18,10 @@ on:
         required: false
         type: string
         default: 'all'
+      image_tag:
+        description: 'Optional extra GHCR tag suffix (e.g. qa-zer178). Default: git tag name or short SHA'
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -26,11 +36,33 @@ jobs:
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
       image_name: ${{ steps.ghcr.outputs.image_name }}
+      ref_type: ${{ steps.ref.outputs.ref_type }}
+      git_tag: ${{ steps.ref.outputs.git_tag }}
+      image_label: ${{ steps.ref.outputs.image_label }}
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/ghcr-image-name
         id: ghcr
+
+      - name: Resolve ref metadata
+        id: ref
+        env:
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          REF_TYPE="${GITHUB_REF_TYPE}"
+          GIT_TAG=""
+          IMAGE_LABEL=""
+          if [ "$REF_TYPE" = "tag" ]; then
+            GIT_TAG="${GITHUB_REF_NAME}"
+            IMAGE_LABEL="$GIT_TAG"
+          fi
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            IMAGE_LABEL="$INPUT_IMAGE_TAG"
+          fi
+          echo "ref_type=${REF_TYPE}" >> "$GITHUB_OUTPUT"
+          echo "git_tag=${GIT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_label=${IMAGE_LABEL}" >> "$GITHUB_OUTPUT"
 
       - name: Skip scheduled run when no recent commits
         uses: actions/github-script@v7
@@ -62,14 +94,23 @@ jobs:
     outputs:
       agents: ${{ steps.resolve.outputs.agents }}
       image_name: ${{ needs.gate.outputs.image_name }}
+      image_label: ${{ needs.gate.outputs.image_label }}
+      ref_type: ${{ needs.gate.outputs.ref_type }}
     steps:
       - name: Resolve agent matrix
         id: resolve
         env:
           INPUT_AGENTS: ${{ inputs.agents }}
+          REF_TYPE: ${{ needs.gate.outputs.ref_type }}
+          GIT_TAG: ${{ needs.gate.outputs.git_tag }}
         run: |
           if [ "$INPUT_AGENTS" = "all" ] || [ -z "$INPUT_AGENTS" ]; then
-            AGENTS="$ALL_AGENTS"
+            if [ "$REF_TYPE" = "tag" ] && [[ "$GIT_TAG" == test/* ]]; then
+              AGENTS="agentcore"
+              echo "test/* tag: building agentcore only for faster QA"
+            else
+              AGENTS="$ALL_AGENTS"
+            fi
           else
             AGENTS="$INPUT_AGENTS"
           fi
@@ -234,6 +275,8 @@ jobs:
         env:
           AGENT: ${{ matrix.agent }}
           IMAGE_NAME: ${{ needs.matrix.outputs.image_name }}
+          IMAGE_LABEL: ${{ needs.matrix.outputs.image_label }}
+          REF_TYPE: ${{ needs.matrix.outputs.ref_type }}
         run: |
           IMAGE="${REGISTRY}/${IMAGE_NAME}"
           SHORT_SHA=$(echo "$GITHUB_SHA" | head -c 7)
@@ -245,24 +288,41 @@ jobs:
 
           DIGESTS=$(printf "${IMAGE}@sha256:%s " $(ls /tmp/digests/))
 
-          docker buildx imagetools create \
-            -t "${IMAGE}:pre-beta-${AGENT}" \
-            -t "${IMAGE}:${SHORT_SHA}-${AGENT}" \
-            ${DIGESTS}
+          TAG_ARGS=()
+          TAG_ARGS+=("-t" "${IMAGE}:pre-beta-${AGENT}")
+          TAG_ARGS+=("-t" "${IMAGE}:${SHORT_SHA}-${AGENT}")
 
-          # Rolling convenience tags (matches docker pull ghcr.io/<owner>/openab-plus:latest / :agentcore)
-          if [ "$AGENT" = "kiro" ]; then
-            docker buildx imagetools create -t "${IMAGE}:latest" ${DIGESTS}
+          # Pinned label from git tag or workflow_dispatch image_tag input
+          if [ -n "$IMAGE_LABEL" ]; then
+            TAG_ARGS+=("-t" "${IMAGE}:${IMAGE_LABEL}-${AGENT}")
+            if [ "$AGENT" = "kiro" ]; then
+              TAG_ARGS+=("-t" "${IMAGE}:${IMAGE_LABEL}")
+            fi
+            if [ "$AGENT" = "agentcore" ]; then
+              TAG_ARGS+=("-t" "${IMAGE}:${IMAGE_LABEL}-agentcore")
+            fi
           fi
-          if [ "$AGENT" = "agentcore" ]; then
-            docker buildx imagetools create -t "${IMAGE}:agentcore" ${DIGESTS}
+
+          docker buildx imagetools create "${TAG_ARGS[@]}" ${DIGESTS}
+
+          # Rolling convenience tags only for main branch pushes (not pinned tag builds)
+          if [ "$REF_TYPE" = "branch" ]; then
+            if [ "$AGENT" = "kiro" ]; then
+              docker buildx imagetools create -t "${IMAGE}:latest" ${DIGESTS}
+            fi
+            if [ "$AGENT" = "agentcore" ]; then
+              docker buildx imagetools create -t "${IMAGE}:agentcore" ${DIGESTS}
+            fi
           fi
 
           echo "### 📦 \`${IMAGE}:pre-beta-${AGENT}\`" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$AGENT" = "kiro" ]; then
+          if [ -n "$IMAGE_LABEL" ]; then
+            echo "### 📦 \`${IMAGE}:${IMAGE_LABEL}-${AGENT}\` (pinned)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$REF_TYPE" = "branch" ] && [ "$AGENT" = "kiro" ]; then
             echo "### 📦 \`${IMAGE}:latest\`" >> "$GITHUB_STEP_SUMMARY"
           fi
-          if [ "$AGENT" = "agentcore" ]; then
+          if [ "$REF_TYPE" = "branch" ] && [ "$AGENT" = "agentcore" ]; then
             echo "### 📦 \`${IMAGE}:agentcore\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
