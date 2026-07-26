@@ -8,9 +8,11 @@ mod common;
 use common::{spawn_admin_server, AdminTestEnv};
 use openab_core::acp::protocol::{ConfigOption, ConfigOptionValue};
 use openab_core::agent_profile::AgentProfile;
+use openab_core::config::AgentConfig;
 use openab_core::session_event::SessionEventKind;
 use openab_core::session_snapshot::{SessionSnapshot, SessionStatus};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 fn config_option(id: &str, name: &str, current_value: &str, values: &[&str]) -> ConfigOption {
     ConfigOption {
@@ -359,6 +361,15 @@ async fn delete_profile_marks_existing_session_snapshot_deleted() {
             "unexpected profiles response: {profiles:?}"
         );
     }
+
+    let base_config = AgentConfig::default();
+    let base_options = HashMap::new();
+    let err = env
+        .profile_service()
+        .resolve_for_session(&base_config, &base_options, Some("codex-main"), None)
+        .await
+        .expect_err("deleted profile should not resolve for new sessions");
+    assert!(err.to_string().contains("not found"));
 }
 
 #[tokio::test]
