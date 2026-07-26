@@ -650,7 +650,7 @@ async function validateSavedProfile(content, profileId) {
 
 async function deleteProfile(content, profileId) {
   if (!profileId) return;
-  if (!window.confirm(`删除 Profile ${profileId}？已有会话不会被修改。`)) return;
+  if (!window.confirm(`删除 Profile ${profileId}？已有会话不会中断，快照会标记为 deleted。`)) return;
   try {
     await profileRequest(`/api/v1/agent-profiles/${encodeURIComponent(profileId)}`, { method: "DELETE" });
     if (profileEditorState.selectedId === profileId) {

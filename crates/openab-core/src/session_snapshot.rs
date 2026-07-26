@@ -13,6 +13,13 @@ pub enum SessionStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileStatus {
+    Active,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSource {
     pub platform: String,
     pub thread_id: String,
@@ -44,6 +51,8 @@ pub struct SessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_status: Option<ProfileStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub status: SessionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,6 +75,7 @@ impl SessionSnapshot {
     ) -> Self {
         let now = Utc::now();
         let external_url = session_external_url(external_base_url, &session_id);
+        let profile_status = profile_id.as_ref().map(|_| ProfileStatus::Active);
         Self {
             source: SessionSource::from_session_key(&session_id),
             session_id,
@@ -73,6 +83,7 @@ impl SessionSnapshot {
             workdir,
             profile_id,
             profile_name,
+            profile_status,
             model,
             status: SessionStatus::Idle,
             last_error: None,
@@ -107,6 +118,18 @@ impl SessionSnapshot {
     pub fn set_model(&mut self, model: Option<String>) {
         self.model = model;
         self.updated_at = Utc::now();
+    }
+
+    pub fn mark_profile_deleted(&mut self, profile_id: &str) -> bool {
+        if self.profile_id.as_deref() != Some(profile_id)
+            || self.profile_status == Some(ProfileStatus::Deleted)
+        {
+            return false;
+        }
+
+        self.profile_status = Some(ProfileStatus::Deleted);
+        self.updated_at = Utc::now();
+        true
     }
 }
 
@@ -193,5 +216,26 @@ mod tests {
 
         snapshot.set_status(SessionStatus::Running);
         assert_eq!(snapshot.last_error, None);
+    }
+
+    #[test]
+    fn profile_status_starts_active_and_marks_deleted() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            Some("profile-1".into()),
+            Some("Default Profile".into()),
+            None,
+            None,
+        );
+
+        assert_eq!(snapshot.profile_status, Some(ProfileStatus::Active));
+        assert!(snapshot.mark_profile_deleted("profile-1"));
+        assert_eq!(snapshot.profile_id.as_deref(), Some("profile-1"));
+        assert_eq!(snapshot.profile_name.as_deref(), Some("Default Profile"));
+        assert_eq!(snapshot.profile_status, Some(ProfileStatus::Deleted));
+        assert!(!snapshot.mark_profile_deleted("profile-1"));
+        assert!(!snapshot.mark_profile_deleted("profile-2"));
     }
 }

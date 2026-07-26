@@ -391,6 +391,27 @@ impl SessionPool {
         .await;
     }
 
+    pub async fn mark_profile_deleted(&self, profile_id: &str) {
+        let updated: Vec<SessionSnapshot> = {
+            let mut snapshots = self.snapshots.write().await;
+            snapshots
+                .values_mut()
+                .filter_map(|snapshot| {
+                    if snapshot.mark_profile_deleted(profile_id) {
+                        Some(snapshot.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for snapshot in updated {
+            self.session_events
+                .publish(SessionEventKind::ProfileChanged, snapshot);
+        }
+    }
+
     async fn record_session_created(&self, snapshot: SessionSnapshot) {
         self.snapshots
             .write()
@@ -540,6 +561,7 @@ fn session_external_base_url_from_env() -> Option<String> {
 mod tests {
     use super::super::protocol::ConfigOptionValue;
     use super::*;
+    use crate::session_snapshot::ProfileStatus;
 
     fn config_option(id: &str, current_value: &str) -> ConfigOption {
         ConfigOption {
@@ -621,6 +643,34 @@ mod tests {
 
         let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
         assert_eq!(snapshot.status, SessionStatus::Suspended);
+    }
+
+    #[tokio::test]
+    async fn mark_profile_deleted_preserves_session_profile_snapshot() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let profile_id = Some("profile-1".to_string());
+        let profile_name = Some("Deleted Profile".to_string());
+        outer
+            .seed_session_snapshot_for_test(SessionSnapshot::new(
+                "slack:thread".into(),
+                "codex".into(),
+                "/workspace".into(),
+                profile_id.clone(),
+                profile_name.clone(),
+                None,
+                None,
+            ))
+            .await;
+
+        outer.mark_profile_deleted("profile-1").await;
+
+        let snapshot = outer
+            .session_snapshot("slack:thread")
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.profile_id, profile_id);
+        assert_eq!(snapshot.profile_name, profile_name);
+        assert_eq!(snapshot.profile_status, Some(ProfileStatus::Deleted));
     }
 
     #[tokio::test]
