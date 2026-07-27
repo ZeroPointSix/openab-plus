@@ -1,8 +1,11 @@
 use crate::session_snapshot::SessionSnapshot;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+
+const DEFAULT_HISTORY_CAPACITY: usize = 1000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -36,15 +39,72 @@ pub struct SessionEvent {
     pub snapshot: SessionSnapshot,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionEventReplay {
+    pub events: Vec<SessionEvent>,
+    pub overflowed: bool,
+    pub oldest_sequence: Option<u64>,
+    pub next_sequence: u64,
+}
+
+pub struct SessionEventSubscription {
+    pub receiver: broadcast::Receiver<SessionEvent>,
+    pub replay: SessionEventReplay,
+}
+
+#[derive(Debug)]
+struct SessionEventHistory {
+    capacity: usize,
+    events: VecDeque<SessionEvent>,
+}
+
+impl SessionEventHistory {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            events: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, event: SessionEvent) {
+        while self.events.len() >= self.capacity {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    fn replay_after(&self, last_sequence: u64, next_sequence: u64) -> SessionEventReplay {
+        let oldest_sequence = self.events.front().map(|event| event.sequence);
+        let overflowed = match oldest_sequence {
+            Some(oldest_sequence) => last_sequence < oldest_sequence.saturating_sub(1),
+            None => false,
+        };
+        let events = self
+            .events
+            .iter()
+            .filter(|event| event.sequence > last_sequence)
+            .cloned()
+            .collect();
+
+        SessionEventReplay {
+            events,
+            overflowed,
+            oldest_sequence,
+            next_sequence,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SessionEventBus {
     tx: broadcast::Sender<SessionEvent>,
     next_sequence: Arc<AtomicU64>,
+    history: Arc<Mutex<SessionEventHistory>>,
 }
 
 impl Default for SessionEventBus {
     fn default() -> Self {
-        Self::new(512)
+        Self::new(DEFAULT_HISTORY_CAPACITY)
     }
 }
 
@@ -54,6 +114,7 @@ impl SessionEventBus {
         Self {
             tx,
             next_sequence: Arc::new(AtomicU64::new(1)),
+            history: Arc::new(Mutex::new(SessionEventHistory::new(capacity))),
         }
     }
 
@@ -61,12 +122,33 @@ impl SessionEventBus {
         self.tx.subscribe()
     }
 
+    pub fn subscribe_after(&self, last_sequence: Option<u64>) -> SessionEventSubscription {
+        let history = self.history.lock().expect("session event history lock");
+        let replay = last_sequence
+            .map(|last_sequence| {
+                history.replay_after(last_sequence, self.next_sequence.load(Ordering::Relaxed))
+            })
+            .unwrap_or_default();
+        let receiver = self.tx.subscribe();
+
+        SessionEventSubscription { receiver, replay }
+    }
+
+    pub fn replay_after(&self, last_sequence: u64) -> SessionEventReplay {
+        self.history
+            .lock()
+            .expect("session event history lock")
+            .replay_after(last_sequence, self.next_sequence.load(Ordering::Relaxed))
+    }
+
     pub fn publish(&self, event: SessionEventKind, snapshot: SessionSnapshot) -> SessionEvent {
+        let mut history = self.history.lock().expect("session event history lock");
         let published = SessionEvent {
             sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
             event,
             snapshot,
         };
+        history.push(published.clone());
         let _ = self.tx.send(published.clone());
         published
     }
@@ -119,5 +201,40 @@ mod tests {
         updated.set_status(SessionStatus::Running);
         let second = bus.publish(SessionEventKind::StatusChanged, updated);
         assert_eq!(first.sequence + 1, second.sequence);
+    }
+
+    #[test]
+    fn replay_after_returns_events_after_last_sequence() {
+        let bus = SessionEventBus::new(8);
+        let first = bus.publish(SessionEventKind::SessionCreated, snapshot());
+        let mut updated = snapshot();
+        updated.set_status(SessionStatus::Running);
+        let second = bus.publish(SessionEventKind::StatusChanged, updated);
+
+        let replay = bus.replay_after(first.sequence);
+
+        assert!(!replay.overflowed);
+        assert_eq!(replay.events, vec![second]);
+        assert_eq!(replay.oldest_sequence, Some(first.sequence));
+    }
+
+    #[test]
+    fn replay_after_reports_history_overflow() {
+        let bus = SessionEventBus::new(2);
+        let first = bus.publish(SessionEventKind::SessionCreated, snapshot());
+        let mut running = snapshot();
+        running.set_status(SessionStatus::Running);
+        let second = bus.publish(SessionEventKind::StatusChanged, running);
+        let mut exited = snapshot();
+        exited.set_status(SessionStatus::Exited);
+        let third = bus.publish(SessionEventKind::Exited, exited);
+        let next_sequence = third.sequence + 1;
+
+        let replay = bus.replay_after(first.sequence.saturating_sub(1));
+
+        assert!(replay.overflowed);
+        assert_eq!(replay.events, vec![second, third]);
+        assert_eq!(replay.oldest_sequence, Some(first.sequence + 1));
+        assert_eq!(replay.next_sequence, next_sequence);
     }
 }
