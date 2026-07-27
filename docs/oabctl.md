@@ -119,6 +119,19 @@ oabctl apply -f my-bot/manifest.yaml --no-sync   # redeploy only (skip config sy
 oabctl apply -f fleet.yaml           # deploy 10+ agents from one file
 ```
 
+### Session Event Stream
+
+The unified admin router exposes `GET /api/v1/sessions/events` as an SSE stream.
+Each session event includes an SSE `id:` value that matches its monotonic
+`sequence` field. A client that reconnects can send `Last-Event-ID` to receive
+events after that sequence before live events continue.
+
+OpenAB keeps the last 1000 session events in memory. If `Last-Event-ID` is older
+than the in-memory window, the stream first emits an `error` event with
+`event history unavailable`. The client must fetch `GET /api/v1/sessions` for a
+full snapshot, then continue from the live stream. Event history is not persisted
+to disk, Redis, or a database.
+
 ## Configuration
 
 ### Local Config (`~/.oabctl/config.toml`)

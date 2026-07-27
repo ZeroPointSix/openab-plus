@@ -14,6 +14,26 @@ use openab_core::session_snapshot::{SessionSnapshot, SessionStatus};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+async fn read_sse_event(
+    response: &mut reqwest::Response,
+    event_name: &str,
+) -> (Option<String>, Value) {
+    let mut buffer = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Some(chunk) = response.chunk().await.expect("sse chunk") {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            if let Some(event) = common::parse_sse_event_with_id(&buffer, event_name) {
+                return event;
+            }
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    panic!("{event_name} SSE event not found");
+}
+
 fn config_option(id: &str, name: &str, current_value: &str, values: &[&str]) -> ConfigOption {
     ConfigOption {
         id: id.into(),
@@ -547,26 +567,62 @@ async fn sse_emits_session_created_with_id_and_status() {
         .session_event_bus()
         .publish(SessionEventKind::SessionCreated, snapshot);
 
-    let mut buffer = String::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut found = None;
-    while tokio::time::Instant::now() < deadline {
-        if let Some(chunk) = response.chunk().await.expect("sse chunk") {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            if let Some(event) = common::parse_sse_event(&buffer, "session.created") {
-                found = Some(event);
-                break;
-            }
-        } else {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    }
-
-    let event = found.expect("session.created SSE event");
+    let (id, event) = read_sse_event(&mut response, "session.created").await;
+    assert_eq!(id, Some(published.sequence.to_string()));
     assert_eq!(event["event"], "session.created");
     assert_eq!(event["snapshot"]["session_id"], "slack:sse-thread");
     assert_eq!(event["snapshot"]["status"], "idle");
     assert_eq!(event["sequence"], published.sequence);
+}
+
+#[tokio::test]
+async fn sse_replays_missed_event_after_last_event_id() {
+    let env = AdminTestEnv::new().await;
+    let pool = env.pool();
+
+    let first_snapshot = SessionSnapshot::new(
+        "slack:replay-thread".into(),
+        "codex".into(),
+        "/workspace".into(),
+        None,
+        None,
+        None,
+        None,
+    );
+    let first = pool
+        .session_event_bus()
+        .publish(SessionEventKind::SessionCreated, first_snapshot);
+    let mut missed_snapshot = SessionSnapshot::new(
+        "slack:replay-thread".into(),
+        "codex".into(),
+        "/workspace".into(),
+        None,
+        None,
+        None,
+        None,
+    );
+    missed_snapshot.set_status(SessionStatus::Running);
+    let missed = pool
+        .session_event_bus()
+        .publish(SessionEventKind::StatusChanged, missed_snapshot);
+
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let sse_url = format!("{}/api/v1/sessions/events", server.base_url);
+    let mut response = client
+        .get(&sse_url)
+        .bearer_auth(&env.token)
+        .header("Last-Event-ID", first.sequence.to_string())
+        .send()
+        .await
+        .expect("open replay sse");
+
+    let (id, event) = read_sse_event(&mut response, "status_changed").await;
+    assert_eq!(id, Some(missed.sequence.to_string()));
+    assert_eq!(event["event"], "status_changed");
+    assert_eq!(event["snapshot"]["session_id"], "slack:replay-thread");
+    assert_eq!(event["snapshot"]["status"], "running");
+    assert_eq!(event["sequence"], missed.sequence);
 }
 
 #[tokio::test]

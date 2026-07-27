@@ -34,10 +34,7 @@ pub struct AdminTestEnv {
 
 impl Drop for AdminTestEnv {
     fn drop(&mut self) {
-        restore_env(
-            "GATEWAY_ADMIN_TOKEN",
-            self.previous_admin_token.take(),
-        );
+        restore_env("GATEWAY_ADMIN_TOKEN", self.previous_admin_token.take());
         restore_env(
             "OPENAB_AGENT_PROFILES_PATH",
             self.previous_profiles_path.take(),
@@ -122,21 +119,24 @@ pub async fn spawn_admin_server(env: &AdminTestEnv) -> TestServer {
     }
 }
 
-pub fn parse_sse_event(buffer: &str, event_name: &str) -> Option<Value> {
+pub fn parse_sse_event_with_id(buffer: &str, event_name: &str) -> Option<(Option<String>, Value)> {
     let normalized = buffer.replace("\r\n", "\n");
     for chunk in normalized.split("\n\n") {
         let mut event = String::new();
+        let mut id = None;
         let mut data_lines = Vec::new();
         for line in chunk.lines() {
             if let Some(value) = line.strip_prefix("event:") {
                 event = value.trim().to_string();
+            } else if let Some(value) = line.strip_prefix("id:") {
+                id = Some(value.trim().to_string());
             } else if let Some(value) = line.strip_prefix("data:") {
                 data_lines.push(value.trim_start().to_string());
             }
         }
         if event == event_name {
             let data = data_lines.join("\n");
-            return serde_json::from_str(&data).ok();
+            return serde_json::from_str(&data).ok().map(|data| (id, data));
         }
     }
     None

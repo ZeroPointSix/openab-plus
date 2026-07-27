@@ -6,8 +6,8 @@ use axum::response::{
 };
 use axum::routing::get;
 use axum::{Json, Router};
-use futures_util::stream;
-use openab_core::session_event::SessionEvent;
+use futures_util::{stream, StreamExt};
+use openab_core::session_event::{SessionEvent, SessionEventReplay};
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -78,20 +78,63 @@ async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Res
         return auth_error_response(err);
     }
 
-    let receiver = pool.session_event_bus().subscribe();
-    let events = stream::unfold(receiver, |mut receiver| async move {
-        match receiver.recv().await {
-            Ok(event) => Some((session_event_sse(event), receiver)),
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                Some((lagged_event_sse(skipped), receiver))
-            }
-            Err(broadcast::error::RecvError::Closed) => None,
-        }
-    });
+    let last_event_id = last_event_id(&headers);
+    let subscription = pool.session_event_bus().subscribe_after(last_event_id);
+    let last_replayed_sequence = subscription
+        .replay
+        .events
+        .last()
+        .map(|event| event.sequence)
+        .or(last_event_id)
+        .unwrap_or_default();
+    let replay_events = replay_events_sse(last_event_id, subscription.replay);
 
-    Sse::new(events)
+    let live_events = stream::unfold(
+        (subscription.receiver, last_replayed_sequence),
+        |(mut receiver, last_replayed_sequence)| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(event) if event.sequence <= last_replayed_sequence => continue,
+                    Ok(event) => {
+                        let sequence = event.sequence;
+                        return Some((session_event_sse(event), (receiver, sequence)));
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        return Some((
+                            lagged_event_sse(skipped),
+                            (receiver, last_replayed_sequence),
+                        ));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+
+    Sse::new(stream::iter(replay_events).chain(live_events))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+fn last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn replay_events_sse(
+    last_event_id: Option<u64>,
+    replay: SessionEventReplay,
+) -> Vec<Result<Event, Infallible>> {
+    let mut events = Vec::new();
+    if let Some(last_event_id) = last_event_id {
+        if replay.overflowed {
+            events.push(history_unavailable_event_sse(last_event_id, &replay));
+        }
+        events.extend(replay.events.into_iter().map(session_event_sse));
+    }
+    events
 }
 
 fn session_event_sse(event: SessionEvent) -> Result<Event, Infallible> {
@@ -112,6 +155,22 @@ fn lagged_event_sse(skipped: u64) -> Result<Event, Infallible> {
         json!({
             "error": "event stream lagged",
             "skipped": skipped,
+        })
+        .to_string(),
+    ))
+}
+
+fn history_unavailable_event_sse(
+    last_event_id: u64,
+    replay: &SessionEventReplay,
+) -> Result<Event, Infallible> {
+    Ok(Event::default().event("error").data(
+        json!({
+            "error": "event history unavailable",
+            "last_event_id": last_event_id,
+            "oldest_sequence": replay.oldest_sequence,
+            "next_sequence": replay.next_sequence,
+            "action": "refetch /api/v1/sessions before continuing the stream",
         })
         .to_string(),
     ))
