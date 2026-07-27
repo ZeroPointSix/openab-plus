@@ -16,19 +16,10 @@ use tokio::sync::{Mutex, RwLock};
 
 type PoolHandle = Arc<pool::SessionPool>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ThreadProfilePolicy {
     timeout_secs: Option<u64>,
     recovery_strategy: RecoveryStrategy,
-}
-
-impl Default for ThreadProfilePolicy {
-    fn default() -> Self {
-        Self {
-            timeout_secs: None,
-            recovery_strategy: RecoveryStrategy::default(),
-        }
-    }
 }
 
 pub struct SessionPool {

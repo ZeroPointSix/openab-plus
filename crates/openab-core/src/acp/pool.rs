@@ -860,10 +860,16 @@ impl SessionPool {
             // their per-connection mutex. A busy session is not idle unless hung.
             let conn_handle = Arc::clone(&conn);
             let Ok(conn) = conn.try_lock() else {
-                if let Some((timeout_secs, activity)) =
-                    self.timeout_secs.zip(activity_map.get(&key))
-                {
-                    if activity.age() > std::time::Duration::from_secs(timeout_secs) {
+                // Busy / locked connections are not idle, but they can still
+                // expire via profile timeout or the generic hung threshold.
+                // Check timeout first; if a timeout is configured but not yet
+                // reached, fall through to hung detection so long-running
+                // turns do not skip force-eviction entirely.
+                if let Some(activity) = activity_map.get(&key) {
+                    let timed_out = self.timeout_secs.is_some_and(|timeout_secs| {
+                        activity.age() > std::time::Duration::from_secs(timeout_secs)
+                    });
+                    if let Some(timeout_secs) = self.timeout_secs.filter(|_| timed_out) {
                         let session_id = cancel_map.get(&key).map(|(_, sid)| sid.clone());
                         warn!(
                             thread_id = %key,
@@ -899,9 +905,7 @@ impl SessionPool {
                             kill_pgid_after_grace(pgid).await;
                         });
                         failed.push((key, conn_handle, profile_timeout_error(timeout_secs, true)));
-                    }
-                } else if let Some(activity) = activity_map.get(&key) {
-                    if classify_hung(activity.in_flight(), activity.age(), hung_threshold) {
+                    } else if classify_hung(activity.in_flight(), activity.age(), hung_threshold) {
                         let session_id = cancel_map.get(&key).map(|(_, sid)| sid.clone());
                         warn!(
                             thread_id = %key,
