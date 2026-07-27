@@ -20,6 +20,21 @@ pub enum ProfileStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileConfigError {
+    pub config_id: String,
+    pub error: String,
+}
+
+impl ProfileConfigError {
+    pub fn new(config_id: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            config_id: config_id.into(),
+            error: error.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionSource {
     pub platform: String,
     pub thread_id: String,
@@ -57,6 +72,8 @@ pub struct SessionSnapshot {
     pub status: SessionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profile_config_errors: Vec<ProfileConfigError>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +104,7 @@ impl SessionSnapshot {
             model,
             status: SessionStatus::Idle,
             last_error: None,
+            profile_config_errors: Vec::new(),
             created_at: now,
             updated_at: now,
             external_url,
@@ -112,6 +130,11 @@ impl SessionSnapshot {
         if let Some(error) = error {
             self.last_error = Some(error);
         }
+        self.updated_at = Utc::now();
+    }
+
+    pub fn set_profile_config_errors(&mut self, errors: Vec<ProfileConfigError>) {
+        self.profile_config_errors = errors;
         self.updated_at = Utc::now();
     }
 
@@ -216,6 +239,42 @@ mod tests {
 
         snapshot.set_status(SessionStatus::Running);
         assert_eq!(snapshot.last_error, None);
+    }
+
+    #[test]
+    fn empty_profile_config_errors_are_not_serialized() {
+        let snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let value = serde_json::to_value(snapshot).expect("snapshot should serialize");
+
+        assert!(value.get("profile_config_errors").is_none());
+    }
+
+    #[test]
+    fn profile_config_errors_are_serialized_when_present() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.set_profile_config_errors(vec![ProfileConfigError::new("model", "unsupported")]);
+
+        let value = serde_json::to_value(snapshot).expect("snapshot should serialize");
+
+        assert_eq!(value["profile_config_errors"][0]["config_id"], "model");
+        assert_eq!(value["profile_config_errors"][0]["error"], "unsupported");
     }
 
     #[test]
