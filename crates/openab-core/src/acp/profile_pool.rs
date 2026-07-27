@@ -1,7 +1,7 @@
 use super::connection::AcpConnection;
 use super::pool;
 use super::protocol::ConfigOption;
-use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides};
+use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy};
 use crate::config::AgentConfig;
 use crate::session_event::{SessionEventBus, SessionEventKind};
 use crate::session_snapshot::{SessionSnapshot, SessionStatus};
@@ -16,6 +16,12 @@ use tokio::sync::{Mutex, RwLock};
 
 type PoolHandle = Arc<pool::SessionPool>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ThreadProfilePolicy {
+    timeout_secs: Option<u64>,
+    recovery_strategy: RecoveryStrategy,
+}
+
 pub struct SessionPool {
     base_config: AgentConfig,
     max_sessions: usize,
@@ -24,6 +30,7 @@ pub struct SessionPool {
     profile_service: Arc<AgentProfileService>,
     pools: RwLock<HashMap<String, PoolHandle>>,
     thread_pools: RwLock<HashMap<String, String>>,
+    thread_policies: RwLock<HashMap<String, ThreadProfilePolicy>>,
     thread_gates: RwLock<HashMap<String, Arc<Mutex<()>>>>,
     session_events: SessionEventBus,
     snapshots: RwLock<HashMap<String, SessionSnapshot>>,
@@ -56,6 +63,7 @@ impl SessionPool {
             profile_service: Arc::new(AgentProfileService::from_env()),
             pools: RwLock::new(pools),
             thread_pools: RwLock::new(HashMap::new()),
+            thread_policies: RwLock::new(HashMap::new()),
             thread_gates: RwLock::new(HashMap::new()),
             session_events: SessionEventBus::default(),
             snapshots: RwLock::new(HashMap::new()),
@@ -123,10 +131,13 @@ impl SessionPool {
 
         if let Some(pool) = self.existing_pool(thread_id).await {
             let result = pool.get_or_create(thread_id, working_dir_override).await;
-            if let Err(err) = &result {
-                self.mark_session_error(thread_id, err.to_string()).await;
-            }
-            return result;
+            return match result {
+                Ok(outcome) => Ok(self.apply_ensure_outcome(thread_id, outcome).await),
+                Err(err) => {
+                    self.mark_session_error(thread_id, err.to_string()).await;
+                    Err(err)
+                }
+            };
         }
 
         let resolved = self
@@ -157,19 +168,34 @@ impl SessionPool {
             .unwrap_or(&resolved.config.working_dir)
             .to_string();
         let model = resolved.config_options.get("model").cloned();
+        let policy = ThreadProfilePolicy {
+            timeout_secs: resolved.timeout_secs,
+            recovery_strategy: resolved.recovery_strategy.clone(),
+        };
         let pool = self
-            .pool_for_key(&pool_key, resolved.config, resolved.config_options)
+            .pool_for_key(
+                &pool_key,
+                resolved.config,
+                resolved.config_options,
+                policy.clone(),
+            )
             .await;
 
         let result = pool.get_or_create(thread_id, working_dir_override).await;
         match result {
-            Ok(created) => {
+            Ok(outcome) => {
                 self.thread_pools
                     .write()
                     .await
                     .insert(thread_id.to_string(), pool_key.clone());
+                self.thread_policies
+                    .write()
+                    .await
+                    .insert(thread_id.to_string(), policy);
+                let profile_config_errors = outcome.profile_config_errors.clone();
+                let created = self.apply_ensure_outcome(thread_id, outcome).await;
                 if created {
-                    let snapshot = SessionSnapshot::new(
+                    let mut snapshot = SessionSnapshot::new(
                         thread_id.to_string(),
                         agent,
                         workdir,
@@ -178,6 +204,9 @@ impl SessionPool {
                         model,
                         self.external_base_url.as_deref(),
                     );
+                    if !profile_config_errors.is_empty() {
+                        snapshot.set_profile_config_errors(profile_config_errors);
+                    }
                     self.record_session_created(snapshot).await;
                 }
                 self.sync_pool_snapshot_statuses(&pool_key, &pool).await;
@@ -326,6 +355,7 @@ impl SessionPool {
             let result = pool.reset_session(thread_id).await;
             if result.is_ok() {
                 self.thread_pools.write().await.remove(thread_id);
+                self.thread_policies.write().await.remove(thread_id);
                 self.mark_session_exited(thread_id, None).await;
             }
             return result;
@@ -333,6 +363,7 @@ impl SessionPool {
         for (_, pool) in self.pools_snapshot().await {
             if pool.reset_session(thread_id).await.is_ok() {
                 self.thread_pools.write().await.remove(thread_id);
+                self.thread_policies.write().await.remove(thread_id);
                 self.mark_session_exited(thread_id, None).await;
                 return Ok(());
             }
@@ -342,7 +373,16 @@ impl SessionPool {
 
     pub async fn cleanup_idle(&self, ttl_secs: u64) {
         for (pool_key, pool) in self.pools_snapshot().await {
-            pool.cleanup_idle(ttl_secs).await;
+            let failures = pool.cleanup_idle(ttl_secs).await;
+            for failure in failures {
+                self.thread_pools.write().await.remove(&failure.thread_id);
+                self.thread_policies
+                    .write()
+                    .await
+                    .remove(&failure.thread_id);
+                self.mark_session_error(&failure.thread_id, failure.error)
+                    .await;
+            }
             self.sync_pool_snapshot_statuses(&pool_key, &pool).await;
         }
     }
@@ -373,8 +413,24 @@ impl SessionPool {
     }
 
     pub async fn mark_session_exited(&self, thread_id: &str, error: Option<String>) {
+        if let Some(error) = error {
+            if self
+                .thread_policy(thread_id)
+                .await
+                .is_some_and(|policy| matches!(policy.recovery_strategy, RecoveryStrategy::None))
+            {
+                self.mark_session_error(thread_id, error).await;
+                return;
+            }
+            self.update_snapshot(thread_id, SessionEventKind::Exited, |snapshot| {
+                snapshot.set_exited(Some(error));
+            })
+            .await;
+            return;
+        }
+
         self.update_snapshot(thread_id, SessionEventKind::Exited, |snapshot| {
-            snapshot.set_exited(error);
+            snapshot.set_exited(None);
         })
         .await;
     }
@@ -436,6 +492,45 @@ impl SessionPool {
         self.session_events.publish(kind, snapshot);
     }
 
+    async fn apply_ensure_outcome(
+        &self,
+        thread_id: &str,
+        outcome: pool::SessionEnsureOutcome,
+    ) -> bool {
+        let created = outcome.created;
+        let recovered = outcome.recovered;
+        let profile_config_errors = outcome.profile_config_errors;
+
+        if recovered {
+            self.update_snapshot(
+                thread_id,
+                SessionEventKind::StatusChanged,
+                move |snapshot| {
+                    snapshot.set_status(SessionStatus::Idle);
+                    if !profile_config_errors.is_empty() {
+                        snapshot.set_profile_config_errors(profile_config_errors);
+                    }
+                },
+            )
+            .await;
+        } else if !profile_config_errors.is_empty() {
+            self.update_snapshot(
+                thread_id,
+                SessionEventKind::ConfigChanged,
+                move |snapshot| {
+                    snapshot.set_profile_config_errors(profile_config_errors);
+                },
+            )
+            .await;
+        }
+
+        created
+    }
+
+    async fn thread_policy(&self, thread_id: &str) -> Option<ThreadProfilePolicy> {
+        self.thread_policies.read().await.get(thread_id).cloned()
+    }
+
     async fn thread_gate(&self, thread_id: &str) -> Arc<Mutex<()>> {
         let mut gates = self.thread_gates.write().await;
         gates
@@ -468,6 +563,7 @@ impl SessionPool {
                 }
                 pool::SessionEntryStatus::Missing => {
                     self.thread_pools.write().await.remove(&session_id);
+                    self.thread_policies.write().await.remove(&session_id);
                     self.mark_session_exited(&session_id, None).await;
                 }
             }
@@ -487,6 +583,7 @@ impl SessionPool {
             Some(pool)
         } else {
             self.thread_pools.write().await.remove(thread_id);
+            self.thread_policies.write().await.remove(thread_id);
             None
         }
     }
@@ -496,6 +593,7 @@ impl SessionPool {
         key: &str,
         config: AgentConfig,
         config_options: HashMap<String, String>,
+        policy: ThreadProfilePolicy,
     ) -> PoolHandle {
         if let Some(pool) = self.pools.read().await.get(key).cloned() {
             return pool;
@@ -504,11 +602,13 @@ impl SessionPool {
         pools
             .entry(key.to_string())
             .or_insert_with(|| {
-                Arc::new(pool::SessionPool::new(
+                Arc::new(pool::SessionPool::new_with_policy(
                     config,
                     self.max_sessions,
                     self.hung_threshold_secs,
                     config_options,
+                    policy.timeout_secs,
+                    policy.recovery_strategy.clone(),
                 ))
             })
             .clone()
@@ -561,7 +661,7 @@ fn session_external_base_url_from_env() -> Option<String> {
 mod tests {
     use super::super::protocol::ConfigOptionValue;
     use super::*;
-    use crate::session_snapshot::ProfileStatus;
+    use crate::session_snapshot::{ProfileConfigError, ProfileStatus};
 
     fn config_option(id: &str, current_value: &str) -> ConfigOption {
         ConfigOption {
@@ -607,6 +707,146 @@ mod tests {
         ];
 
         assert_eq!(model_from_options(&options).as_deref(), Some("gpt-5"));
+    }
+
+    #[tokio::test]
+    async fn pool_for_key_applies_profile_policy() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let policy = ThreadProfilePolicy {
+            timeout_secs: Some(60),
+            recovery_strategy: RecoveryStrategy::None,
+        };
+
+        let pool = outer
+            .pool_for_key(
+                "profile:timeout",
+                AgentConfig::default(),
+                HashMap::new(),
+                policy,
+            )
+            .await;
+
+        assert_eq!(pool.timeout_secs_for_test(), Some(60));
+        assert_eq!(pool.recovery_strategy_for_test(), RecoveryStrategy::None);
+    }
+
+    #[tokio::test]
+    async fn exited_error_without_recovery_marks_error() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        outer
+            .seed_session_snapshot_for_test(SessionSnapshot::new(
+                "thread".into(),
+                "codex".into(),
+                "/workspace".into(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await;
+        outer.thread_policies.write().await.insert(
+            "thread".into(),
+            ThreadProfilePolicy {
+                timeout_secs: None,
+                recovery_strategy: RecoveryStrategy::None,
+            },
+        );
+        let mut events = outer.session_event_bus().subscribe();
+
+        outer
+            .mark_session_exited("thread", Some("Agent process died".into()))
+            .await;
+
+        let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
+        assert_eq!(snapshot.status, SessionStatus::Error);
+        assert_eq!(snapshot.last_error.as_deref(), Some("Agent process died"));
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open");
+        assert_eq!(event.event, SessionEventKind::Error);
+    }
+
+    #[tokio::test]
+    async fn recovered_session_marks_snapshot_idle() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let mut snapshot = SessionSnapshot::new(
+            "thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.set_exited(Some("Agent process died".into()));
+        outer.seed_session_snapshot_for_test(snapshot).await;
+        let mut events = outer.session_event_bus().subscribe();
+
+        let created = outer
+            .apply_ensure_outcome(
+                "thread",
+                pool::SessionEnsureOutcome {
+                    created: false,
+                    recovered: true,
+                    profile_config_errors: Vec::new(),
+                },
+            )
+            .await;
+
+        assert!(!created);
+        let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert_eq!(snapshot.last_error, None);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open");
+        assert_eq!(event.event, SessionEventKind::StatusChanged);
+    }
+
+    #[tokio::test]
+    async fn recovered_session_records_profile_config_errors() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let mut snapshot = SessionSnapshot::new(
+            "thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.set_exited(Some("Agent process died".into()));
+        outer.seed_session_snapshot_for_test(snapshot).await;
+        let mut events = outer.session_event_bus().subscribe();
+
+        let created = outer
+            .apply_ensure_outcome(
+                "thread",
+                pool::SessionEnsureOutcome {
+                    created: false,
+                    recovered: true,
+                    profile_config_errors: vec![ProfileConfigError::new("model", "unsupported")],
+                },
+            )
+            .await;
+
+        assert!(!created);
+        let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
+        assert_eq!(snapshot.status, SessionStatus::Idle);
+        assert_eq!(snapshot.profile_config_errors.len(), 1);
+        assert_eq!(snapshot.profile_config_errors[0].config_id, "model");
+        assert_eq!(snapshot.profile_config_errors[0].error, "unsupported");
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+            .await
+            .expect("event should arrive")
+            .expect("event channel should stay open");
+        assert_eq!(event.event, SessionEventKind::StatusChanged);
+        assert_eq!(
+            event.snapshot.profile_config_errors,
+            snapshot.profile_config_errors
+        );
     }
 
     #[tokio::test]

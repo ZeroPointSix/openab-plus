@@ -540,6 +540,10 @@ async function renderSessionDetail(content) {
       <div class="panel-body"><pre class="json-view">${escapeHtml(JSON.stringify(configSnapshot(session), null, 2))}</pre></div>
     </section>
     <section class="panel">
+      <div class="panel-header"><h2>Profile 配置应用</h2></div>
+      <div class="panel-body">${profileConfigErrorsPanel(session)}</div>
+    </section>
+    <section class="panel">
       <div class="panel-header"><h2>状态时间线</h2></div>
       <div class="panel-body">${timelinePanel(timeline)}</div>
     </section>
@@ -884,6 +888,10 @@ function configSnapshot(session) {
   const acpSessionId = sessionAcpId(session);
   if (acpSessionId !== "-") snapshot.acp_session_id = acpSessionId;
   if (session.external_url) snapshot.external_url = session.external_url;
+  const profileConfigErrors = profileConfigErrorsOf(session);
+  if (profileConfigErrors.length) {
+    snapshot.profile_config_errors = profileConfigErrors;
+  }
 
   for (const key of ["approval_policy", "sandbox_mode", "network_access"]) {
     const value = valueOf(session, [key, `config.${key}`]);
@@ -891,6 +899,26 @@ function configSnapshot(session) {
   }
 
   return snapshot;
+}
+
+function profileConfigErrorsOf(session) {
+  const errors = valueOf(session, ["profile_config_errors", "profileConfigErrors"]);
+  return Array.isArray(errors) ? errors : [];
+}
+
+function profileConfigErrorsPanel(session) {
+  const errors = profileConfigErrorsOf(session);
+  if (!errors.length) return `<div class="empty-state">暂无 Profile 配置应用失败。</div>`;
+
+  return errors.map((entry) => {
+    const configId = entry.config_id || entry.configId || "unknown";
+    const error = entry.error || entry.message || "failed to apply config option";
+    return `
+      <div class="error-box">
+        <strong>${escapeHtml(configId)}</strong>
+        <p>${escapeHtml(error)}</p>
+      </div>`;
+  }).join("");
 }
 
 function metricCard(label, value) {

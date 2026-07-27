@@ -1,6 +1,8 @@
 use crate::acp::connection::{AcpConnection, SessionActivity};
 use crate::acp::protocol::ConfigOption;
+use crate::agent_profile::RecoveryStrategy;
 use crate::config::AgentConfig;
+use crate::session_snapshot::ProfileConfigError;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,7 @@ use tracing::{info, warn};
 /// transient failure worth preserving the session ID for retry, as opposed to
 /// a permanent agent-side rejection.
 const TRANSIENT_LOAD_ERRORS: &[&str] = &["timeout waiting for", "channel closed"];
+const MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
 /// Combined state protected by a single lock to prevent deadlocks.
 /// Lock ordering: never await a per-connection mutex while holding `state`.
@@ -39,8 +42,10 @@ struct PoolState {
     /// cannot race each other into duplicate `session/load` attempts.
     creating: HashMap<String, Arc<Mutex<()>>>,
     /// Per-session working directory overrides (from control directives).
-    /// thread_key → canonical workspace path.
+    /// thread_key -> canonical workspace path.
     session_workdirs: HashMap<String, String>,
+    /// Recovery attempts since the last successful reconnect.
+    recovery_attempts: HashMap<String, u32>,
 }
 
 pub struct SessionPool {
@@ -53,11 +58,48 @@ pub struct SessionPool {
     mapping_path: PathBuf,
     meta_path: PathBuf,
     default_config_options: HashMap<String, String>,
+    timeout_secs: Option<u64>,
+    recovery_strategy: RecoveryStrategy,
 }
 
 type CancelHandle = (Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>, String);
 type ActiveSnapshot = Vec<(String, Arc<Mutex<AcpConnection>>)>;
 type EvictionCandidate = (String, Arc<Mutex<AcpConnection>>, Instant, Option<String>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEnsureOutcome {
+    pub created: bool,
+    pub recovered: bool,
+    pub profile_config_errors: Vec<ProfileConfigError>,
+}
+
+impl SessionEnsureOutcome {
+    fn existing() -> Self {
+        Self::new(false, false, Vec::new())
+    }
+
+    fn created(profile_config_errors: Vec<ProfileConfigError>) -> Self {
+        Self::new(true, false, profile_config_errors)
+    }
+
+    fn recovered(profile_config_errors: Vec<ProfileConfigError>) -> Self {
+        Self::new(false, true, profile_config_errors)
+    }
+
+    fn new(created: bool, recovered: bool, profile_config_errors: Vec<ProfileConfigError>) -> Self {
+        Self {
+            created,
+            recovered,
+            profile_config_errors,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFailure {
+    pub thread_id: String,
+    pub error: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEntryStatus {
@@ -109,6 +151,15 @@ fn better_candidate(current_oldest: Option<Instant>, candidate_last_active: Inst
     }
 }
 
+fn recovery_attempt_exceeded(attempt: u32) -> bool {
+    attempt > MAX_RECOVERY_ATTEMPTS
+}
+
+fn profile_timeout_error(timeout_secs: u64, in_flight: bool) -> String {
+    let phase = if in_flight { "running" } else { "idle" };
+    format!("profile {phase} timeout after {timeout_secs}s")
+}
+
 /// Remove every non-`active` pool entry for `key`, reset-style.
 ///
 /// Hung eviction must NOT leave the session resumable: the old streaming task
@@ -127,6 +178,7 @@ fn purge_session_entries(state: &mut PoolState, key: &str) {
     // a concurrent get_or_create mint a fresh gate and run two creations for
     // the same key.
     state.session_workdirs.remove(key);
+    state.recovery_attempts.remove(key);
 }
 
 /// Escalating kill for a hung agent's process group: wait 10s after the
@@ -178,6 +230,24 @@ impl SessionPool {
         hung_threshold_secs: u64,
         default_config_options: HashMap<String, String>,
     ) -> Self {
+        Self::new_with_policy(
+            config,
+            max_sessions,
+            hung_threshold_secs,
+            default_config_options,
+            None,
+            RecoveryStrategy::default(),
+        )
+    }
+
+    pub fn new_with_policy(
+        config: AgentConfig,
+        max_sessions: usize,
+        hung_threshold_secs: u64,
+        default_config_options: HashMap<String, String>,
+        timeout_secs: Option<u64>,
+        recovery_strategy: RecoveryStrategy,
+    ) -> Self {
         let openab_dir = std::env::var("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/tmp"))
@@ -197,6 +267,7 @@ impl SessionPool {
                 suspended,
                 creating: HashMap::new(),
                 session_workdirs,
+                recovery_attempts: HashMap::new(),
             }),
             config,
             max_sessions,
@@ -204,6 +275,8 @@ impl SessionPool {
             mapping_path,
             meta_path,
             default_config_options,
+            timeout_secs,
+            recovery_strategy,
         }
     }
 
@@ -270,7 +343,7 @@ impl SessionPool {
         &self,
         thread_id: &str,
         working_dir_override: Option<&str>,
-    ) -> Result<bool> {
+    ) -> Result<SessionEnsureOutcome> {
         let create_gate = {
             let mut state = self.state.write().await;
             get_or_insert_gate(&mut state.creating, thread_id)
@@ -287,6 +360,7 @@ impl SessionPool {
 
         let had_existing = existing.is_some();
         let mut saved_session_id = saved_session_id;
+        let mut dead_existing = false;
         if let Some(conn) = existing.clone() {
             // Never await the existing connection's mutex here: we hold the
             // per-thread creating gate, so blocking on a hung connection would
@@ -294,13 +368,55 @@ impl SessionPool {
             // Lock held = busy streaming = alive (same convention as
             // has_active_session); cleanup_idle owns hung recovery.
             let Ok(conn) = conn.try_lock() else {
-                return Ok(false);
+                return Ok(SessionEnsureOutcome::existing());
             };
             if conn.alive() {
-                return Ok(false);
+                return Ok(SessionEnsureOutcome::existing());
             }
+            dead_existing = true;
             if saved_session_id.is_none() {
                 saved_session_id = conn.acp_session_id.clone();
+            }
+        }
+
+        let had_prior_state = had_existing || saved_session_id.is_some();
+        if had_prior_state {
+            match self.recovery_strategy {
+                RecoveryStrategy::None => {
+                    if dead_existing {
+                        let mut state = self.state.write().await;
+                        state.active.remove(thread_id);
+                        purge_session_entries(&mut state, thread_id);
+                        self.save_mapping(&state.persisted);
+                        self.save_meta(&state.session_workdirs);
+                        return Err(anyhow!(
+                            "agent process exited and profile recovery is disabled"
+                        ));
+                    }
+                    // A suspended entry is prior state, but recovery is disabled.
+                    // Start a fresh session instead of loading the old session id.
+                    saved_session_id = None;
+                }
+                RecoveryStrategy::RestartProcess => {
+                    let attempt = self.reserve_recovery_attempt(thread_id).await;
+                    if recovery_attempt_exceeded(attempt) {
+                        self.clear_thread_state(thread_id).await;
+                        return Err(anyhow!(
+                            "profile recovery failed after {MAX_RECOVERY_ATTEMPTS} attempts"
+                        ));
+                    }
+                    // Restart the process and create a new ACP session.
+                    saved_session_id = None;
+                }
+                RecoveryStrategy::ResumeSession => {
+                    let attempt = self.reserve_recovery_attempt(thread_id).await;
+                    if recovery_attempt_exceeded(attempt) {
+                        self.clear_thread_state(thread_id).await;
+                        return Err(anyhow!(
+                            "profile recovery failed after {MAX_RECOVERY_ATTEMPTS} attempts"
+                        ));
+                    }
+                }
             }
         }
 
@@ -368,6 +484,7 @@ impl SessionPool {
         new_conn.initialize().await?;
 
         let mut resumed = false;
+        let mut profile_config_errors = Vec::new();
         let mut load_failed: Option<&str> = None;
         if let Some(ref sid) = saved_session_id {
             if new_conn.supports_load_session {
@@ -413,7 +530,9 @@ impl SessionPool {
             // Apply default config options (e.g. mode=bypass, model=swe-1-6)
             for (config_id, value) in &self.default_config_options {
                 if let Err(e) = new_conn.set_config_option(config_id, value).await {
-                    warn!(config_id, value, error = %e, "failed to set default config option");
+                    warn!(config_id, error = %e, "failed to set default config option");
+                    profile_config_errors
+                        .push(ProfileConfigError::new(config_id.clone(), e.to_string()));
                 }
             }
 
@@ -421,7 +540,7 @@ impl SessionPool {
             // live entries that died before we could recover a resumable
             // session id. In both cases the caller is continuing after an
             // unexpected session loss.
-            if had_existing || saved_session_id.is_some() {
+            if had_prior_state {
                 new_conn.session_reset = true;
             }
         }
@@ -438,10 +557,10 @@ impl SessionPool {
         // initializing this one.
         if let Some(existing) = state.active.get(thread_id).cloned() {
             let Ok(existing) = existing.try_lock() else {
-                return Ok(false);
+                return Ok(SessionEnsureOutcome::existing());
             };
             if existing.alive() {
-                return Ok(false);
+                return Ok(SessionEnsureOutcome::existing());
             }
             warn!(thread_id, "stale connection, rebuilding");
             drop(existing);
@@ -488,6 +607,7 @@ impl SessionPool {
                 .insert(thread_id.to_string(), cancel_session_id.clone());
         }
         state.suspended.remove(thread_id);
+        state.recovery_attempts.remove(thread_id);
         state.active.insert(thread_id.to_string(), new_conn);
         state
             .activity
@@ -511,11 +631,39 @@ impl SessionPool {
             self.save_meta(&state.session_workdirs);
         }
 
-        // Return true only for genuinely new sessions — not resumed or reconnected ones.
-        // A session with prior state (saved_session_id or had_existing) is a resume,
-        // even if we had to spawn a new ACP process. ADR §2.2: directives are first-message-only.
-        let is_fresh = !had_existing && saved_session_id.is_none();
-        Ok(is_fresh)
+        if had_prior_state {
+            Ok(SessionEnsureOutcome::recovered(profile_config_errors))
+        } else {
+            Ok(SessionEnsureOutcome::created(profile_config_errors))
+        }
+    }
+
+    async fn reserve_recovery_attempt(&self, thread_id: &str) -> u32 {
+        let mut state = self.state.write().await;
+        let attempts = state
+            .recovery_attempts
+            .entry(thread_id.to_string())
+            .or_insert(0);
+        *attempts += 1;
+        *attempts
+    }
+
+    async fn clear_thread_state(&self, thread_id: &str) {
+        let mut state = self.state.write().await;
+        state.active.remove(thread_id);
+        purge_session_entries(&mut state, thread_id);
+        self.save_mapping(&state.persisted);
+        self.save_meta(&state.session_workdirs);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn timeout_secs_for_test(&self) -> Option<u64> {
+        self.timeout_secs
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn recovery_strategy_for_test(&self) -> RecoveryStrategy {
+        self.recovery_strategy.clone()
     }
 
     pub async fn session_entry_status(&self, thread_id: &str) -> SessionEntryStatus {
@@ -683,8 +831,10 @@ impl SessionPool {
         }
     }
 
-    pub async fn cleanup_idle(&self, ttl_secs: u64) {
-        let cutoff = Instant::now() - std::time::Duration::from_secs(ttl_secs);
+    pub async fn cleanup_idle(&self, ttl_secs: u64) -> Vec<SessionFailure> {
+        let profile_timeout = self.timeout_secs.map(std::time::Duration::from_secs);
+        let idle_ttl = profile_timeout.unwrap_or_else(|| std::time::Duration::from_secs(ttl_secs));
+        let cutoff = Instant::now() - idle_ttl;
         let hung_threshold = std::time::Duration::from_secs(self.hung_threshold_secs);
 
         let (snapshot, activity_map, cancel_map, pgid_map) = {
@@ -704,13 +854,58 @@ impl SessionPool {
 
         let mut stale = Vec::new();
         let mut hung: Vec<(String, Arc<Mutex<AcpConnection>>)> = Vec::new();
+        let mut failed: Vec<(String, Arc<Mutex<AcpConnection>>, String)> = Vec::new();
         for (key, conn) in snapshot {
             // Skip active sessions for this cleanup round instead of waiting on
             // their per-connection mutex. A busy session is not idle unless hung.
             let conn_handle = Arc::clone(&conn);
             let Ok(conn) = conn.try_lock() else {
+                // Busy / locked connections are not idle, but they can still
+                // expire via profile timeout or the generic hung threshold.
+                // Check timeout first; if a timeout is configured but not yet
+                // reached, fall through to hung detection so long-running
+                // turns do not skip force-eviction entirely.
                 if let Some(activity) = activity_map.get(&key) {
-                    if classify_hung(activity.in_flight(), activity.age(), hung_threshold) {
+                    let timed_out = self.timeout_secs.is_some_and(|timeout_secs| {
+                        activity.age() > std::time::Duration::from_secs(timeout_secs)
+                    });
+                    if let Some(timeout_secs) = self.timeout_secs.filter(|_| timed_out) {
+                        let session_id = cancel_map.get(&key).map(|(_, sid)| sid.clone());
+                        warn!(
+                            thread_id = %key,
+                            session_id = session_id.as_deref().unwrap_or(""),
+                            age_secs = activity.age().as_secs(),
+                            timeout_secs,
+                            "profile timeout expired for running session"
+                        );
+                        let stdin_handle = cancel_map.get(&key).map(|(stdin, _)| Arc::clone(stdin));
+                        let pgid = pgid_map.get(&key).copied();
+                        tokio::spawn(async move {
+                            if let (Some(stdin), Some(session_id)) = (stdin_handle, session_id) {
+                                let _ = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    async move {
+                                        if let Ok(data) =
+                                            serde_json::to_string(&serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "method": "session/cancel",
+                                                "params": {"sessionId": session_id}
+                                            }))
+                                        {
+                                            use tokio::io::AsyncWriteExt;
+                                            let mut w = stdin.lock().await;
+                                            let _ = w.write_all(data.as_bytes()).await;
+                                            let _ = w.write_all(b"\n").await;
+                                            let _ = w.flush().await;
+                                        }
+                                    },
+                                )
+                                .await;
+                            }
+                            kill_pgid_after_grace(pgid).await;
+                        });
+                        failed.push((key, conn_handle, profile_timeout_error(timeout_secs, true)));
+                    } else if classify_hung(activity.in_flight(), activity.age(), hung_threshold) {
                         let session_id = cancel_map.get(&key).map(|(_, sid)| sid.clone());
                         warn!(
                             thread_id = %key,
@@ -766,15 +961,30 @@ impl SessionPool {
                     activity.touch();
                 }
             }
+            if let Some(timeout_secs) = self.timeout_secs {
+                if conn.last_active < cutoff {
+                    failed.push((key, conn_handle, profile_timeout_error(timeout_secs, false)));
+                    continue;
+                }
+            }
+            if !conn.alive() && matches!(self.recovery_strategy, RecoveryStrategy::None) {
+                failed.push((
+                    key,
+                    conn_handle,
+                    "agent process exited and profile recovery is disabled".to_string(),
+                ));
+                continue;
+            }
             if classify_idle(conn.last_active, conn.alive(), cutoff) {
                 stale.push((key, conn_handle, conn.acp_session_id.clone()));
             }
         }
 
-        if stale.is_empty() && hung.is_empty() {
-            return;
+        if stale.is_empty() && hung.is_empty() && failed.is_empty() {
+            return Vec::new();
         }
 
+        let mut failures = Vec::new();
         let mut state = self.state.write().await;
         for (key, expected_conn, sid) in stale {
             if remove_if_same_handle(&mut state.active, &key, &expected_conn).is_some() {
@@ -796,8 +1006,18 @@ impl SessionPool {
                 warn!(thread_id = %key, "hung session was replaced before eviction; maps untouched");
             }
         }
+        for (key, expected_conn, error) in failed {
+            if remove_if_same_handle(&mut state.active, &key, &expected_conn).is_some() {
+                purge_session_entries(&mut state, &key);
+                failures.push(SessionFailure {
+                    thread_id: key,
+                    error,
+                });
+            }
+        }
         self.save_mapping(&state.persisted);
         self.save_meta(&state.session_workdirs);
+        failures
     }
 
     pub async fn shutdown(&self) {
@@ -839,8 +1059,9 @@ impl SessionPool {
 #[cfg(test)]
 mod tests {
     use super::{
-        better_candidate, classify_hung, classify_idle, get_or_insert_gate, purge_session_entries,
-        remove_if_same_handle, PoolState, SessionEntryStatus, SessionPool,
+        better_candidate, classify_hung, classify_idle, get_or_insert_gate, profile_timeout_error,
+        purge_session_entries, recovery_attempt_exceeded, remove_if_same_handle, PoolState,
+        SessionEntryStatus, SessionPool, MAX_RECOVERY_ATTEMPTS,
     };
     use crate::acp::connection::SessionActivity;
     use std::collections::HashMap;
@@ -920,6 +1141,24 @@ mod tests {
     }
 
     #[test]
+    fn recovery_attempt_limit_is_capped() {
+        assert!(!recovery_attempt_exceeded(MAX_RECOVERY_ATTEMPTS));
+        assert!(recovery_attempt_exceeded(MAX_RECOVERY_ATTEMPTS + 1));
+    }
+
+    #[test]
+    fn profile_timeout_error_names_phase() {
+        assert_eq!(
+            profile_timeout_error(60, false),
+            "profile idle timeout after 60s"
+        );
+        assert_eq!(
+            profile_timeout_error(60, true),
+            "profile running timeout after 60s"
+        );
+    }
+
+    #[test]
     fn better_candidate_prefers_older_last_active() {
         let older = Instant::now() - std::time::Duration::from_secs(120);
         let newer = Instant::now() - std::time::Duration::from_secs(30);
@@ -985,6 +1224,7 @@ mod tests {
                 ("other".to_string(), "session-other".to_string()),
             ]),
             creating: HashMap::from([("hung".to_string(), Arc::new(Mutex::new(())))]),
+            recovery_attempts: HashMap::new(),
             session_workdirs: HashMap::from([("hung".to_string(), "/tmp/ws".to_string())]),
         };
 
