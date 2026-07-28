@@ -67,8 +67,8 @@ jobs:
           push: true
           platforms: linux/amd64
           build-args: |
-            BUILD_MODE=${{ inputs.build_mode || 'default' }}
-            FEATURES=${{ inputs.features || '' }}
+            BUILD_MODE=${{ github.event.inputs.build_mode || 'default' }}
+            FEATURES=${{ github.event.inputs.features || '' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
