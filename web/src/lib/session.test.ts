@@ -4,6 +4,7 @@ import {
   filterSessions,
   parseSessionEventPayload,
   sessionMetrics,
+  timelineItemFromEvent,
 } from './session';
 import { SessionSnapshot } from '../types';
 
@@ -73,5 +74,20 @@ describe('session helpers', () => {
         JSON.stringify({ error: 'event history unavailable' }),
       ),
     ).toBeNull();
+  });
+
+  it('uses the full SSE id to disambiguate timeline events across restarts', () => {
+    const event = {
+      sequence: 1,
+      event: 'status_changed',
+      snapshot: { ...sessions[0], status: 'idle' as const },
+    };
+
+    const previous = timelineItemFromEvent(event, 'generation-a:1');
+    const restarted = timelineItemFromEvent(event, 'generation-b:1');
+
+    expect(previous?.id).toBe('generation-a:1:status_changed');
+    expect(restarted?.id).toBe('generation-b:1:status_changed');
+    expect(previous?.id).not.toBe(restarted?.id);
   });
 });

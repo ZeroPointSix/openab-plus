@@ -77,7 +77,12 @@ export function useSessionStream(enabled: boolean): StreamStatus {
 
               const event = parseSessionEventPayload(message.data);
               if (!event) {
+                queryClient.setQueriesData<SessionTimelineItem[]>(
+                  { queryKey: ['sessionTimeline'] },
+                  [],
+                );
                 void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+                void queryClient.invalidateQueries({ queryKey: ['session'] });
                 return;
               }
 
@@ -97,7 +102,10 @@ export function useSessionStream(enabled: boolean): StreamStatus {
                   ['session', event.snapshot.session_id],
                   event.snapshot,
                 );
-                const timelineItem = timelineItemFromEvent(event);
+                const timelineItem = timelineItemFromEvent(
+                  event,
+                  message.id,
+                );
                 if (timelineItem) {
                   queryClient.setQueryData<SessionTimelineItem[]>(
                     ['sessionTimeline', event.snapshot.session_id],

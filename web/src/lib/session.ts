@@ -87,10 +87,12 @@ export function applySessionEvent(
 
 export function timelineItemFromEvent(
   event: SessionEventPayload,
+  streamEventId?: string,
 ): SessionTimelineItem | null {
   if (!event.snapshot) return null;
   return {
-    id: String(event.sequence) + ':' + event.event,
+    id:
+      (streamEventId || String(event.sequence)) + ':' + event.event,
     event: event.event,
     status: event.snapshot.status,
     at: event.snapshot.updated_at || event.snapshot.created_at,
