@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "web/**"
+      - "scripts/profile-ui-schema-smoke.mjs"
       - "crates/openab-gateway/src/web_admin.rs"
       - ".github/workflows/admin-web.yml"
   push:
@@ -11,6 +12,7 @@ on:
       - main
     paths:
       - "web/**"
+      - "scripts/profile-ui-schema-smoke.mjs"
       - "crates/openab-gateway/src/web_admin.rs"
       - ".github/workflows/admin-web.yml"
 
@@ -42,6 +44,9 @@ jobs:
 
       - name: Run web tests
         run: pnpm --dir web test
+
+      - name: Run profile schema smoke
+        run: pnpm --dir web test:profile-schema
 
       - name: Build embedded assets
         run: pnpm --dir web build
