@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 const DEFAULT_HISTORY_CAPACITY: usize = 1000;
 
@@ -98,6 +99,7 @@ impl SessionEventHistory {
 #[derive(Clone)]
 pub struct SessionEventBus {
     tx: broadcast::Sender<SessionEvent>,
+    generation: Arc<str>,
     next_sequence: Arc<AtomicU64>,
     history: Arc<Mutex<SessionEventHistory>>,
 }
@@ -113,9 +115,18 @@ impl SessionEventBus {
         let (tx, _) = broadcast::channel(capacity.max(1));
         Self {
             tx,
+            generation: Uuid::new_v4().simple().to_string().into(),
             next_sequence: Arc::new(AtomicU64::new(1)),
             history: Arc::new(Mutex::new(SessionEventHistory::new(capacity))),
         }
+    }
+
+    pub fn generation(&self) -> &str {
+        self.generation.as_ref()
+    }
+
+    pub fn event_id(&self, sequence: u64) -> String {
+        format!("{}:{sequence}", self.generation())
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
@@ -201,6 +212,17 @@ mod tests {
         updated.set_status(SessionStatus::Running);
         let second = bus.publish(SessionEventKind::StatusChanged, updated);
         assert_eq!(first.sequence + 1, second.sequence);
+    }
+
+    #[test]
+    fn event_ids_include_a_stable_bus_generation() {
+        let bus = SessionEventBus::new(8);
+        let clone = bus.clone();
+        let replacement = SessionEventBus::new(8);
+
+        assert_eq!(bus.generation(), clone.generation());
+        assert_ne!(bus.generation(), replacement.generation());
+        assert_eq!(bus.event_id(42), format!("{}:42", bus.generation()));
     }
 
     #[test]

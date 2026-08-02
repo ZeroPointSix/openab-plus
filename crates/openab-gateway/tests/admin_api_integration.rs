@@ -5,14 +5,16 @@
 
 mod common;
 
-use common::{spawn_admin_server, AdminTestEnv};
+use common::{spawn_admin_server, spawn_admin_server_with, AdminTestEnv};
 use openab_core::acp::protocol::{ConfigOption, ConfigOptionValue};
+use openab_core::acp::SessionPool;
 use openab_core::agent_profile::AgentProfile;
 use openab_core::config::AgentConfig;
 use openab_core::session_event::SessionEventKind;
 use openab_core::session_snapshot::{SessionSnapshot, SessionStatus};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 async fn read_sse_event(
     response: &mut reqwest::Response,
@@ -568,7 +570,10 @@ async fn sse_emits_session_created_with_id_and_status() {
         .publish(SessionEventKind::SessionCreated, snapshot);
 
     let (id, event) = read_sse_event(&mut response, "session.created").await;
-    assert_eq!(id, Some(published.sequence.to_string()));
+    assert_eq!(
+        id,
+        Some(pool.session_event_bus().event_id(published.sequence))
+    );
     assert_eq!(event["event"], "session.created");
     assert_eq!(event["snapshot"]["session_id"], "slack:sse-thread");
     assert_eq!(event["snapshot"]["status"], "idle");
@@ -608,21 +613,85 @@ async fn sse_replays_missed_event_after_last_event_id() {
 
     let server = spawn_admin_server(&env).await;
     let client = reqwest::Client::new();
+    let event_bus = pool.session_event_bus();
     let sse_url = format!("{}/api/v1/sessions/events", server.base_url);
     let mut response = client
         .get(&sse_url)
         .bearer_auth(&env.token)
-        .header("Last-Event-ID", first.sequence.to_string())
+        .header("Last-Event-ID", event_bus.event_id(first.sequence))
         .send()
         .await
         .expect("open replay sse");
 
     let (id, event) = read_sse_event(&mut response, "status_changed").await;
-    assert_eq!(id, Some(missed.sequence.to_string()));
+    assert_eq!(id, Some(event_bus.event_id(missed.sequence)));
     assert_eq!(event["event"], "status_changed");
     assert_eq!(event["snapshot"]["session_id"], "slack:replay-thread");
     assert_eq!(event["snapshot"]["status"], "running");
     assert_eq!(event["sequence"], missed.sequence);
+}
+
+#[tokio::test]
+async fn sse_resets_cursor_after_gateway_restart_and_delivers_live_events() {
+    let env = AdminTestEnv::new().await;
+    let previous_pool = env.pool();
+    let previous_bus = previous_pool.session_event_bus();
+    let previous = previous_bus.publish(
+        SessionEventKind::SessionCreated,
+        SessionSnapshot::new(
+            "slack:previous-gateway".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        ),
+    );
+    let previous_cursor = previous_bus.event_id(previous.sequence);
+
+    let fresh_pool = Arc::new(
+        SessionPool::new(AgentConfig::default(), 4, 120, HashMap::new())
+            .with_agent_profile_service(env.profile_service()),
+    );
+    let fresh_bus = fresh_pool.session_event_bus();
+    assert_ne!(previous_bus.generation(), fresh_bus.generation());
+
+    let server = spawn_admin_server_with(fresh_pool, env.profile_service()).await;
+    let client = reqwest::Client::new();
+    let mut response = client
+        .get(format!("{}/api/v1/sessions/events", server.base_url))
+        .bearer_auth(&env.token)
+        .header("Last-Event-ID", previous_cursor)
+        .send()
+        .await
+        .expect("open restarted gateway sse");
+
+    let (reset_id, reset) = read_sse_event(&mut response, "cursor_reset").await;
+    assert_eq!(reset_id, Some(fresh_bus.event_id(0)));
+    assert_eq!(reset["error"], "event cursor generation changed");
+    assert_eq!(reset["current_generation"], fresh_bus.generation());
+    assert_eq!(
+        reset["action"],
+        "refetch /api/v1/sessions before continuing the stream"
+    );
+
+    let published = fresh_bus.publish(
+        SessionEventKind::SessionCreated,
+        SessionSnapshot::new(
+            "slack:fresh-gateway".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        ),
+    );
+    let (id, event) = read_sse_event(&mut response, "session.created").await;
+    assert_eq!(id, Some(fresh_bus.event_id(published.sequence)));
+    assert_eq!(event["snapshot"]["session_id"], "slack:fresh-gateway");
+    assert_eq!(event["sequence"], published.sequence);
 }
 
 #[tokio::test]

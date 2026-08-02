@@ -103,7 +103,14 @@ pub fn unified_admin_router(
 }
 
 pub async fn spawn_admin_server(env: &AdminTestEnv) -> TestServer {
-    let app = unified_admin_router(env.pool(), env.profile_service());
+    spawn_admin_server_with(env.pool(), env.profile_service()).await
+}
+
+pub async fn spawn_admin_server_with(
+    pool: Arc<SessionPool>,
+    profile_service: Arc<AgentProfileService>,
+) -> TestServer {
+    let app = unified_admin_router(pool, profile_service);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");

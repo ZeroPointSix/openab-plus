@@ -7,7 +7,7 @@ use axum::response::{
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
-use openab_core::session_event::{SessionEvent, SessionEventReplay};
+use openab_core::session_event::{SessionEvent, SessionEventBus, SessionEventReplay};
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -78,31 +78,43 @@ async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Res
         return auth_error_response(err);
     }
 
-    let last_event_id = last_event_id(&headers);
-    let subscription = pool.session_event_bus().subscribe_after(last_event_id);
+    let event_bus = pool.session_event_bus();
+    let cursor = last_event_cursor(&headers);
+    let last_sequence = cursor.as_ref().and_then(|cursor| {
+        (cursor.generation.as_deref() == Some(event_bus.generation())).then_some(cursor.sequence)
+    });
+    let subscription = event_bus.subscribe_after(last_sequence);
     let last_replayed_sequence = subscription
         .replay
         .events
         .last()
         .map(|event| event.sequence)
-        .or(last_event_id)
+        .or(last_sequence)
         .unwrap_or_default();
-    let replay_events = replay_events_sse(last_event_id, subscription.replay);
+    let replay_events = replay_events_sse(
+        cursor.as_ref(),
+        last_sequence,
+        &event_bus,
+        subscription.replay,
+    );
 
     let live_events = stream::unfold(
-        (subscription.receiver, last_replayed_sequence),
-        |(mut receiver, last_replayed_sequence)| async move {
+        (subscription.receiver, last_replayed_sequence, event_bus),
+        |(mut receiver, last_replayed_sequence, event_bus)| async move {
             loop {
                 match receiver.recv().await {
                     Ok(event) if event.sequence <= last_replayed_sequence => continue,
                     Ok(event) => {
                         let sequence = event.sequence;
-                        return Some((session_event_sse(event), (receiver, sequence)));
+                        return Some((
+                            session_event_sse(&event_bus, event),
+                            (receiver, sequence, event_bus),
+                        ));
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         return Some((
                             lagged_event_sse(skipped),
-                            (receiver, last_replayed_sequence),
+                            (receiver, last_replayed_sequence, event_bus),
                         ));
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
@@ -116,30 +128,67 @@ async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Res
         .into_response()
 }
 
-fn last_event_id(headers: &HeaderMap) -> Option<u64> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionEventCursor {
+    generation: Option<String>,
+    sequence: u64,
+}
+
+fn last_event_cursor(headers: &HeaderMap) -> Option<SessionEventCursor> {
     headers
         .get("last-event-id")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse().ok())
+        .and_then(parse_last_event_id)
+}
+
+fn parse_last_event_id(value: &str) -> Option<SessionEventCursor> {
+    let value = value.trim();
+    if let Some((generation, sequence)) = value.rsplit_once(':') {
+        if !generation.is_empty() {
+            return sequence.parse().ok().map(|sequence| SessionEventCursor {
+                generation: Some(generation.to_string()),
+                sequence,
+            });
+        }
+    }
+
+    value.parse().ok().map(|sequence| SessionEventCursor {
+        generation: None,
+        sequence,
+    })
 }
 
 fn replay_events_sse(
-    last_event_id: Option<u64>,
+    cursor: Option<&SessionEventCursor>,
+    last_sequence: Option<u64>,
+    event_bus: &SessionEventBus,
     replay: SessionEventReplay,
 ) -> Vec<Result<Event, Infallible>> {
     let mut events = Vec::new();
-    if let Some(last_event_id) = last_event_id {
-        if replay.overflowed {
-            events.push(history_unavailable_event_sse(last_event_id, &replay));
+    if let Some(cursor) = cursor {
+        if last_sequence.is_none() {
+            events.push(cursor_reset_event_sse(cursor, event_bus));
+            return events;
         }
-        events.extend(replay.events.into_iter().map(session_event_sse));
+        if replay.overflowed {
+            events.push(history_unavailable_event_sse(cursor.sequence, &replay));
+        }
+        events.extend(
+            replay
+                .events
+                .into_iter()
+                .map(|event| session_event_sse(event_bus, event)),
+        );
     }
     events
 }
 
-fn session_event_sse(event: SessionEvent) -> Result<Event, Infallible> {
+fn session_event_sse(
+    event_bus: &SessionEventBus,
+    event: SessionEvent,
+) -> Result<Event, Infallible> {
     let event_name = event.event.as_sse_event();
-    let id = event.sequence.to_string();
+    let id = event_bus.event_id(event.sequence);
     let data = serde_json::to_string(&event).unwrap_or_else(|err| {
         json!({
             "error": "failed to serialize session event",
@@ -148,6 +197,25 @@ fn session_event_sse(event: SessionEvent) -> Result<Event, Infallible> {
         .to_string()
     });
     Ok(Event::default().event(event_name).id(id).data(data))
+}
+
+fn cursor_reset_event_sse(
+    cursor: &SessionEventCursor,
+    event_bus: &SessionEventBus,
+) -> Result<Event, Infallible> {
+    Ok(Event::default()
+        .event("cursor_reset")
+        .id(event_bus.event_id(0))
+        .data(
+            json!({
+                "error": "event cursor generation changed",
+                "last_event_generation": cursor.generation.as_deref(),
+                "last_sequence": cursor.sequence,
+                "current_generation": event_bus.generation(),
+                "action": "refetch /api/v1/sessions before continuing the stream",
+            })
+            .to_string(),
+        ))
 }
 
 fn lagged_event_sse(skipped: u64) -> Result<Event, Infallible> {
@@ -251,5 +319,27 @@ mod tests {
             authorize_with_expected(&headers, "test-token"),
             Err(AuthError::Unauthorized)
         ));
+    }
+
+    #[test]
+    fn parses_generation_qualified_last_event_id() {
+        assert_eq!(
+            parse_last_event_id("generation-1:42"),
+            Some(SessionEventCursor {
+                generation: Some("generation-1".into()),
+                sequence: 42,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_numeric_last_event_id_as_legacy_cursor() {
+        assert_eq!(
+            parse_last_event_id("42"),
+            Some(SessionEventCursor {
+                generation: None,
+                sequence: 42,
+            })
+        );
     }
 }
