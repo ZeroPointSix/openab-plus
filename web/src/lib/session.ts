@@ -1,0 +1,126 @@
+import {
+  SessionEventPayload,
+  SessionFilters,
+  SessionSnapshot,
+  SessionTimelineItem,
+} from '../types';
+
+const ACTIVE = new Set(['starting', 'idle', 'running', 'suspended']);
+const RUNNING = new Set(['starting', 'running']);
+const FAILED = new Set(['error', 'exited']);
+
+export function parseSessionEventPayload(
+  data: string,
+): SessionEventPayload | null {
+  try {
+    const value = JSON.parse(data) as Partial<SessionEventPayload>;
+    if (
+      !Number.isInteger(value.sequence) ||
+      typeof value.event !== 'string' ||
+      !value.snapshot ||
+      typeof value.snapshot.session_id !== 'string'
+    ) {
+      return null;
+    }
+    return value as SessionEventPayload;
+  } catch {
+    return null;
+  }
+}
+
+export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
+  return [...sessions].sort((a, b) =>
+    String(b.updated_at || b.created_at).localeCompare(
+      String(a.updated_at || a.created_at),
+    ),
+  );
+}
+
+export function filterSessions(
+  sessions: SessionSnapshot[],
+  filters: SessionFilters,
+): SessionSnapshot[] {
+  return sortSessions(sessions).filter((session) => {
+    if (filters.platform && session.source.platform !== filters.platform) {
+      return false;
+    }
+    if (filters.status && session.status !== filters.status) return false;
+    if (
+      filters.profile &&
+      session.profile_id !== filters.profile &&
+      session.profile_name !== filters.profile
+    ) {
+      return false;
+    }
+    if (filters.updatedRange) {
+      const time = new Date(session.updated_at).getTime();
+      const start = new Date(filters.updatedRange[0]).getTime();
+      const end = new Date(filters.updatedRange[1]).getTime();
+      if (time < start || time > end) return false;
+    }
+    return true;
+  });
+}
+
+export function sessionMetrics(sessions: SessionSnapshot[]) {
+  return {
+    total: sessions.length,
+    active: sessions.filter((session) => ACTIVE.has(session.status)).length,
+    running: sessions.filter((session) => RUNNING.has(session.status)).length,
+    failed: sessions.filter((session) => FAILED.has(session.status)).length,
+  };
+}
+
+export function applySessionEvent(
+  current: SessionSnapshot[] | undefined,
+  event: SessionEventPayload,
+): SessionSnapshot[] {
+  const sessions = current ? [...current] : [];
+  if (!event.snapshot) return sessions;
+  const index = sessions.findIndex(
+    (session) => session.session_id === event.snapshot?.session_id,
+  );
+  if (index === -1) sessions.push(event.snapshot);
+  else sessions[index] = event.snapshot;
+  return sortSessions(sessions);
+}
+
+export function timelineItemFromEvent(
+  event: SessionEventPayload,
+): SessionTimelineItem | null {
+  if (!event.snapshot) return null;
+  return {
+    id: String(event.sequence) + ':' + event.event,
+    event: event.event,
+    status: event.snapshot.status,
+    at: event.snapshot.updated_at || event.snapshot.created_at,
+    error: event.snapshot.last_error,
+    sequence: event.sequence,
+  };
+}
+
+export function initialTimeline(
+  session: SessionSnapshot,
+): SessionTimelineItem[] {
+  const items: SessionTimelineItem[] = [
+    {
+      id: 'created',
+      event: 'session.created',
+      status: 'idle',
+      at: session.created_at,
+    },
+  ];
+  if (
+    session.updated_at !== session.created_at ||
+    session.status !== 'idle'
+  ) {
+    items.push({
+      id: 'current',
+      event: 'current',
+      status: session.status,
+      at: session.updated_at,
+      error: session.last_error,
+    });
+  }
+  return items;
+}

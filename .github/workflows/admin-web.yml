@@ -1,0 +1,53 @@
+name: Admin Web
+
+on:
+  pull_request:
+    paths:
+      - "web/**"
+      - "crates/openab-gateway/src/web_admin.rs"
+      - ".github/workflows/admin-web.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "web/**"
+      - "crates/openab-gateway/src/web_admin.rs"
+      - ".github/workflows/admin-web.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.14.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm --dir web lint
+
+      - name: Run web tests
+        run: pnpm --dir web test
+
+      - name: Build embedded assets
+        run: pnpm --dir web build
+
+      - name: Verify generated assets are committed
+        run: git diff --exit-code -- web/index.html web/app.js web/styles.css
+
+      - name: Verify Gateway embedding
+        run: cargo test -p openab-gateway web_admin

@@ -1,0 +1,62 @@
+import { useEffect, useState } from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { AdminLayout } from './components/AdminLayout';
+import { LoginPage } from './pages/LoginPage';
+import { OverviewPage } from './pages/OverviewPage';
+import { SessionsPage } from './pages/SessionsPage';
+import { SessionDetailPage } from './pages/SessionDetailPage';
+import { ProfilesPage } from './pages/ProfilesPage';
+import { ConfigPage } from './pages/ConfigPage';
+import {
+  readAdminToken,
+  UNAUTHORIZED_EVENT,
+} from './lib/auth';
+
+export function App() {
+  const [token, setToken] = useState(readAdminToken);
+  const [loginReason, setLoginReason] = useState('');
+
+  useEffect(() => {
+    const unauthorized = () => {
+      setLoginReason('登录已失效，请重新输入 Admin Token。');
+      setToken('');
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, unauthorized);
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, unauthorized);
+  }, []);
+
+  if (!token) {
+    return (
+      <LoginPage
+        reason={loginReason}
+        onAuthenticated={(value) => {
+          setLoginReason('');
+          setToken(value);
+        }}
+      />
+    );
+  }
+
+  return (
+    <Routes>
+      <Route
+        element={
+          <AdminLayout
+            onLogout={() => {
+              setLoginReason('');
+              setToken('');
+            }}
+          />
+        }
+      >
+        <Route index element={<Navigate to="/overview" replace />} />
+        <Route path="/overview" element={<OverviewPage />} />
+        <Route path="/sessions" element={<SessionsPage />} />
+        <Route path="/sessions/:id" element={<SessionDetailPage />} />
+        <Route path="/profiles" element={<ProfilesPage />} />
+        <Route path="/config" element={<ConfigPage />} />
+        <Route path="*" element={<Navigate to="/overview" replace />} />
+      </Route>
+    </Routes>
+  );
+}

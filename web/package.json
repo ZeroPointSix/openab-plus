@@ -1,10 +1,34 @@
 {
   "name": "openab-admin-web",
   "private": true,
-  "version": "0.1.9",
+  "version": "0.2.0",
   "type": "module",
+  "packageManager": "pnpm@10.14.0",
   "scripts": {
-    "lint": "node --check app.js && node --check profiles.js",
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build && node scripts/promote-build.mjs",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
     "test:profile-schema": "node ../scripts/profile-ui-schema-smoke.mjs"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^6.0.0",
+    "@ant-design/pro-components": "^2.8.10",
+    "@microsoft/fetch-event-source": "^2.0.1",
+    "@tanstack/react-query": "^5.87.1",
+    "antd": "^5.27.4",
+    "dayjs": "^1.11.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.24",
+    "@types/react-dom": "^18.3.7",
+    "@types/node": "^22.13.4",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.5"
   }
 }
