@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { App as AntApp, ConfigProvider } from 'antd';
+import { App as AntApp, ConfigProvider, theme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { HashRouter } from 'react-router-dom';
@@ -26,16 +26,21 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <ConfigProvider
       locale={zhCN}
       theme={{
+        algorithm: theme.defaultAlgorithm,
         token: {
           colorPrimary: '#1677ff',
           colorInfo: '#1677ff',
           colorSuccess: '#1f9d68',
           colorWarning: '#d98b16',
           colorError: '#d14343',
-          colorText: '#17212b',
-          colorTextSecondary: '#5f6b78',
-          colorBgLayout: '#f3f6f9',
-          borderRadius: 6,
+          colorText: '#1b2430',
+          colorTextSecondary: '#5b6b7c',
+          colorTextTertiary: '#8593a3',
+          colorBgLayout: '#f4f6fa',
+          colorBorder: '#d9e2ec',
+          colorBorderSecondary: '#e8eef4',
+          colorFillSecondary: '#eef2f7',
+          borderRadius: 8,
           fontFamily:
             'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
         },
@@ -44,11 +49,40 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             controlHeight: 34,
           },
           Card: {
-            borderRadiusLG: 6,
+            borderRadiusLG: 10,
           },
           Table: {
-            headerBg: '#f7f9fb',
-            headerColor: '#3d4956',
+            headerBg: '#f7f9fc',
+            headerColor: '#45536a',
+            rowHoverBg: '#f5f8ff',
+            headerSplitColor: 'transparent',
+          },
+          Select: {
+            optionSelectedBg: '#e8f1ff',
+          },
+          Drawer: {
+            colorBgElevated: '#ffffff',
+          },
+          DatePicker: {
+            colorBgElevated: '#ffffff',
+          },
+          Tooltip: {
+            colorBgSpotlight: '#1b2430',
+          },
+          Menu: {
+            darkItemBg: '#0e1a28',
+            darkSubMenuItemBg: '#0e1a28',
+            darkPopupBg: '#0e1a28',
+            darkItemColor: '#9db0c6',
+            darkItemHoverColor: '#ffffff',
+            darkItemHoverBg: 'rgba(255, 255, 255, 0.08)',
+            darkItemSelectedBg: '#1677ff',
+            darkItemSelectedColor: '#ffffff',
+          },
+          Layout: {
+            siderBg: '#0e1a28',
+            triggerBg: '#0e1a28',
+            triggerColor: '#7d92a9',
           },
         },
       }}

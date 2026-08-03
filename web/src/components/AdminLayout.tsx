@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ApiOutlined,
   AppstoreOutlined,
@@ -27,10 +27,29 @@ const streamLabels: Record<StreamStatus, string> = {
   offline: '离线',
 };
 
+const COLLAPSE_STORAGE_KEY = 'openab.admin.sider-collapsed';
+
+function readCollapsedPreference(): boolean {
+  try {
+    return window.localStorage.getItem(COLLAPSE_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
 export function AdminLayout({ onLogout }: AdminLayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const streamStatus = useSessionStream(true);
+  const [collapsed, setCollapsed] = useState(readCollapsedPreference);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(COLLAPSE_STORAGE_KEY, collapsed ? '1' : '0');
+    } catch {
+      // localStorage may be unavailable; collapse state simply won't persist.
+    }
+  }, [collapsed]);
 
   const route = useMemo(
     () => ({
@@ -71,11 +90,12 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       title="OpenAB Plus"
       logo={<div className="layout-logo">OA</div>}
       layout="mix"
-      navTheme="realDark"
       fixedHeader
       fixSiderbar
       breakpoint="lg"
       siderWidth={232}
+      collapsed={collapsed}
+      onCollapse={setCollapsed}
       route={route}
       location={{ pathname: location.pathname }}
       menuItemRender={(item, dom) => (
@@ -119,7 +139,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
             ],
           }}
         >
-          <Button type="text" className="account-button">
+          <Button type="text" className="account-button" aria-label="账户菜单">
             <Avatar size="small" icon={<ApiOutlined />} />
             <span>管理员</span>
           </Button>
@@ -128,14 +148,20 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       token={{
         header: {
           colorBgHeader: '#ffffff',
-          colorHeaderTitle: '#17212b',
+          colorHeaderTitle: '#1b2430',
           heightLayoutHeader: 56,
         },
         sider: {
-          colorMenuBackground: '#101923',
-          colorTextMenu: '#a9b6c4',
+          colorMenuBackground: '#0e1a28',
+          colorTextMenu: '#9db0c6',
+          colorTextMenuSecondary: '#7d92a9',
           colorTextMenuSelected: '#ffffff',
           colorBgMenuItemSelected: '#1677ff',
+          colorBgMenuItemHover: 'rgba(255, 255, 255, 0.08)',
+          colorTextMenuActive: '#ffffff',
+          colorBgCollapsedButton: '#0e1a28',
+          colorTextCollapsedButton: '#7d92a9',
+          colorTextCollapsedButtonHover: '#ffffff',
         },
         pageContainer: {
           paddingInlinePageContainerContent: 24,

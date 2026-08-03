@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Button, Space, Tooltip, Typography, message } from 'antd';
+import { Button, Empty, Space, Tooltip, Typography, message } from 'antd';
 import {
   DownloadOutlined,
   EyeOutlined,
@@ -232,6 +232,22 @@ export function SessionTable({
       ]}
       headerTitle={title}
       cardBordered
+      locale={{
+        emptyText: (
+          <Empty
+            className="table-empty"
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <Space direction="vertical" size={2}>
+                <Typography.Text strong>暂无会话</Typography.Text>
+                <Typography.Text type="secondary">
+                  Agent 通过 Gateway 启动会话后，会实时显示在这里
+                </Typography.Text>
+              </Space>
+            }
+          />
+        ),
+      }}
     />
   );
 }

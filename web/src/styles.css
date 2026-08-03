@@ -1,6 +1,6 @@
 :root {
-  color: #17212b;
-  background: #f3f6f9;
+  color: #1b2430;
+  background: #f4f6fa;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   letter-spacing: 0;
@@ -31,21 +31,28 @@ select {
   font: inherit;
 }
 
+/* ---------- 登录页 ---------- */
+
 .login-page {
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 32px 20px;
-  background-color: #eaf0f5;
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(22, 119, 255, 0.10), transparent 60%),
+    radial-gradient(900px 500px at 110% 110%, rgba(31, 157, 104, 0.08), transparent 55%),
+    linear-gradient(165deg, #edf2f9 0%, #f5f8fc 55%, #eef2f7 100%);
 }
 
 .login-card {
   width: min(100%, 440px);
-  padding: 34px;
-  border: 1px solid #d8e0e8;
-  border-radius: 8px;
+  padding: 36px;
+  border: 1px solid #e2e9f1;
+  border-radius: 14px;
   background: #ffffff;
-  box-shadow: 0 18px 48px rgba(19, 38, 57, 0.12);
+  box-shadow:
+    0 1px 2px rgba(16, 27, 41, 0.05),
+    0 24px 56px rgba(16, 27, 41, 0.10);
 }
 
 .login-brand {
@@ -66,9 +73,10 @@ select {
   flex: 0 0 auto;
   width: 46px;
   height: 46px;
-  border-radius: 7px;
+  border-radius: 10px;
   color: #ffffff;
-  background: #1677ff;
+  background: linear-gradient(135deg, #2f86ff 0%, #1668dc 100%);
+  box-shadow: 0 6px 14px rgba(22, 119, 255, 0.28);
   font-weight: 700;
 }
 
@@ -76,7 +84,8 @@ select {
   width: 30px;
   height: 30px;
   border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 5px;
+  border-radius: 7px;
+  box-shadow: none;
   font-size: 12px;
 }
 
@@ -87,6 +96,7 @@ select {
   margin-bottom: 20px;
   padding: 10px 12px;
   border-left: 3px solid #1f9d68;
+  border-radius: 0 6px 6px 0;
   color: #406053;
   background: #eef8f3;
   font-size: 13px;
@@ -102,6 +112,8 @@ select {
   font-size: 12px;
 }
 
+/* ---------- 布局框架 ---------- */
+
 .menu-link {
   width: 100%;
   height: 100%;
@@ -116,13 +128,18 @@ select {
   text-align: left;
 }
 
+.ant-pro-sider-logo {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .ant-pro-sider-logo h1 {
   color: #ffffff !important;
   font-size: 16px !important;
+  letter-spacing: 0.2px;
 }
 
 .ant-pro-layout .ant-layout-header {
-  border-bottom: 1px solid #e7edf2;
+  border-bottom: 1px solid #e8eef4;
   box-shadow: none !important;
 }
 
@@ -133,8 +150,8 @@ select {
 .stream-status {
   min-width: 96px;
   padding: 5px 8px;
-  border: 1px solid #e1e7ed;
-  border-radius: 5px;
+  border: 1px solid #e3eaf1;
+  border-radius: 6px;
   background: #f8fafc;
   color: #42505e;
   font-size: 12px;
@@ -163,12 +180,15 @@ select {
   font-size: 20px;
 }
 
+/* ---------- 卡片与面板 ---------- */
+
 .metric-strip {
   margin-bottom: 18px;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
+  border: 1px solid #e6edf4;
+  border-radius: 10px;
   overflow: hidden;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
 }
 
 .metric-strip .ant-pro-card {
@@ -177,7 +197,7 @@ select {
 }
 
 .metric-strip .ant-pro-card + .ant-pro-card {
-  border-left: 1px solid #e7edf2;
+  border-left: 1px solid #e8eef4;
 }
 
 .metric-strip .ant-statistic-title {
@@ -192,7 +212,7 @@ select {
 .metric-icon {
   margin-right: 8px;
   padding: 8px;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 18px;
 }
 
@@ -219,9 +239,10 @@ select {
 .overview-filter {
   margin-bottom: 18px;
   padding: 16px 18px 0;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
+  border: 1px solid #e6edf4;
+  border-radius: 10px;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
 }
 
 .overview-filter .ant-form {
@@ -231,15 +252,16 @@ select {
 }
 
 .session-table .ant-pro-card {
-  border-radius: 7px;
-  box-shadow: none;
+  border: 1px solid #e6edf4;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
 }
 
 .session-table .ant-pro-table-search {
   margin-block-end: 16px;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
-  box-shadow: none;
+  border: 1px solid #e6edf4;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
 }
 
 .session-table .ant-table-cell {
@@ -250,6 +272,10 @@ select {
   min-width: 78px;
   margin-inline-end: 0;
   text-align: center;
+}
+
+.table-empty {
+  padding: 40px 0 44px;
 }
 
 .page-loading {
@@ -273,9 +299,10 @@ select {
 .detail-panel,
 .config-status-band {
   min-width: 0;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
+  border: 1px solid #e6edf4;
+  border-radius: 10px;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
 }
 
 .detail-panel {
@@ -352,7 +379,7 @@ select {
   margin-top: 14px;
   padding: 16px;
   border: 1px solid #dbe6f2;
-  border-radius: 7px;
+  border-radius: 10px;
   background: #f7faff;
 }
 
@@ -381,10 +408,10 @@ select {
   margin: 0;
   overflow: auto;
   padding: 16px;
-  border: 1px solid #e1e7ed;
-  border-radius: 5px;
-  color: #cce1f5;
-  background: #14202b;
+  border: 1px solid #1c2c3d;
+  border-radius: 8px;
+  color: #d6e6f7;
+  background: #101c29;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.7;
@@ -392,9 +419,24 @@ select {
   overflow-wrap: anywhere;
 }
 
+.config-document pre::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.config-document pre::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.config-document pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .metadata-table .ant-pro-card {
-  border-radius: 7px;
-  box-shadow: none;
+  border: 1px solid #e6edf4;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
 }
 
 .ant-pro-form-list-container {
@@ -402,17 +444,19 @@ select {
 }
 
 .ant-drawer .ant-drawer-header {
-  border-bottom: 1px solid #e7edf2;
+  border-bottom: 1px solid #e8eef4;
 }
 
 .ant-drawer .ant-drawer-footer {
-  border-top: 1px solid #e7edf2;
+  border-top: 1px solid #e8eef4;
 }
 
 .ant-btn-icon-only {
   display: inline-grid;
   place-items: center;
 }
+
+/* ---------- 响应式 ---------- */
 
 @media (max-width: 1100px) {
   .session-detail-grid,
@@ -448,7 +492,7 @@ select {
 
   .metric-strip .ant-pro-card {
     min-width: 50%;
-    border-bottom: 1px solid #e7edf2;
+    border-bottom: 1px solid #e8eef4;
   }
 
   .overview-filter {

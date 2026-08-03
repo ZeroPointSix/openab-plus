@@ -24,6 +24,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
+  Empty,
   Form,
   Popconfirm,
   Space,
@@ -389,6 +390,30 @@ export function ProfilesPage() {
           setting: true,
         }}
         headerTitle="Profile 列表"
+        locale={{
+          emptyText: (
+            <Empty
+              className="table-empty"
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={
+                <Space direction="vertical" size={2}>
+                  <Typography.Text strong>还没有 Agent Profile</Typography.Text>
+                  <Typography.Text type="secondary">
+                    Profile 定义 Agent 的启动参数与运行策略，先创建一个开始使用
+                  </Typography.Text>
+                </Space>
+              }
+            >
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => openEditor()}
+              >
+                新建 Profile
+              </Button>
+            </Empty>
+          ),
+        }}
       />
 
       <DrawerForm<ProfileFormValues>
