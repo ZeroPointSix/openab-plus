@@ -230,6 +230,15 @@ export function SessionTable({
           </Button>
         ) : null,
       ]}
+      locale={{
+        emptyText: (
+          <div style={{ padding: '32px 0' }}>
+            <Typography.Text type="secondary">
+              暂无会话数据，等待 Gateway 上报或调整筛选条件
+            </Typography.Text>
+          </div>
+        ),
+      }}
       headerTitle={title}
       cardBordered
     />

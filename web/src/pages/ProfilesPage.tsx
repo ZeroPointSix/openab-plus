@@ -27,6 +27,7 @@ import {
   Form,
   Popconfirm,
   Space,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -393,7 +394,7 @@ export function ProfilesPage() {
 
       <DrawerForm<ProfileFormValues>
         title={editing ? '编辑 Profile' : '新建 Profile'}
-        width={680}
+        width={720}
         open={open}
         onOpenChange={setOpen}
         form={form}
@@ -409,121 +410,150 @@ export function ProfilesPage() {
           return true;
         }}
       >
-        <div className="form-section-heading">
-          <Typography.Text strong>基础信息</Typography.Text>
-        </div>
-        <ProFormGroup>
-          <ProFormText
-            name="id"
-            label="Profile ID"
-            width="md"
-            disabled={Boolean(editing)}
-            rules={[
-              { required: true, message: '请输入 Profile ID' },
-              {
-                pattern: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/,
-                message: '仅支持字母、数字、点、下划线和连字符',
-              },
-            ]}
-          />
-          <ProFormText
-            name="name"
-            label="名称"
-            width="md"
-            rules={[{ required: true, message: '请输入名称' }]}
-          />
-          <ProFormSelect
-            name="agent_type"
-            label="Agent 类型"
-            width="md"
-            showSearch
-            disabled={Boolean(editing)}
-            options={agentTypes.map((value) => ({ label: value, value }))}
-            rules={[{ required: true, message: '请选择 Agent 类型' }]}
-          />
-          <ProFormSwitch name="enabled" label="启用" width="md" />
-        </ProFormGroup>
-
-        <div className="form-section-heading">
-          <Typography.Text strong>运行参数</Typography.Text>
-        </div>
-        <ProFormGroup>
-          <ProFormText name="command" label="命令覆盖" width="md" />
-          <ProFormSelect
-            name="args"
-            label="启动参数"
-            width="md"
-            mode="tags"
-            options={[]}
-          />
-          <ProFormText name="default_model" label="默认模型" width="md" />
-          <ProFormText
-            name="reasoning_effort"
-            label="推理强度"
-            width="md"
-          />
-          <ProFormSelect
-            name="workdir_strategy"
-            label="工作目录策略"
-            width="md"
-            options={[
-              { label: '系统默认', value: 'system_default' },
-              { label: 'Profile 默认', value: 'profile_default' },
-              { label: '会话临时目录', value: 'ephemeral_per_session' },
-            ]}
-          />
-          <ProFormDependency name={['workdir_strategy']}>
-            {({ workdir_strategy }) =>
-              workdir_strategy === 'profile_default' ? (
-                <ProFormText
-                  name="working_dir"
-                  label="默认工作目录"
-                  width="md"
-                  rules={[{ required: true, message: '请输入默认工作目录' }]}
-                />
-              ) : null
-            }
-          </ProFormDependency>
-          <ProFormDigit
-            name="timeout_secs"
-            label="超时（秒）"
-            width="md"
-            min={1}
-            fieldProps={{ precision: 0 }}
-          />
-          <ProFormSelect
-            name="recovery_strategy"
-            label="恢复策略"
-            width="md"
-            options={[
-              { label: '不恢复', value: 'none' },
-              { label: '重启进程', value: 'restart_process' },
-              { label: '恢复会话', value: 'resume_session' },
-            ]}
-          />
-          <ProFormSelect
-            name="inherit_env"
-            label="继承环境变量"
-            width="md"
-            mode="tags"
-            options={[]}
-          />
-        </ProFormGroup>
-
-        <ProFormList
-          name="env_ref_entries"
-          label="环境变量引用"
-          creatorButtonProps={{
-            creatorButtonText: '添加环境变量引用',
-          }}
-        >
-          <ProFormGroup>
-            <ProFormText name="key" label="变量名" width="sm" />
-            <ProFormText name="value" label="引用" width="md" />
-          </ProFormGroup>
-        </ProFormList>
-
-        <DynamicConfigFields agentType={agentType} />
+        <Tabs
+          className="profile-form-tabs"
+          items={[
+            {
+              key: 'basic',
+              label: '基础信息',
+              children: (
+                <ProFormGroup>
+                  <ProFormText
+                    name="id"
+                    label="Profile ID"
+                    width="md"
+                    disabled={Boolean(editing)}
+                    rules={[
+                      { required: true, message: '请输入 Profile ID' },
+                      {
+                        pattern: /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/,
+                        message: '仅支持字母、数字、点、下划线和连字符',
+                      },
+                    ]}
+                  />
+                  <ProFormText
+                    name="name"
+                    label="名称"
+                    width="md"
+                    rules={[{ required: true, message: '请输入名称' }]}
+                  />
+                  <ProFormSelect
+                    name="agent_type"
+                    label="Agent 类型"
+                    width="md"
+                    showSearch
+                    disabled={Boolean(editing)}
+                    options={agentTypes.map((value) => ({
+                      label: value,
+                      value,
+                    }))}
+                    rules={[{ required: true, message: '请选择 Agent 类型' }]}
+                  />
+                  <ProFormSwitch name="enabled" label="启用" width="md" />
+                </ProFormGroup>
+              ),
+            },
+            {
+              key: 'runtime',
+              label: '运行参数',
+              children: (
+                <>
+                  <ProFormGroup>
+                    <ProFormText name="command" label="命令覆盖" width="md" />
+                    <ProFormSelect
+                      name="args"
+                      label="启动参数"
+                      width="md"
+                      mode="tags"
+                      options={[]}
+                    />
+                    <ProFormText
+                      name="default_model"
+                      label="默认模型"
+                      width="md"
+                    />
+                    <ProFormText
+                      name="reasoning_effort"
+                      label="推理强度"
+                      width="md"
+                      tooltip="控制 Agent 推理深度，具体取值取决于 Agent 类型"
+                    />
+                    <ProFormSelect
+                      name="workdir_strategy"
+                      label="工作目录策略"
+                      width="md"
+                      options={[
+                        { label: '系统默认', value: 'system_default' },
+                        { label: 'Profile 默认', value: 'profile_default' },
+                        {
+                          label: '会话临时目录',
+                          value: 'ephemeral_per_session',
+                        },
+                      ]}
+                    />
+                    <ProFormDependency name={['workdir_strategy']}>
+                      {({ workdir_strategy }) =>
+                        workdir_strategy === 'profile_default' ? (
+                          <ProFormText
+                            name="working_dir"
+                            label="默认工作目录"
+                            width="md"
+                            rules={[
+                              { required: true, message: '请输入默认工作目录' },
+                            ]}
+                          />
+                        ) : null
+                      }
+                    </ProFormDependency>
+                    <ProFormDigit
+                      name="timeout_secs"
+                      label="超时（秒）"
+                      width="md"
+                      min={1}
+                      fieldProps={{ precision: 0 }}
+                    />
+                    <ProFormSelect
+                      name="recovery_strategy"
+                      label="恢复策略"
+                      width="md"
+                      options={[
+                        { label: '不恢复', value: 'none' },
+                        { label: '重启进程', value: 'restart_process' },
+                        { label: '恢复会话', value: 'resume_session' },
+                      ]}
+                    />
+                    <ProFormSelect
+                      name="inherit_env"
+                      label="继承环境变量"
+                      width="md"
+                      mode="tags"
+                      options={[]}
+                    />
+                  </ProFormGroup>
+                  <DynamicConfigFields agentType={agentType} />
+                </>
+              ),
+            },
+            {
+              key: 'env',
+              label: '环境变量',
+              children: (
+                <ProFormList
+                  name="env_ref_entries"
+                  label="环境变量引用"
+                  creatorButtonProps={{
+                    creatorButtonText: '添加环境变量引用',
+                  }}
+                >
+                  <ProFormGroup>
+                    <ProFormText name="key" label="变量名" width="sm" />
+                    <ProFormText name="value" label="引用" width="md" />
+                  </ProFormGroup>
+                </ProFormList>
+              ),
+            },
+          ]}
+        />
       </DrawerForm>
     </PageContainer>
   );

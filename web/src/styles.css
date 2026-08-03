@@ -1,14 +1,12 @@
 :root {
-  color: #17212b;
-  background: #f3f6f9;
+  color: #1f1f1f;
+  background: #f0f2f5;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  letter-spacing: 0;
 }
 
 * {
   box-sizing: border-box;
-  letter-spacing: 0;
 }
 
 html,
@@ -31,28 +29,36 @@ select {
   font: inherit;
 }
 
+/* ── Login ─────────────────────────────────────────────── */
+
 .login-page {
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 32px 20px;
-  background-color: #eaf0f5;
+  background:
+  radial-gradient(ellipse at 20% 50%, rgba(22, 119, 255, 0.08) 0%, transparent 50%),
+  radial-gradient(ellipse at 80% 20%, rgba(82, 196, 26, 0.06) 0%, transparent 40%),
+  linear-gradient(160deg, #e8f0fe 0%, #f0f2f5 50%, #e6f4ff 100%);
 }
 
 .login-card {
-  width: min(100%, 440px);
-  padding: 34px;
-  border: 1px solid #d8e0e8;
-  border-radius: 8px;
+  width: min(100%, 420px);
+  padding: 40px 36px 32px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
   background: #ffffff;
-  box-shadow: 0 18px 48px rgba(19, 38, 57, 0.12);
+  box-shadow:
+    0 6px 16px 0 rgba(0, 0, 0, 0.08),
+    0 3px 6px -4px rgba(0, 0, 0, 0.12),
+    0 9px 28px 8px rgba(0, 0, 0, 0.05);
 }
 
 .login-brand {
   display: flex;
   align-items: center;
   gap: 14px;
-  margin-bottom: 22px;
+  margin-bottom: 24px;
 }
 
 .login-brand .ant-typography {
@@ -64,20 +70,22 @@ select {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
-  width: 46px;
-  height: 46px;
-  border-radius: 7px;
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
   color: #ffffff;
-  background: #1677ff;
+  background: linear-gradient(135deg, #1677ff 0%, #0958d9 100%);
   font-weight: 700;
+  font-size: 15px;
+  box-shadow: 0 4px 12px rgba(22, 119, 255, 0.35);
 }
 
 .layout-logo {
-  width: 30px;
-  height: 30px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 5px;
-  font-size: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  font-size: 11px;
+  box-shadow: none;
 }
 
 .login-security {
@@ -85,10 +93,11 @@ select {
   align-items: center;
   gap: 8px;
   margin-bottom: 20px;
-  padding: 10px 12px;
-  border-left: 3px solid #1f9d68;
-  color: #406053;
-  background: #eef8f3;
+  padding: 10px 14px;
+  border-radius: 6px;
+  color: #389e0d;
+  background: #f6ffed;
+  border: 1px solid #b7eb8f;
   font-size: 13px;
 }
 
@@ -97,10 +106,13 @@ select {
 }
 
 .login-footnote {
-  margin: 18px 0 0 !important;
+  margin: 20px 0 0 !important;
   text-align: center;
   font-size: 12px;
+  line-height: 1.6;
 }
+
+/* ── Layout ────────────────────────────────────────────── */
 
 .menu-link {
   width: 100%;
@@ -119,11 +131,16 @@ select {
 .ant-pro-sider-logo h1 {
   color: #ffffff !important;
   font-size: 16px !important;
+  font-weight: 600 !important;
 }
 
 .ant-pro-layout .ant-layout-header {
-  border-bottom: 1px solid #e7edf2;
-  box-shadow: none !important;
+  border-bottom: 1px solid #f0f0f0;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04) !important;
+}
+
+.ant-pro-layout .ant-pro-layout-content {
+  background: #f0f2f5 !important;
 }
 
 .ant-pro-global-header {
@@ -132,23 +149,24 @@ select {
 
 .stream-status {
   min-width: 96px;
-  padding: 5px 8px;
-  border: 1px solid #e1e7ed;
-  border-radius: 5px;
-  background: #f8fafc;
-  color: #42505e;
+  padding: 4px 10px;
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  background: #fafafa;
+  color: #595959;
   font-size: 12px;
 }
 
 .version-text {
   font-size: 12px;
+  color: #8c8c8c;
 }
 
 .account-button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  height: 38px;
+  height: 36px;
 }
 
 .app-content {
@@ -161,89 +179,122 @@ select {
 
 .page-container .ant-page-header-heading-title {
   font-size: 20px;
+  font-weight: 600;
 }
 
+.page-container .ant-page-header-heading-sub-title {
+  color: #8c8c8c;
+}
+
+/* ── Metric strip ──────────────────────────────────────── */
+
 .metric-strip {
-  margin-bottom: 18px;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
+  margin-bottom: 16px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
   overflow: hidden;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .metric-strip .ant-pro-card {
   border-radius: 0;
   box-shadow: none;
+  background: #ffffff !important;
 }
 
 .metric-strip .ant-pro-card + .ant-pro-card {
-  border-left: 1px solid #e7edf2;
+  border-left: 1px solid #f0f0f0;
 }
 
 .metric-strip .ant-statistic-title {
-  color: #667380;
+  color: #8c8c8c;
   font-size: 13px;
+  margin-bottom: 4px;
 }
 
 .metric-strip .ant-statistic-content {
-  font-size: 28px;
+  font-size: 30px;
+  font-weight: 600;
+  color: #1f1f1f;
 }
 
 .metric-icon {
   margin-right: 8px;
   padding: 8px;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 18px;
 }
 
 .metric-icon.blue {
   color: #1677ff;
-  background: #eaf3ff;
+  background: #e6f4ff;
 }
 
 .metric-icon.green {
-  color: #1f9d68;
-  background: #e9f7f1;
+  color: #52c41a;
+  background: #f6ffed;
 }
 
 .metric-icon.amber {
-  color: #b96d08;
-  background: #fff4df;
+  color: #fa8c16;
+  background: #fff7e6;
 }
 
 .metric-icon.red {
-  color: #d14343;
-  background: #feeeee;
+  color: #ff4d4f;
+  background: #fff2f0;
 }
 
+/* ── Filters ───────────────────────────────────────────── */
+
 .overview-filter {
-  margin-bottom: 18px;
-  padding: 16px 18px 0;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
+  margin-bottom: 16px;
+  padding: 16px 20px 4px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .overview-filter .ant-form {
   display: flex;
   flex-wrap: wrap;
-  gap: 0 18px;
+  gap: 0 16px;
 }
 
-.session-table .ant-pro-card {
-  border-radius: 7px;
-  box-shadow: none;
+.overview-filter .ant-form-item-label > label {
+  color: #595959;
+}
+
+/* ── Tables ────────────────────────────────────────────── */
+
+.session-table .ant-pro-card,
+.metadata-table .ant-pro-card {
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  background: #ffffff !important;
+  border: 1px solid #f0f0f0;
 }
 
 .session-table .ant-pro-table-search {
-  margin-block-end: 16px;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
-  box-shadow: none;
+  margin-block-end: 0;
+  border: none;
+  border-radius: 8px 8px 0 0;
+  background: #fafafa !important;
+  padding: 16px 20px 4px;
+}
+
+.session-table .ant-pro-table-search .ant-form-item-label > label {
+  color: #595959;
 }
 
 .session-table .ant-table-cell {
   vertical-align: middle;
+}
+
+.session-table .ant-table-tbody > tr:hover > td {
+  background: #f5f9ff !important;
 }
 
 .status-tag {
@@ -258,6 +309,8 @@ select {
   place-items: center;
 }
 
+/* ── Detail pages ──────────────────────────────────────── */
+
 .detail-alert,
 .config-alert {
   margin-bottom: 16px;
@@ -266,20 +319,21 @@ select {
 .session-detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 370px);
-  gap: 18px;
+  gap: 16px;
   align-items: start;
 }
 
 .detail-panel,
 .config-status-band {
   min-width: 0;
-  border: 1px solid #e0e7ee;
-  border-radius: 7px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
   background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
 }
 
 .detail-panel {
-  padding: 20px;
+  padding: 20px 24px;
 }
 
 .panel-heading,
@@ -288,7 +342,7 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .panel-heading .ant-typography {
@@ -323,23 +377,26 @@ select {
 
 .metadata-panel .ant-descriptions-item-label {
   width: 96px;
-  color: #6a7683;
+  color: #8c8c8c;
 }
 
 .metadata-panel .ant-descriptions-item-content {
   min-width: 0;
   overflow-wrap: anywhere;
+  color: #1f1f1f;
 }
 
 .metadata-panel .ant-alert {
   margin-top: 16px;
 }
 
+/* ── Profile form ──────────────────────────────────────── */
+
 .form-section-heading {
   margin-top: 4px;
   margin-bottom: 12px;
   padding-bottom: 8px;
-  border-bottom: 1px solid #edf1f5;
+  border-bottom: 1px solid #f0f0f0;
 }
 
 .form-section-heading > div {
@@ -348,21 +405,33 @@ select {
   gap: 2px;
 }
 
+.profile-form-tabs {
+  margin-top: -8px;
+}
+
+.profile-form-tabs .ant-tabs-nav {
+  margin-bottom: 20px;
+}
+
 .dynamic-config-section {
-  margin-top: 14px;
+  margin-top: 4px;
   padding: 16px;
-  border: 1px solid #dbe6f2;
-  border-radius: 7px;
-  background: #f7faff;
+  border: 1px solid #d6e4ff;
+  border-radius: 8px;
+  background: #f0f5ff;
 }
 
 .dynamic-config-section .form-section-heading {
   margin-top: 0;
+  border-bottom: none;
+  padding-bottom: 0;
 }
 
+/* ── Config page ───────────────────────────────────────── */
+
 .config-status-band {
-  margin-bottom: 18px;
-  padding: 18px 20px;
+  margin-bottom: 16px;
+  padding: 20px 24px;
 }
 
 .config-status-band .panel-heading {
@@ -372,47 +441,63 @@ select {
 .config-grid {
   display: grid;
   grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
-  gap: 18px;
+  gap: 16px;
   align-items: start;
 }
 
 .config-document pre {
-  max-height: 620px;
+  max-height: 560px;
   margin: 0;
   overflow: auto;
-  padding: 16px;
-  border: 1px solid #e1e7ed;
-  border-radius: 5px;
-  color: #cce1f5;
-  background: #14202b;
+  padding: 16px 20px;
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  color: #1f1f1f;
+  background: #fafafa;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
+  font-size: 13px;
   line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .metadata-table .ant-pro-card {
-  border-radius: 7px;
-  box-shadow: none;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+/* ── Drawer ────────────────────────────────────────────── */
+
+.ant-drawer .ant-drawer-header {
+  border-bottom: 1px solid #f0f0f0;
+  background: #ffffff;
+}
+
+.ant-drawer .ant-drawer-body {
+  background: #ffffff;
+}
+
+.ant-drawer .ant-drawer-footer {
+  border-top: 1px solid #f0f0f0;
+  background: #fafafa;
 }
 
 .ant-pro-form-list-container {
   width: 100%;
 }
 
-.ant-drawer .ant-drawer-header {
-  border-bottom: 1px solid #e7edf2;
-}
-
-.ant-drawer .ant-drawer-footer {
-  border-top: 1px solid #e7edf2;
-}
-
 .ant-btn-icon-only {
   display: inline-grid;
   place-items: center;
 }
+
+/* ── Empty states ──────────────────────────────────────── */
+
+.ant-empty-description {
+  color: #8c8c8c;
+}
+
+/* ── Responsive ────────────────────────────────────────── */
 
 @media (max-width: 1100px) {
   .session-detail-grid,
@@ -448,7 +533,7 @@ select {
 
   .metric-strip .ant-pro-card {
     min-width: 50%;
-    border-bottom: 1px solid #e7edf2;
+    border-bottom: 1px solid #f0f0f0;
   }
 
   .overview-filter {
@@ -468,7 +553,7 @@ select {
   }
 
   .login-card {
-    padding: 26px 22px;
+    padding: 28px 22px 24px;
   }
 }
 

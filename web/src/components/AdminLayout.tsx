@@ -71,11 +71,12 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       title="OpenAB Plus"
       logo={<div className="layout-logo">OA</div>}
       layout="mix"
-      navTheme="realDark"
+      navTheme="light"
       fixedHeader
       fixSiderbar
       breakpoint="lg"
       siderWidth={232}
+      contentStyle={{ background: '#f0f2f5' }}
       route={route}
       location={{ pathname: location.pathname }}
       menuItemRender={(item, dom) => (
@@ -132,12 +133,15 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           heightLayoutHeader: 56,
         },
         sider: {
-          colorMenuBackground: '#101923',
-          colorTextMenu: '#a9b6c4',
+          colorMenuBackground: '#001529',
+          colorTextMenu: 'rgba(255, 255, 255, 0.65)',
           colorTextMenuSelected: '#ffffff',
           colorBgMenuItemSelected: '#1677ff',
+          colorTextMenuTitle: '#ffffff',
+          colorTextMenuActive: '#ffffff',
         },
         pageContainer: {
+          colorBgPageContainer: '#f0f2f5',
           paddingInlinePageContainerContent: 24,
           paddingBlockPageContainerContent: 20,
         },

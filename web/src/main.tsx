@@ -29,26 +29,43 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         token: {
           colorPrimary: '#1677ff',
           colorInfo: '#1677ff',
-          colorSuccess: '#1f9d68',
-          colorWarning: '#d98b16',
-          colorError: '#d14343',
-          colorText: '#17212b',
-          colorTextSecondary: '#5f6b78',
-          colorBgLayout: '#f3f6f9',
-          borderRadius: 6,
+          colorSuccess: '#52c41a',
+          colorWarning: '#faad14',
+          colorError: '#ff4d4f',
+          colorText: '#1f1f1f',
+          colorTextSecondary: '#595959',
+          colorTextTertiary: '#8c8c8c',
+          colorBgLayout: '#f0f2f5',
+          colorBgContainer: '#ffffff',
+          colorBgElevated: '#ffffff',
+          colorBorder: '#d9d9d9',
+          colorBorderSecondary: '#f0f0f0',
+          borderRadius: 8,
+          boxShadow:
+            '0 1px 2px 0 rgba(0, 0, 0, 0.03), 0 1px 6px -1px rgba(0, 0, 0, 0.02), 0 2px 4px 0 rgba(0, 0, 0, 0.02)',
           fontFamily:
-            'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
         },
         components: {
           Button: {
-            controlHeight: 34,
+            controlHeight: 36,
+            borderRadius: 6,
           },
           Card: {
-            borderRadiusLG: 6,
+            borderRadiusLG: 8,
+            colorBgContainer: '#ffffff',
           },
           Table: {
-            headerBg: '#f7f9fb',
-            headerColor: '#3d4956',
+            headerBg: '#fafafa',
+            headerColor: '#1f1f1f',
+            rowHoverBg: '#f5f9ff',
+            borderColor: '#f0f0f0',
+          },
+          Select: {
+            colorBgContainer: '#ffffff',
+          },
+          Drawer: {
+            colorBgElevated: '#ffffff',
           },
         },
       }}
