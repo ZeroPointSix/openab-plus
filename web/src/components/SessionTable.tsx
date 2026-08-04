@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Button, Space, Tooltip, Typography, message } from 'antd';
+import { Button, Empty, Space, Tooltip, Typography, message } from 'antd';
 import {
   DownloadOutlined,
   EyeOutlined,
@@ -15,6 +15,7 @@ import { SessionFilters, SessionSnapshot } from '../types';
 import { filterSessions } from '../lib/session';
 import { formatDateTime, formatRelativeTime } from '../lib/format';
 import { StatusTag } from './StatusTag';
+import { EntityMark } from './EntityMark';
 
 interface SessionTableProps {
   sessions: SessionSnapshot[];
@@ -86,7 +87,10 @@ export function SessionTable({
       valueType: 'select',
       valueEnum: enumFrom(sessions.map((session) => session.agent)),
       render: (_, record) => (
-        <Typography.Text strong>{record.agent || '-'}</Typography.Text>
+        <Space size={8} className="agent-cell">
+          <EntityMark name={record.agent} />
+          <Typography.Text strong>{record.agent || '-'}</Typography.Text>
+        </Space>
       ),
     },
     {
@@ -232,14 +236,26 @@ export function SessionTable({
       ]}
       locale={{
         emptyText: (
-          <div style={{ padding: '32px 0' }}>
-            <Typography.Text type="secondary">
-              暂无会话数据，等待 Gateway 上报或调整筛选条件
-            </Typography.Text>
-          </div>
+          <Empty
+            className="table-empty"
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <Space direction="vertical" size={2}>
+                <Typography.Text strong>暂无会话</Typography.Text>
+                <Typography.Text type="secondary">
+                  Agent 通过 Gateway 启动会话后，会实时显示在这里
+                </Typography.Text>
+              </Space>
+            }
+          />
         ),
       }}
-      headerTitle={title}
+      headerTitle={
+        <Space size={10} align="center">
+          <span>{title}</span>
+          <span className="table-count">共 {dataSource.length} 条</span>
+        </Space>
+      }
       cardBordered
     />
   );

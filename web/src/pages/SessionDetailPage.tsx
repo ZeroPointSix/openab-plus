@@ -5,6 +5,7 @@ import {
   ClockCircleOutlined,
   ExclamationCircleFilled,
   LinkOutlined,
+  ProfileOutlined,
 } from '@ant-design/icons';
 import { PageContainer } from '@ant-design/pro-components';
 import {
@@ -114,13 +115,17 @@ export function SessionDetailPage() {
       <div className="session-detail-grid">
         <section className="detail-panel timeline-panel">
           <div className="panel-heading">
-            <div>
-              <Typography.Title level={4}>事件时间线</Typography.Title>
-              <Typography.Text type="secondary">
-                实时状态事件，最多保留当前会话最近 60 条
-              </Typography.Text>
+            <div className="panel-heading-title">
+              <span className="panel-icon blue" aria-hidden="true">
+                <BranchesOutlined />
+              </span>
+              <div>
+                <Typography.Title level={4}>事件时间线</Typography.Title>
+                <Typography.Text type="secondary">
+                  实时状态事件，最多保留当前会话最近 60 条
+                </Typography.Text>
+              </div>
             </div>
-            <BranchesOutlined />
           </div>
           {timeline.length ? (
             <Timeline
@@ -164,7 +169,17 @@ export function SessionDetailPage() {
 
         <aside className="detail-panel metadata-panel">
           <div className="panel-heading">
-            <Typography.Title level={4}>会话元数据</Typography.Title>
+            <div className="panel-heading-title">
+              <span className="panel-icon violet" aria-hidden="true">
+                <ProfileOutlined />
+              </span>
+              <div>
+                <Typography.Title level={4}>会话元数据</Typography.Title>
+                <Typography.Text type="secondary">
+                  来源、工作目录与运行参数
+                </Typography.Text>
+              </div>
+            </div>
             <StatusTag status={session.status} />
           </div>
           <Descriptions column={1} size="small" colon={false}>

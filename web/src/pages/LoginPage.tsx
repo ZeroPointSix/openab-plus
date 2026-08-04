@@ -1,11 +1,14 @@
 import { useState } from 'react';
-import { Button, Form, Input, Typography, Alert } from 'antd';
+import { Alert, Button, Form, Input, Typography } from 'antd';
 import {
+  ApiOutlined,
   LockOutlined,
   SafetyCertificateOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
 import { adminApi, ApiError } from '../lib/api';
 import { saveAdminToken } from '../lib/auth';
+import openabLogo from '../assets/openab-logo.png?inline';
 
 interface LoginPageProps {
   onAuthenticated: (token: string) => void;
@@ -37,60 +40,100 @@ export function LoginPage({ onAuthenticated, reason }: LoginPageProps) {
 
   return (
     <main className="login-page">
-      <section className="login-card" aria-labelledby="login-title">
-        <div className="login-brand">
-          <div className="brand-logo" aria-hidden="true">
-            OA
+      <div className="login-shell">
+        <section className="login-hero" aria-label="产品介绍">
+          <div className="login-hero-brand">
+            <img className="brand-logo" src={openabLogo} alt="" />
+            <span>OpenAB Plus</span>
           </div>
-          <div>
-            <Typography.Title id="login-title" level={2}>
-              OpenAB Admin
+          <Typography.Title className="login-hero-title">
+            多平台 Agent 会话的运维控制台
+          </Typography.Title>
+          <Typography.Paragraph className="login-hero-subtitle">
+            统一查看 Discord、Slack、Telegram 等平台接入的 Agent
+            会话，管理启动 Profile 与 Gateway 配置。
+          </Typography.Paragraph>
+          <ul className="login-hero-points">
+            <li>
+              <span className="login-point-icon blue" aria-hidden="true">
+                <ApiOutlined />
+              </span>
+              <div>
+                <strong>实时会话流</strong>
+                <span>状态事件通过 SSE 即时推送，无需手动刷新</span>
+              </div>
+            </li>
+            <li>
+              <span className="login-point-icon amber" aria-hidden="true">
+                <ThunderboltOutlined />
+              </span>
+              <div>
+                <strong>Profile 化运行参数</strong>
+                <span>按 Agent 类型管理命令、模型与恢复策略</span>
+              </div>
+            </li>
+            <li>
+              <span className="login-point-icon green" aria-hidden="true">
+                <SafetyCertificateOutlined />
+              </span>
+              <div>
+                <strong>安全的只读配置</strong>
+                <span>敏感字段脱敏展示，凭据仅保存在浏览器会话</span>
+              </div>
+            </li>
+          </ul>
+        </section>
+
+        <section className="login-card" aria-labelledby="login-title">
+          <div className="login-card-heading">
+            <Typography.Title id="login-title" level={3}>
+              登录控制台
             </Typography.Title>
             <Typography.Text type="secondary">
-              Gateway 运行控制台
+              输入 Admin Token 继续
             </Typography.Text>
           </div>
-        </div>
-        <div className="login-security">
-          <SafetyCertificateOutlined />
-          <span>凭据仅保存在当前浏览器会话</span>
-        </div>
-        {error ? (
-          <Alert
-            type="error"
-            showIcon
-            message={error}
-            className="login-alert"
-          />
-        ) : null}
-        <Form layout="vertical" onFinish={submit} requiredMark={false}>
-          <Form.Item
-            name="token"
-            label="Admin Token"
-            rules={[{ required: true, message: '请输入 Admin Token' }]}
-          >
-            <Input.Password
-              autoFocus
-              size="large"
-              prefix={<LockOutlined />}
-              autoComplete="current-password"
-              placeholder="输入 Gateway Admin Token"
+          <div className="login-security">
+            <SafetyCertificateOutlined />
+            <span>凭据仅保存在当前浏览器会话</span>
+          </div>
+          {error ? (
+            <Alert
+              type="error"
+              showIcon
+              message={error}
+              className="login-alert"
             />
-          </Form.Item>
-          <Button
-            type="primary"
-            htmlType="submit"
-            size="large"
-            block
-            loading={loading}
-          >
-            登录控制台
-          </Button>
-        </Form>
-        <Typography.Paragraph type="secondary" className="login-footnote">
-          该控制台不会发送 Prompt，也不会接管运行中的 Agent。
-        </Typography.Paragraph>
-      </section>
+          ) : null}
+          <Form layout="vertical" onFinish={submit} requiredMark={false}>
+            <Form.Item
+              name="token"
+              label="Admin Token"
+              rules={[{ required: true, message: '请输入 Admin Token' }]}
+            >
+              <Input.Password
+                autoFocus
+                size="large"
+                prefix={<LockOutlined />}
+                autoComplete="current-password"
+                placeholder="输入 Gateway Admin Token"
+              />
+            </Form.Item>
+            <Button
+              type="primary"
+              htmlType="submit"
+              size="large"
+              block
+              loading={loading}
+            >
+              登录控制台
+            </Button>
+          </Form>
+          <Typography.Paragraph type="secondary" className="login-footnote">
+            该控制台不会发送 Prompt，也不会接管运行中的 Agent。
+          </Typography.Paragraph>
+        </section>
+      </div>
     </main>
   );
 }
