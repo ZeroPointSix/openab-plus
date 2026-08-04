@@ -185,17 +185,18 @@ select {
 
 .brand-logo,
 .layout-logo {
-  display: grid;
-  place-items: center;
+  display: block;
   flex: 0 0 auto;
+  object-fit: cover;
+  background: #f7f9fc;
+}
+
+.brand-logo {
   width: 44px;
   height: 44px;
-  border-radius: 11px;
-  color: #ffffff;
-  background: linear-gradient(135deg, #2f86ff 0%, #1668dc 100%);
-  box-shadow: 0 6px 14px rgba(22, 119, 255, 0.28);
-  font-weight: 700;
-  font-size: 14px;
+  border: 1px solid #e3eaf1;
+  border-radius: 12px;
+  box-shadow: 0 6px 14px rgba(16, 27, 41, 0.08);
 }
 
 .layout-logo {
@@ -204,7 +205,6 @@ select {
   border: 1px solid rgba(22, 104, 220, 0.16);
   border-radius: 10px;
   box-shadow: none;
-  font-size: 12px;
 }
 
 .login-security {

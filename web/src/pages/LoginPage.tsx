@@ -8,6 +8,7 @@ import {
 } from '@ant-design/icons';
 import { adminApi, ApiError } from '../lib/api';
 import { saveAdminToken } from '../lib/auth';
+import openabLogo from '../assets/openab-logo.png?inline';
 
 interface LoginPageProps {
   onAuthenticated: (token: string) => void;
@@ -42,9 +43,7 @@ export function LoginPage({ onAuthenticated, reason }: LoginPageProps) {
       <div className="login-shell">
         <section className="login-hero" aria-label="产品介绍">
           <div className="login-hero-brand">
-            <div className="brand-logo" aria-hidden="true">
-              OA
-            </div>
+            <img className="brand-logo" src={openabLogo} alt="" />
             <span>OpenAB Plus</span>
           </div>
           <Typography.Title className="login-hero-title">

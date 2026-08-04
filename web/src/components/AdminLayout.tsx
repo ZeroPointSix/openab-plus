@@ -12,6 +12,7 @@ import { ProLayout } from '@ant-design/pro-components';
 import { Avatar, Button, Dropdown, Tooltip } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { clearAdminToken } from '../lib/auth';
+import openabLogo from '../assets/openab-logo.png?inline';
 import {
   StreamStatus,
   useSessionStream,
@@ -89,7 +90,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
   return (
     <ProLayout
       title="OpenAB Plus"
-      logo={<div className="layout-logo">OA</div>}
+      logo={<img className="layout-logo" src={openabLogo} alt="" />}
       layout="mix"
       navTheme="light"
       fixedHeader
