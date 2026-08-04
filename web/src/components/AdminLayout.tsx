@@ -3,6 +3,7 @@ import {
   ApiOutlined,
   AppstoreOutlined,
   DashboardOutlined,
+  DownOutlined,
   LogoutOutlined,
   SettingOutlined,
   UserOutlined,
@@ -173,8 +174,9 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           }}
         >
           <Button type="text" className="account-button" aria-label="账户菜单">
-            <Avatar size="small" icon={<ApiOutlined />} />
-            <span>管理员</span>
+            <Avatar className="account-avatar" size="small" icon={<ApiOutlined />} />
+            <span className="account-label">管理员</span>
+            <DownOutlined className="account-button-caret" />
           </Button>
         </Dropdown>,
       ]}
@@ -182,7 +184,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
         header: {
           colorBgHeader: '#ffffff',
           colorHeaderTitle: '#1b2430',
-          heightLayoutHeader: 56,
+          heightLayoutHeader: 64,
         },
         sider: {
           colorMenuBackground: '#ffffff',

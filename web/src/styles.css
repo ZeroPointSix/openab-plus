@@ -199,12 +199,12 @@ select {
 }
 
 .layout-logo {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border: 1px solid rgba(22, 104, 220, 0.16);
-  border-radius: 8px;
+  border-radius: 10px;
   box-shadow: none;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .login-security {
@@ -236,7 +236,8 @@ select {
 .header-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  min-height: 64px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -247,22 +248,24 @@ select {
 .header-brand-text {
   display: flex;
   flex-direction: column;
+  gap: 2px;
   min-width: 0;
-  line-height: 1.3;
+  line-height: 1.2;
 }
 
 .header-brand-title {
   color: #1b2430;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: 0.1px;
   white-space: nowrap;
 }
 
 .header-brand-caption {
   color: #8593a3;
-  font-size: 11px;
-  letter-spacing: 0.8px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 1.1px;
   text-transform: uppercase;
   white-space: nowrap;
 }
@@ -370,10 +373,11 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-width: 96px;
-  padding: 5px 12px;
+  height: 34px;
+  min-width: 0;
+  padding: 0 11px;
   border: 1px solid #e3eaf1;
-  border-radius: 999px;
+  border-radius: 8px;
   background: #f8fafc;
   color: #42505e;
   font-size: 12px;
@@ -402,8 +406,26 @@ select {
 .account-button {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 38px;
+  gap: 8px;
+  height: 40px;
+  padding-inline: 9px 10px;
+  border-radius: 8px;
+  color: #42505e;
+}
+
+.account-button:hover {
+  color: #1b2430 !important;
+  background: #f5f8fc !important;
+}
+
+.account-avatar {
+  color: #5b6b7c !important;
+  background: #eef2f7 !important;
+}
+
+.account-button-caret {
+  color: #9aa8b8;
+  font-size: 10px;
 }
 
 .ant-pro-layout .ant-layout-header {
@@ -416,7 +438,7 @@ select {
 }
 
 .app-content {
-  min-height: calc(100vh - 56px);
+  min-height: calc(100vh - 64px);
 }
 
 .page-container .ant-pro-page-container-children-container {
@@ -811,7 +833,8 @@ select {
 
   .stream-status {
     min-width: auto;
-    padding: 6px;
+    height: 34px;
+    padding: 0 7px;
     border: 0;
     background: transparent;
   }
