@@ -90,6 +90,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       title="OpenAB Plus"
       logo={<div className="layout-logo">OA</div>}
       layout="mix"
+      navTheme="light"
       fixedHeader
       fixSiderbar
       breakpoint="lg"
