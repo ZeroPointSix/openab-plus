@@ -1,4 +1,5 @@
 import {
+  CodeOutlined,
   FileProtectOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
@@ -13,7 +14,6 @@ import {
   Alert,
   Button,
   Descriptions,
-  Space,
   Tag,
   Typography,
 } from 'antd';
@@ -110,10 +110,17 @@ export function ConfigPage() {
 
       <section className="config-status-band">
         <div className="panel-heading">
-          <Space>
-            <FileProtectOutlined />
-            <Typography.Title level={4}>配置状态</Typography.Title>
-          </Space>
+          <div className="panel-heading-title">
+            <span className="panel-icon blue" aria-hidden="true">
+              <FileProtectOutlined />
+            </span>
+            <div>
+              <Typography.Title level={4}>配置状态</Typography.Title>
+              <Typography.Text type="secondary">
+                运行时加载、校验与回滚能力
+              </Typography.Text>
+            </div>
+          </div>
           <Tag color={status?.rollback_available ? 'blue' : 'default'}>
             {status?.rollback_available ? '可回滚' : '无回滚快照'}
           </Tag>
@@ -145,7 +152,17 @@ export function ConfigPage() {
       <div className="config-grid">
         <section className="detail-panel config-document">
           <div className="panel-heading">
-            <Typography.Title level={4}>当前配置</Typography.Title>
+            <div className="panel-heading-title">
+              <span className="panel-icon dark" aria-hidden="true">
+                <CodeOutlined />
+              </span>
+              <div>
+                <Typography.Title level={4}>当前配置</Typography.Title>
+                <Typography.Text type="secondary">
+                  敏感字段已脱敏展示
+                </Typography.Text>
+              </div>
+            </div>
             <Tag color="blue">只读</Tag>
           </div>
           <pre aria-label="Gateway 当前配置">

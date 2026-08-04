@@ -24,6 +24,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
+  Empty,
   Form,
   Popconfirm,
   Space,
@@ -34,6 +35,7 @@ import {
   message,
 } from 'antd';
 import { adminApi, ApiError } from '../lib/api';
+import { EntityMark } from '../components/EntityMark';
 import {
   normalizeProfilePayload,
   profileToForm,
@@ -212,18 +214,21 @@ export function ProfilesPage() {
       title: 'Profile',
       dataIndex: 'name',
       render: (_, profile) => (
-        <Space direction="vertical" size={0}>
-          <Space size={6}>
-            <Typography.Text strong>{profile.name}</Typography.Text>
-            {profile.id === defaultProfile ? (
-              <Tag color="gold" icon={<StarFilled />}>
-                默认
-              </Tag>
-            ) : null}
+        <Space size={10} className="profile-cell">
+          <EntityMark name={profile.name || profile.id} size={30} />
+          <Space direction="vertical" size={0}>
+            <Space size={6}>
+              <Typography.Text strong>{profile.name}</Typography.Text>
+              {profile.id === defaultProfile ? (
+                <Tag color="gold" icon={<StarFilled />}>
+                  默认
+                </Tag>
+              ) : null}
+            </Space>
+            <Typography.Text type="secondary" code>
+              {profile.id}
+            </Typography.Text>
           </Space>
-          <Typography.Text type="secondary" code>
-            {profile.id}
-          </Typography.Text>
         </Space>
       ),
     },
@@ -389,7 +394,36 @@ export function ProfilesPage() {
           density: true,
           setting: true,
         }}
-        headerTitle="Profile 列表"
+        headerTitle={
+          <Space size={10} align="center">
+            <span>Profile 列表</span>
+            <span className="table-count">共 {profiles.length} 个</span>
+          </Space>
+        }
+        locale={{
+          emptyText: (
+            <Empty
+              className="table-empty"
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={
+                <Space direction="vertical" size={2}>
+                  <Typography.Text strong>还没有 Agent Profile</Typography.Text>
+                  <Typography.Text type="secondary">
+                    Profile 定义 Agent 的启动参数与运行策略，先创建一个开始使用
+                  </Typography.Text>
+                </Space>
+              }
+            >
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => openEditor()}
+              >
+                新建 Profile
+              </Button>
+            </Empty>
+          ),
+        }}
       />
 
       <DrawerForm<ProfileFormValues>

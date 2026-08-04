@@ -31,7 +31,7 @@ export default defineConfig({
   server: {
     port: 4173,
     proxy: {
-      '/api': 'http://127.0.0.1:8080',
+      '/api': process.env.ADMIN_DEV_PROXY_TARGET || 'http://127.0.0.1:8080',
     },
   },
 });

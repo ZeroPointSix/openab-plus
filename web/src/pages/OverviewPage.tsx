@@ -3,6 +3,7 @@ import {
   AppstoreOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
+  FilterOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import {
@@ -10,9 +11,9 @@ import {
   ProForm,
   ProFormDateTimeRangePicker,
   ProFormSelect,
-  StatisticCard,
 } from '@ant-design/pro-components';
 import { useQuery } from '@tanstack/react-query';
+import { Typography } from 'antd';
 import { SessionFilters } from '../types';
 import { adminApi } from '../lib/api';
 import { filterSessions, sessionMetrics } from '../lib/session';
@@ -66,46 +67,74 @@ export function OverviewPage() {
   const platforms = [...new Set(sessions.map((item) => item.source.platform))];
   const profiles = profilesQuery.data?.profiles || [];
 
+  const metricCards = [
+    {
+      key: 'total',
+      label: '会话总数',
+      value: metrics.total,
+      caption: 'Gateway 接入的全部会话',
+      icon: <AppstoreOutlined />,
+      tone: 'blue',
+    },
+    {
+      key: 'active',
+      label: '活跃会话',
+      value: metrics.active,
+      caption: '空闲或运行中，可继续交互',
+      icon: <CheckCircleOutlined />,
+      tone: 'green',
+    },
+    {
+      key: 'running',
+      label: '运行中',
+      value: metrics.running,
+      caption: '正在处理任务的会话',
+      icon: <ThunderboltOutlined />,
+      tone: 'amber',
+    },
+    {
+      key: 'failed',
+      label: '失败',
+      value: metrics.failed,
+      caption: '启动或运行异常，需要关注',
+      icon: <CloseCircleOutlined />,
+      tone: 'red',
+    },
+  ];
+
   return (
     <PageContainer
       title="运行总览"
       subTitle="Gateway 会话与 Agent 运行状态"
       className="page-container"
     >
-      <section className="metric-strip" aria-label="运行指标">
-        <StatisticCard.Group direction="row">
-          <StatisticCard
-            statistic={{
-              title: '会话总数',
-              value: metrics.total,
-              icon: <AppstoreOutlined className="metric-icon blue" />,
-            }}
-          />
-          <StatisticCard
-            statistic={{
-              title: '活跃会话',
-              value: metrics.active,
-              icon: <CheckCircleOutlined className="metric-icon green" />,
-            }}
-          />
-          <StatisticCard
-            statistic={{
-              title: '运行中',
-              value: metrics.running,
-              icon: <ThunderboltOutlined className="metric-icon amber" />,
-            }}
-          />
-          <StatisticCard
-            statistic={{
-              title: '失败',
-              value: metrics.failed,
-              icon: <CloseCircleOutlined className="metric-icon red" />,
-            }}
-          />
-        </StatisticCard.Group>
+      <section className="metric-grid" aria-label="运行指标">
+        {metricCards.map((card) => (
+          <article key={card.key} className={'metric-card tone-' + card.tone}>
+            <span className="metric-card-icon" aria-hidden="true">
+              {card.icon}
+            </span>
+            <div className="metric-card-body">
+              <span className="metric-card-label">{card.label}</span>
+              <span className="metric-card-value">{card.value}</span>
+              <span className="metric-card-caption">{card.caption}</span>
+            </div>
+          </article>
+        ))}
       </section>
 
       <section className="overview-filter" aria-label="总览筛选">
+        <div className="section-heading">
+          <span className="section-heading-icon" aria-hidden="true">
+            <FilterOutlined />
+          </span>
+          <div className="section-heading-text">
+            <Typography.Text strong>筛选会话</Typography.Text>
+            <Typography.Text type="secondary">
+              按平台、状态、Profile 或更新时间过滤
+            </Typography.Text>
+          </div>
+        </div>
         <ProForm
           layout="horizontal"
           submitter={false}
