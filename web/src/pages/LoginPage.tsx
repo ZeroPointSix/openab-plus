@@ -77,8 +77,8 @@ export function LoginPage({ onAuthenticated, reason }: LoginPageProps) {
                 <SafetyCertificateOutlined />
               </span>
               <div>
-                <strong>安全的只读配置</strong>
-                <span>敏感字段脱敏展示，凭据仅保存在浏览器会话</span>
+                <strong>安全的配置管理</strong>
+                <span>敏感字段始终脱敏，修改经校验后按策略生效</span>
               </div>
             </li>
           </ul>
