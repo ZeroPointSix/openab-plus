@@ -120,6 +120,13 @@ export interface ProfileValidationResult {
   errors: ProfileValidationError[];
 }
 
+export type ConfigScalar = string | number | boolean | null;
+export type ConfigValue =
+  | ConfigScalar
+  | ConfigValue[]
+  | { [key: string]: ConfigValue };
+export type ConfigValues = Record<string, ConfigValue>;
+
 export interface ConfigMetadata {
   path: string;
   apply_policy: 'runtime' | 'new_session' | 'restart_required';
@@ -127,8 +134,19 @@ export interface ConfigMetadata {
 }
 
 export interface ConfigDocument {
-  values: unknown;
+  values: ConfigValues;
   metadata: ConfigMetadata[];
+}
+
+export interface ConfigValidationError {
+  path: string;
+  code: string;
+  message: string;
+}
+
+export interface ConfigValidationResult {
+  ok: boolean;
+  errors: ConfigValidationError[];
 }
 
 export interface ConfigStatus {
@@ -137,10 +155,20 @@ export interface ConfigStatus {
   last_loaded_hash?: string;
   pending_restart: string[];
   rollback_available: boolean;
-  last_validation?: {
-    ok: boolean;
-    errors: Array<{ path: string; code: string; message: string }>;
+  last_validation?: ConfigValidationResult;
+}
+
+export interface ConfigUpdateResponse {
+  validation: ConfigValidationResult;
+  status: ConfigStatus;
+}
+
+export interface ConfigReloadResponse {
+  validation: ConfigValidationResult;
+  runtime: {
+    applied_paths: string[];
   };
+  status: ConfigStatus;
 }
 
 export interface SessionFilters {
