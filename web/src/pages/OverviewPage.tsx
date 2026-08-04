@@ -11,6 +11,7 @@ import {
   ProForm,
   ProFormDateTimeRangePicker,
   ProFormSelect,
+  StatisticCard,
 } from '@ant-design/pro-components';
 import { useQuery } from '@tanstack/react-query';
 import { Typography } from 'antd';
@@ -18,6 +19,8 @@ import { SessionFilters } from '../types';
 import { adminApi } from '../lib/api';
 import { filterSessions, sessionMetrics } from '../lib/session';
 import { SessionTable } from '../components/SessionTable';
+
+const { Statistic } = StatisticCard;
 
 function normalizeUpdatedRange(value: unknown): [string, string] | undefined {
   if (!Array.isArray(value) || value.length !== 2) {
@@ -67,61 +70,49 @@ export function OverviewPage() {
   const platforms = [...new Set(sessions.map((item) => item.source.platform))];
   const profiles = profilesQuery.data?.profiles || [];
 
-  const metricCards = [
-    {
-      key: 'total',
-      label: '会话总数',
-      value: metrics.total,
-      caption: 'Gateway 接入的全部会话',
-      icon: <AppstoreOutlined />,
-      tone: 'blue',
-    },
-    {
-      key: 'active',
-      label: '活跃会话',
-      value: metrics.active,
-      caption: '空闲或运行中，可继续交互',
-      icon: <CheckCircleOutlined />,
-      tone: 'green',
-    },
-    {
-      key: 'running',
-      label: '运行中',
-      value: metrics.running,
-      caption: '正在处理任务的会话',
-      icon: <ThunderboltOutlined />,
-      tone: 'amber',
-    },
-    {
-      key: 'failed',
-      label: '失败',
-      value: metrics.failed,
-      caption: '启动或运行异常，需要关注',
-      icon: <CloseCircleOutlined />,
-      tone: 'red',
-    },
-  ];
-
   return (
     <PageContainer
       title="运行总览"
       subTitle="Gateway 会话与 Agent 运行状态"
       className="page-container"
     >
-      <section className="metric-grid" aria-label="运行指标">
-        {metricCards.map((card) => (
-          <article key={card.key} className={'metric-card tone-' + card.tone}>
-            <span className="metric-card-icon" aria-hidden="true">
-              {card.icon}
-            </span>
-            <div className="metric-card-body">
-              <span className="metric-card-label">{card.label}</span>
-              <span className="metric-card-value">{card.value}</span>
-              <span className="metric-card-caption">{card.caption}</span>
-            </div>
-          </article>
-        ))}
-      </section>
+      <StatisticCard.Group direction="row" style={{ marginBottom: 18 }}>
+        <StatisticCard
+          statistic={{
+            title: '会话总数',
+            value: metrics.total,
+            description: <Statistic title="Gateway 接入的全部会话" value=" " />,
+            icon: <AppstoreOutlined style={{ color: '#1677ff', fontSize: 24 }} />
+          }}
+        />
+        <StatisticCard.Divider />
+        <StatisticCard
+          statistic={{
+            title: '活跃会话',
+            value: metrics.active,
+            description: <Statistic title="空闲或运行中，可继续交互" value=" " />,
+            icon: <CheckCircleOutlined style={{ color: '#52c41a', fontSize: 24 }} />
+          }}
+        />
+        <StatisticCard.Divider />
+        <StatisticCard
+          statistic={{
+            title: '运行中',
+            value: metrics.running,
+            description: <Statistic title="正在处理任务的会话" value=" " />,
+            icon: <ThunderboltOutlined style={{ color: '#faad14', fontSize: 24 }} />
+          }}
+        />
+        <StatisticCard.Divider />
+        <StatisticCard
+          statistic={{
+            title: '失败',
+            value: metrics.failed,
+            description: <Statistic title="启动或运行异常，需要关注" value=" " />,
+            icon: <CloseCircleOutlined style={{ color: '#ff4d4f', fontSize: 24 }} />
+          }}
+        />
+      </StatisticCard.Group>
 
       <section className="overview-filter" aria-label="总览筛选">
         <div className="section-heading">

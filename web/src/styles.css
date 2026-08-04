@@ -287,19 +287,10 @@ select {
   border-radius: 8px;
 }
 
-/* 侧边栏：深色导航 + 顶部渐变 */
-.ant-pro-sider .ant-layout-sider-children {
-  background-image: linear-gradient(180deg, #0e1c2e 0%, #0c1622 32%, #0b1420 100%);
-}
-
+/* 侧边栏 */
 .ant-pro-sider-menu .ant-menu-item {
   margin-inline: 8px;
   width: calc(100% - 16px);
-}
-
-.ant-pro-sider-menu .ant-menu-item-selected {
-  background-image: linear-gradient(90deg, #2f86ff 0%, #1668dc 100%);
-  box-shadow: 0 4px 12px rgba(22, 119, 255, 0.35);
 }
 
 .sider-footer {
@@ -308,9 +299,9 @@ select {
   gap: 10px;
   margin: 12px;
   padding: 12px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid #e8eef4;
+  border-radius: 8px;
+  background: #f8fafc;
 }
 
 .sider-footer.is-collapsed {
@@ -327,13 +318,13 @@ select {
 }
 
 .sider-footer-label {
-  color: #c8d4e2;
+  color: #5b6b7c;
   font-size: 12px;
   white-space: nowrap;
 }
 
 .sider-footer-version {
-  color: #6c8098;
+  color: #8593a3;
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -439,93 +430,6 @@ select {
 
 .page-container .ant-page-header-heading-sub-title {
   color: #8593a3;
-}
-
-/* ---------- 指标卡 ---------- */
-
-.metric-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 18px;
-}
-
-.metric-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 14px;
-  padding: 18px;
-  border: 1px solid #e6edf4;
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
-  transition:
-    box-shadow 0.18s ease,
-    transform 0.18s ease,
-    border-color 0.18s ease;
-}
-
-.metric-card:hover {
-  transform: translateY(-1px);
-  border-color: #d7e2ee;
-  box-shadow: 0 8px 20px rgba(16, 27, 41, 0.08);
-}
-
-.metric-card-icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  font-size: 18px;
-}
-
-.metric-card.tone-blue .metric-card-icon {
-  color: #1668dc;
-  background: #e8f1ff;
-}
-
-.metric-card.tone-green .metric-card-icon {
-  color: #1f9d68;
-  background: #e7f6ef;
-}
-
-.metric-card.tone-amber .metric-card-icon {
-  color: #b96d08;
-  background: #fff3dd;
-}
-
-.metric-card.tone-red .metric-card-icon {
-  color: #d14343;
-  background: #fdecec;
-}
-
-.metric-card-body {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.metric-card-label {
-  color: #667380;
-  font-size: 13px;
-}
-
-.metric-card-value {
-  margin-top: 2px;
-  color: #1b2430;
-  font-size: 28px;
-  font-weight: 600;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-}
-
-.metric-card-caption {
-  margin-top: 4px;
-  color: #8593a3;
-  font-size: 12px;
-  line-height: 1.5;
 }
 
 /* ---------- 筛选区 ---------- */
@@ -880,10 +784,6 @@ select {
   .metadata-panel {
     order: -1;
   }
-
-  .metric-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 900px) {
@@ -920,14 +820,6 @@ select {
     padding-inline: 12px;
   }
 
-  .metric-grid {
-    gap: 12px;
-  }
-
-  .metric-card {
-    padding: 14px;
-  }
-
   .overview-filter {
     padding: 14px 14px 0;
   }
@@ -952,10 +844,6 @@ select {
 @media (max-width: 480px) {
   .login-page {
     padding: 18px 12px;
-  }
-
-  .metric-grid {
-    grid-template-columns: 1fr;
   }
 
   .panel-heading {
