@@ -13,6 +13,7 @@ import { PageContainer } from '@ant-design/pro-components';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
+  App as AntApp,
   Button,
   Collapse,
   Descriptions,
@@ -26,7 +27,6 @@ import {
   Switch,
   Tag,
   Typography,
-  message,
 } from 'antd';
 import { adminApi, ApiError } from '../lib/api';
 import {
@@ -208,6 +208,7 @@ function ConfigFieldControl({
 }
 
 export function ConfigPage() {
+  const { message } = AntApp.useApp();
   const [draft, setDraft] = useState<ConfigValues>({});
   const [baseline, setBaseline] = useState<ConfigValues>({});
   const [initialized, setInitialized] = useState(false);
@@ -648,7 +649,10 @@ export function ConfigPage() {
 
         {!initialized && configQuery.isLoading ? (
           <div className="config-loading">
-            <Spin tip="正在读取配置" />
+            <Space direction="vertical" align="center">
+              <Spin />
+              <Typography.Text type="secondary">正在读取配置</Typography.Text>
+            </Space>
           </div>
         ) : filteredGroups.length ? (
           <Collapse
