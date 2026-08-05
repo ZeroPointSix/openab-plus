@@ -1063,18 +1063,19 @@ impl AdapterRouter {
                                 AcpEvent::Text(t) => {
                                     text_buf.push_str(&t);
                                     if native {
-                                        // Lazy stream_begin: open the stream on first text.
-                                        if native_msg.is_none() && !stream_begin_failed {
-                                            match adapter.stream_begin(&thread_channel, recipient.clone()).await {
-                                                Ok(m) => { native_msg = Some(m); }
-                                                Err(e) => {
-                                                    tracing::error!(error = ?e, "stream_begin failed on first text; will not retry this turn");
-                                                    stream_begin_failed = true;
-                                                }
-                                            }
-                                        }
+                                        native_pending.push_str(&t);
+                                        // Tool-progress adapters delay the final stream until the
+                                        // progress message exists. This keeps narration emitted
+                                        // before ToolStart from placing the final reply above the
+                                        // later progress message in the thread.
+                                        tool_progress
+                                            .begin_native_stream_when_ready(
+                                                recipient.clone(),
+                                                &mut native_msg,
+                                                &mut stream_begin_failed,
+                                            )
+                                            .await;
                                         if let Some(msg) = &native_msg {
-                                            native_pending.push_str(&t);
                                             if native_last_flush.elapsed().as_millis()
                                                 >= NATIVE_FLUSH_MS
                                                 && !native_pending.is_empty()
@@ -1135,6 +1136,15 @@ impl AdapterRouter {
                                         });
                                     }
                                     tool_progress.update(&tool_lines).await;
+                                    if native && tool_progress_enabled {
+                                        tool_progress
+                                            .begin_native_stream_when_ready(
+                                                recipient.clone(),
+                                                &mut native_msg,
+                                                &mut stream_begin_failed,
+                                            )
+                                            .await;
+                                    }
                                     // Post+edit live update (no-op under native streaming: buf_tx is None).
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(compose_display(
@@ -1243,6 +1253,13 @@ impl AdapterRouter {
                     // encodes the four-corner truth table so it can be unit-tested.
                     let text_buf = finalize_body(reset, keep_full_text, answer_start, text_buf);
 
+                    let interrupted_tools = fail_running_tools(&mut tool_lines);
+                    if interrupted_tools > 0 {
+                        warn!(
+                            interrupted_tools,
+                            "turn ended with running tools; marked them failed"
+                        );
+                    }
                     tool_progress.finish(&tool_lines).await;
                     // Build final content
                     let final_content =
@@ -1587,6 +1604,30 @@ impl ToolProgressMessage {
         }
     }
 
+    async fn begin_native_stream_when_ready(
+        &self,
+        recipient: Option<(String, String)>,
+        native_msg: &mut Option<MessageRef>,
+        stream_begin_failed: &mut bool,
+    ) {
+        if native_msg.is_some() || *stream_begin_failed || (self.enabled && self.message.is_none())
+        {
+            return;
+        }
+
+        match self.adapter.stream_begin(&self.channel, recipient).await {
+            Ok(message) => *native_msg = Some(message),
+            Err(error) => {
+                error!(
+                    platform = self.adapter.platform(),
+                    error = ?error,
+                    "stream_begin failed after progress ordering gate; will not retry this turn"
+                );
+                *stream_begin_failed = true;
+            }
+        }
+    }
+
     async fn update(&mut self, tools: &[ToolEntry]) {
         if !self.enabled || tools.is_empty() {
             return;
@@ -1637,17 +1678,29 @@ impl ToolProgressMessage {
     }
 }
 
+fn fail_running_tools(tools: &mut [ToolEntry]) -> usize {
+    let mut failed = 0;
+    for tool in tools {
+        if tool.state == ToolState::Running {
+            tool.state = ToolState::Failed;
+            failed += 1;
+        }
+    }
+    failed
+}
+
 fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDisplay) -> String {
     let mut out = if finished {
         format!("工具调用完成（共 {} 个）", tools.len())
-    } else if let Some(tool) = tools.iter().rev().find(|tool| tool.state == ToolState::Running) {
+    } else if let Some(tool) = tools
+        .iter()
+        .rev()
+        .find(|tool| tool.state == ToolState::Running)
+    {
         let session_started = tools.len() == 1;
         match display {
             ToolDisplay::Full if session_started => {
-                format!(
-                    "会话已启动，正在调用 `{}` 工具（已调用 1 个）",
-                    tool.title
-                )
+                format!("会话已启动，正在调用 `{}` 工具（已调用 1 个）", tool.title)
             }
             ToolDisplay::Full => {
                 format!(
@@ -1676,9 +1729,7 @@ fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDispl
             .iter()
             .filter(|tool| tool.state == ToolState::Failed)
             .count();
-        out.push_str(&format!(
-            "\n\n✅ 成功 {completed} 个\n❌ 失败 {failed} 个"
-        ));
+        out.push_str(&format!("\n\n✅ 成功 {completed} 个\n❌ 失败 {failed} 个"));
     } else if display != ToolDisplay::None {
         let summary = compose_display(tools, "", !finished, display);
         if !summary.is_empty() {
@@ -2284,6 +2335,7 @@ mod tests {
     struct ProgressTestAdapter {
         sends: std::sync::Mutex<Vec<String>>,
         edits: std::sync::Mutex<Vec<String>>,
+        events: std::sync::Mutex<Vec<&'static str>>,
     }
 
     #[async_trait]
@@ -2296,11 +2348,8 @@ mod tests {
             11_900
         }
 
-        async fn send_message(
-            &self,
-            channel: &ChannelRef,
-            content: &str,
-        ) -> Result<MessageRef> {
+        async fn send_message(&self, channel: &ChannelRef, content: &str) -> Result<MessageRef> {
+            self.events.lock().unwrap().push("progress");
             self.sends.lock().unwrap().push(content.to_string());
             Ok(MessageRef {
                 channel: channel.clone(),
@@ -2328,6 +2377,18 @@ mod tests {
         async fn edit_message(&self, _msg: &MessageRef, content: &str) -> Result<()> {
             self.edits.lock().unwrap().push(content.to_string());
             Ok(())
+        }
+
+        async fn stream_begin(
+            &self,
+            channel: &ChannelRef,
+            _recipient: Option<(String, String)>,
+        ) -> Result<MessageRef> {
+            self.events.lock().unwrap().push("final");
+            Ok(MessageRef {
+                channel: channel.clone(),
+                message_id: "stream-ts".into(),
+            })
         }
 
         fn use_streaming(&self, _other_bot_present: bool) -> bool {
@@ -2366,12 +2427,72 @@ mod tests {
         let edits = adapter.edits.lock().unwrap();
         assert_eq!(sends.len(), 1, "progress must create only one message");
         assert_eq!(edits.len(), 2, "later states must use message edits");
-        assert!(
-            sends[0].contains("会话已启动，正在调用 `web_search` 工具")
-        );
+        assert!(sends[0].contains("会话已启动，正在调用 `web_search` 工具"));
         assert!(edits[1].contains("✅ `web_search`"));
         assert!(edits[1].contains("❌ `cargo test`"));
         assert!(edits[1].contains("[Open in OpenAB Plus]("));
+    }
+
+    #[tokio::test]
+    async fn native_stream_waits_for_tool_progress_message() {
+        let adapter = Arc::new(ProgressTestAdapter::default());
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C1".into(),
+            thread_id: Some("1700.1".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let mut progress = ToolProgressMessage::new(
+            true,
+            adapter.clone(),
+            channel,
+            None,
+            None,
+            ToolDisplay::Full,
+        );
+        let mut native_msg = None;
+        let mut stream_begin_failed = false;
+
+        // This first attempt models narration arriving before ToolStart.
+        progress
+            .begin_native_stream_when_ready(None, &mut native_msg, &mut stream_begin_failed)
+            .await;
+        assert!(native_msg.is_none());
+        assert!(adapter.events.lock().unwrap().is_empty());
+
+        progress
+            .update(&[tool("1", "web_search", ToolState::Running)])
+            .await;
+        progress
+            .begin_native_stream_when_ready(None, &mut native_msg, &mut stream_begin_failed)
+            .await;
+
+        assert!(native_msg.is_some());
+        assert!(!stream_begin_failed);
+        assert_eq!(
+            adapter.events.lock().unwrap().as_slice(),
+            ["progress", "final"]
+        );
+    }
+
+    #[test]
+    fn turn_end_marks_running_tools_failed() {
+        let mut tools = vec![
+            tool("1", "web_search", ToolState::Running),
+            tool("2", "cargo test", ToolState::Completed),
+            tool("3", "git status", ToolState::Running),
+        ];
+
+        assert_eq!(fail_running_tools(&mut tools), 2);
+        assert_eq!(tools[0].state, ToolState::Failed);
+        assert_eq!(tools[1].state, ToolState::Completed);
+        assert_eq!(tools[2].state, ToolState::Failed);
+        assert_eq!(fail_running_tools(&mut tools), 0);
+
+        let output = compose_tool_progress(&tools, true, ToolDisplay::None);
+        assert!(output.contains("✅ 成功 1 个"));
+        assert!(output.contains("❌ 失败 2 个"));
     }
 
     #[test]
