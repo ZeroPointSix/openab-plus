@@ -12,7 +12,10 @@ import { ProLayout } from '@ant-design/pro-components';
 import { Avatar, Button, Dropdown, Tooltip } from 'antd';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { clearAdminToken } from '../lib/auth';
-import { confirmNavigation } from '../lib/navigationGuard';
+import {
+  confirmNavigation,
+  confirmRouteNavigation,
+} from '../lib/navigationGuard';
 import openabLogo from '../assets/openab-logo.png?inline';
 import {
   StreamStatus,
@@ -108,7 +111,9 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           type="button"
           className="header-brand"
           onClick={() => {
-            if (confirmNavigation()) navigate('/overview');
+            if (confirmRouteNavigation(location.pathname, '/overview')) {
+              navigate('/overview');
+            }
           }}
           aria-label="返回总览"
         >
@@ -126,7 +131,12 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           type="button"
           className="menu-link"
           onClick={() => {
-            if (item.path && confirmNavigation()) navigate(item.path);
+            if (
+              item.path &&
+              confirmRouteNavigation(location.pathname, item.path)
+            ) {
+              navigate(item.path);
+            }
           }}
         >
           {dom}
