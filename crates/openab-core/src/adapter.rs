@@ -457,6 +457,19 @@ pub trait ChatAdapter: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Whether this adapter keeps tool activity in one editable progress message.
+    /// The final answer remains a separate message and omits duplicated tool lines.
+    fn uses_tool_progress_message(&self) -> bool {
+        false
+    }
+
+    /// Label for a session deep link appended to progress and final messages.
+    /// Returning None keeps existing output unchanged for platforms without a
+    /// user-facing session console.
+    fn session_link_label(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Whether this platform renders Markdown tables natively. When `true`, the
     /// router skips the `convert_tables` pre-pass (which rewrites tables into
     /// code blocks / bullet lists for platforms that cannot render them) and
@@ -792,6 +805,18 @@ impl AdapterRouter {
             self.table_mode
         };
         let tool_display = self.reactions_config.tool_display;
+        let tool_progress_enabled = adapter.uses_tool_progress_message();
+        let reply_tool_display = if tool_progress_enabled {
+            ToolDisplay::None
+        } else {
+            tool_display
+        };
+        let session_link_label = adapter.session_link_label();
+        let external_url = self
+            .pool
+            .session_snapshot(thread_key)
+            .await
+            .and_then(|snapshot| snapshot.external_url);
         let prompt_hard_timeout = self.prompt_hard_timeout;
         let liveness_check_interval = self.liveness_check_interval;
         let session_pool = self.pool.clone();
@@ -802,6 +827,7 @@ impl AdapterRouter {
                 let content_blocks = content_blocks.clone();
                 let session_pool = session_pool.clone();
                 let session_key = session_key.clone();
+                let external_url = external_url.clone();
                 Box::pin(async move {
                     let reset = conn.session_reset;
                     conn.session_reset = false;
@@ -826,6 +852,14 @@ impl AdapterRouter {
 
                     let mut text_buf = String::new();
                     let mut tool_lines: Vec<ToolEntry> = Vec::new();
+                    let mut tool_progress = ToolProgressMessage::new(
+                        tool_progress_enabled,
+                        adapter.clone(),
+                        thread_channel.clone(),
+                        external_url.clone(),
+                        session_link_label,
+                        tool_display,
+                    );
                     // Byte offset into `text_buf` where the final answer block
                     // begins — advanced to the buffer end on every tool
                     // completion so it tracks "just past the last tool". Used by
@@ -1057,7 +1091,7 @@ impl AdapterRouter {
                                             &tool_lines,
                                             &text_buf,
                                             true,
-                                            tool_display,
+                                            reply_tool_display,
                                         ));
                                     }
                                 }
@@ -1100,13 +1134,14 @@ impl AdapterRouter {
                                             state: ToolState::Running,
                                         });
                                     }
+                                    tool_progress.update(&tool_lines).await;
                                     // Post+edit live update (no-op under native streaming: buf_tx is None).
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(compose_display(
                                             &tool_lines,
                                             &text_buf,
                                             true,
-                                            tool_display,
+                                            reply_tool_display,
                                         ));
                                     }
                                 }
@@ -1146,12 +1181,13 @@ impl AdapterRouter {
                                             state: new_state,
                                         });
                                     }
+                                    tool_progress.update(&tool_lines).await;
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(compose_display(
                                             &tool_lines,
                                             &text_buf,
                                             true,
-                                            tool_display,
+                                            reply_tool_display,
                                         ));
                                     }
                                 }
@@ -1207,9 +1243,10 @@ impl AdapterRouter {
                     // encodes the four-corner truth table so it can be unit-tested.
                     let text_buf = finalize_body(reset, keep_full_text, answer_start, text_buf);
 
+                    tool_progress.finish(&tool_lines).await;
                     // Build final content
                     let final_content =
-                        compose_display(&tool_lines, &text_buf, false, tool_display);
+                        compose_display(&tool_lines, &text_buf, false, reply_tool_display);
                     let final_content = if final_content.is_empty() {
                         if turn_result.is_silent_failure() {
                             warn!(
@@ -1226,6 +1263,11 @@ impl AdapterRouter {
                     } else {
                         final_content
                     };
+                    let final_content = append_session_link(
+                        &final_content,
+                        external_url.as_deref(),
+                        session_link_label,
+                    );
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
                     let chunks = if adapter.platform() == "discord" {
@@ -1513,6 +1555,150 @@ struct ToolEntry {
     id: String,
     title: String,
     state: ToolState,
+}
+
+struct ToolProgressMessage {
+    enabled: bool,
+    adapter: Arc<dyn ChatAdapter>,
+    channel: ChannelRef,
+    message: Option<MessageRef>,
+    external_url: Option<String>,
+    link_label: Option<&'static str>,
+    display: ToolDisplay,
+}
+
+impl ToolProgressMessage {
+    fn new(
+        enabled: bool,
+        adapter: Arc<dyn ChatAdapter>,
+        channel: ChannelRef,
+        external_url: Option<String>,
+        link_label: Option<&'static str>,
+        display: ToolDisplay,
+    ) -> Self {
+        Self {
+            enabled,
+            adapter,
+            channel,
+            message: None,
+            external_url,
+            link_label,
+            display,
+        }
+    }
+
+    async fn update(&mut self, tools: &[ToolEntry]) {
+        if !self.enabled || tools.is_empty() {
+            return;
+        }
+        let content = compose_tool_progress(tools, false, self.display);
+        self.write(append_session_link(
+            &content,
+            self.external_url.as_deref(),
+            self.link_label,
+        ))
+        .await;
+    }
+
+    async fn finish(&mut self, tools: &[ToolEntry]) {
+        if !self.enabled || tools.is_empty() {
+            return;
+        }
+        let content = compose_tool_progress(tools, true, self.display);
+        self.write(append_session_link(
+            &content,
+            self.external_url.as_deref(),
+            self.link_label,
+        ))
+        .await;
+    }
+
+    async fn write(&mut self, content: String) {
+        if let Some(message) = self.message.clone() {
+            if let Err(error) = self.adapter.edit_message(&message, &content).await {
+                warn!(
+                    platform = self.adapter.platform(),
+                    message_id = %message.message_id,
+                    error = ?error,
+                    "tool progress update failed"
+                );
+            }
+            return;
+        }
+
+        match self.adapter.send_message(&self.channel, &content).await {
+            Ok(message) => self.message = Some(message),
+            Err(error) => warn!(
+                platform = self.adapter.platform(),
+                error = ?error,
+                "tool progress message failed"
+            ),
+        }
+    }
+}
+
+fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDisplay) -> String {
+    let mut out = if finished {
+        format!("工具调用完成（共 {} 个）", tools.len())
+    } else if let Some(tool) = tools.iter().rev().find(|tool| tool.state == ToolState::Running) {
+        let session_started = tools.len() == 1;
+        match display {
+            ToolDisplay::Full if session_started => {
+                format!(
+                    "会话已启动，正在调用 `{}` 工具（已调用 1 个）",
+                    tool.title
+                )
+            }
+            ToolDisplay::Full => {
+                format!(
+                    "正在调用 `{}` 工具（已调用 {} 个）",
+                    tool.title,
+                    tools.len()
+                )
+            }
+            ToolDisplay::Compact | ToolDisplay::None if session_started => {
+                "会话已启动，正在调用工具（已调用 1 个）".to_string()
+            }
+            ToolDisplay::Compact | ToolDisplay::None => {
+                format!("正在调用工具（已调用 {} 个）", tools.len())
+            }
+        }
+    } else {
+        format!("最近一个工具已完成（已调用 {} 个）", tools.len())
+    };
+
+    if finished && display == ToolDisplay::None {
+        let completed = tools
+            .iter()
+            .filter(|tool| tool.state == ToolState::Completed)
+            .count();
+        let failed = tools
+            .iter()
+            .filter(|tool| tool.state == ToolState::Failed)
+            .count();
+        out.push_str(&format!(
+            "\n\n✅ 成功 {completed} 个\n❌ 失败 {failed} 个"
+        ));
+    } else if display != ToolDisplay::None {
+        let summary = compose_display(tools, "", !finished, display);
+        if !summary.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(summary.trim_end());
+        }
+    }
+    out
+}
+
+fn append_session_link(content: &str, url: Option<&str>, label: Option<&str>) -> String {
+    let Some((url, label)) = url.zip(label) else {
+        return content.to_string();
+    };
+    let content = content.trim_end();
+    if content.is_empty() {
+        format!("[{label}]({url})")
+    } else {
+        format!("{content}\n\n[{label}]({url})")
+    }
 }
 
 impl ToolEntry {
@@ -2092,6 +2278,136 @@ mod tests {
             title: title.into(),
             state,
         }
+    }
+
+    #[derive(Default)]
+    struct ProgressTestAdapter {
+        sends: std::sync::Mutex<Vec<String>>,
+        edits: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ChatAdapter for ProgressTestAdapter {
+        fn platform(&self) -> &'static str {
+            "slack"
+        }
+
+        fn message_limit(&self) -> usize {
+            11_900
+        }
+
+        async fn send_message(
+            &self,
+            channel: &ChannelRef,
+            content: &str,
+        ) -> Result<MessageRef> {
+            self.sends.lock().unwrap().push(content.to_string());
+            Ok(MessageRef {
+                channel: channel.clone(),
+                message_id: "progress-ts".into(),
+            })
+        }
+
+        async fn create_thread(
+            &self,
+            channel: &ChannelRef,
+            _trigger_msg: &MessageRef,
+            _title: &str,
+        ) -> Result<ChannelRef> {
+            Ok(channel.clone())
+        }
+
+        async fn add_reaction(&self, _msg: &MessageRef, _emoji: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_reaction(&self, _msg: &MessageRef, _emoji: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn edit_message(&self, _msg: &MessageRef, content: &str) -> Result<()> {
+            self.edits.lock().unwrap().push(content.to_string());
+            Ok(())
+        }
+
+        fn use_streaming(&self, _other_bot_present: bool) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_progress_sends_once_then_updates_in_place() {
+        let adapter = Arc::new(ProgressTestAdapter::default());
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C1".into(),
+            thread_id: Some("1700.1".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let mut progress = ToolProgressMessage::new(
+            true,
+            adapter.clone(),
+            channel,
+            Some("https://openab.example/sessions/slack%3A1700.1".into()),
+            Some("Open in OpenAB Plus"),
+            ToolDisplay::Full,
+        );
+        let mut tools = vec![tool("1", "web_search", ToolState::Running)];
+
+        progress.update(&tools).await;
+        tools[0].state = ToolState::Completed;
+        tools.push(tool("2", "cargo test", ToolState::Running));
+        progress.update(&tools).await;
+        tools[1].state = ToolState::Failed;
+        progress.finish(&tools).await;
+
+        let sends = adapter.sends.lock().unwrap();
+        let edits = adapter.edits.lock().unwrap();
+        assert_eq!(sends.len(), 1, "progress must create only one message");
+        assert_eq!(edits.len(), 2, "later states must use message edits");
+        assert!(
+            sends[0].contains("会话已启动，正在调用 `web_search` 工具")
+        );
+        assert!(edits[1].contains("✅ `web_search`"));
+        assert!(edits[1].contains("❌ `cargo test`"));
+        assert!(edits[1].contains("[Open in OpenAB Plus]("));
+    }
+
+    #[test]
+    fn session_link_is_appended_once_to_final_content() {
+        let output = append_session_link(
+            "完成",
+            Some("https://openab.example/sessions/slack%3A1700.1"),
+            Some("Open in OpenAB Plus"),
+        );
+        assert_eq!(
+            output,
+            "完成\n\n[Open in OpenAB Plus](https://openab.example/sessions/slack%3A1700.1)"
+        );
+    }
+
+    #[test]
+    fn session_link_is_omitted_without_public_base_url() {
+        assert_eq!(
+            append_session_link("完成", None, Some("Open in OpenAB Plus")),
+            "完成"
+        );
+    }
+
+    #[test]
+    fn hidden_tool_titles_still_report_final_outcomes() {
+        let tools = vec![
+            tool("1", "web_search", ToolState::Completed),
+            tool("2", "cargo test", ToolState::Failed),
+        ];
+
+        let output = compose_tool_progress(&tools, true, ToolDisplay::None);
+
+        assert!(output.contains("✅ 成功 1 个"));
+        assert!(output.contains("❌ 失败 1 个"));
+        assert!(!output.contains("web_search"));
+        assert!(!output.contains("cargo test"));
     }
 
     #[test]

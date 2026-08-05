@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AdminLayout } from './components/AdminLayout';
 import { LoginPage } from './pages/LoginPage';
 import { OverviewPage } from './pages/OverviewPage';
@@ -8,11 +8,15 @@ import { SessionDetailPage } from './pages/SessionDetailPage';
 import { ProfilesPage } from './pages/ProfilesPage';
 import { ConfigPage } from './pages/ConfigPage';
 import {
+  loginPathFor,
   readAdminToken,
+  returnToFromSearch,
   UNAUTHORIZED_EVENT,
 } from './lib/auth';
 
 export function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [token, setToken] = useState(readAdminToken);
   const [loginReason, setLoginReason] = useState('');
 
@@ -26,14 +30,25 @@ export function App() {
   }, []);
 
   if (!token) {
+    if (location.pathname !== '/login') {
+      return <Navigate to={loginPathFor(location)} replace />;
+    }
+
     return (
       <LoginPage
         reason={loginReason}
         onAuthenticated={(value) => {
           setLoginReason('');
           setToken(value);
+          navigate(returnToFromSearch(location.search), { replace: true });
         }}
       />
+    );
+  }
+
+  if (location.pathname === '/login') {
+    return (
+      <Navigate to={returnToFromSearch(location.search)} replace />
     );
   }
 

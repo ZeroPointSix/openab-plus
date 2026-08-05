@@ -684,6 +684,14 @@ impl ChatAdapter for SlackAdapter {
         }
         Ok(())
     }
+
+    fn uses_tool_progress_message(&self) -> bool {
+        true
+    }
+
+    fn session_link_label(&self) -> Option<&'static str> {
+        Some("Open in OpenAB Plus")
+    }
 }
 
 // --- Socket Mode event loop ---

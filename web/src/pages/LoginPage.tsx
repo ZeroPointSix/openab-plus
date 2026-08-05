@@ -95,7 +95,7 @@ export function LoginPage({ onAuthenticated, reason }: LoginPageProps) {
           </div>
           <div className="login-security">
             <SafetyCertificateOutlined />
-            <span>凭据仅保存在当前浏览器会话</span>
+            <span>凭据保存在当前浏览器，可从 Slack 深链直接打开会话</span>
           </div>
           {error ? (
             <Alert
