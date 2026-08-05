@@ -244,8 +244,8 @@ impl ConfigManager {
     }
 
     pub async fn save(&self, mut values: Value) -> anyhow::Result<UpdateConfigResponse> {
+        let current = self.store.load().await?;
         if contains_masked_secret(&values) {
-            let current = self.store.load().await?;
             preserve_masked_secrets(&mut values, &current);
         }
 
@@ -260,7 +260,7 @@ impl ConfigManager {
 
         self.store.save_atomic(&values).await?;
 
-        let pending_restart = restart_required_paths(&values);
+        let pending_restart = changed_restart_required_paths(&current, &values);
         let hash = hash_value(&values)?;
         {
             let mut state = self.state.lock().await;
@@ -300,12 +300,10 @@ impl ConfigManager {
             }
         };
 
-        let pending_restart = restart_required_paths(&values);
         let hash = hash_value(&values)?;
         {
             let mut state = self.state.lock().await;
             state.last_loaded_hash = Some(hash);
-            state.pending_restart = pending_restart.into_iter().collect();
             state.last_validation = Some(validation.clone());
         }
 
@@ -536,25 +534,35 @@ fn validate_allowlist(values: &Value, section: &str, errors: &mut Vec<Validation
     }
 }
 
-fn restart_required_paths(values: &Value) -> Vec<String> {
-    let mut paths = Vec::new();
-    for path in [
+fn changed_restart_required_paths(previous: &Value, next: &Value) -> Vec<String> {
+    let mut configured_paths = [
         "gateway.url",
         "gateway.platform",
         "telegram.webhook_path",
         "line.webhook_path",
         "wecom.webhook_path",
-        "wecom.streaming_enabled",
-        "wecom.debounce_secs",
         "googlechat.webhook_path",
         "teams.webhook_path",
         "feishu.webhook_path",
-    ] {
-        if contains_path(values, &path.split('.').collect::<Vec<_>>()) {
-            paths.push(path.to_string());
-        }
-    }
-    paths
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
+
+    configured_paths.extend(
+        field_metadata()
+            .into_iter()
+            .filter(|field| matches!(field.apply_policy, ApplyPolicy::RestartRequired))
+            .map(|field| field.path),
+    );
+
+    configured_paths
+        .into_iter()
+        .filter(|path| {
+            let segments = path.split('.').collect::<Vec<_>>();
+            value_at_path(previous, &segments) != value_at_path(next, &segments)
+        })
+        .collect()
 }
 
 fn field_metadata() -> Vec<FieldMetadata> {
@@ -567,8 +575,6 @@ fn field_metadata() -> Vec<FieldMetadata> {
         "wecom.secret",
         "wecom.token",
         "wecom.encoding_aes_key",
-        "wecom.streaming_enabled",
-        "wecom.debounce_secs",
         "googlechat.sa_key_json",
         "googlechat.access_token",
         "teams.app_secret",
@@ -581,6 +587,13 @@ fn field_metadata() -> Vec<FieldMetadata> {
             path: path.into(),
             apply_policy: ApplyPolicy::RestartRequired,
             secret: true,
+        });
+    }
+    for path in ["wecom.streaming_enabled", "wecom.debounce_secs"] {
+        metadata.push(FieldMetadata {
+            path: path.into(),
+            apply_policy: ApplyPolicy::RestartRequired,
+            secret: false,
         });
     }
     for path in [
@@ -693,8 +706,8 @@ fn get_array<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Vec<Value>> {
     path.iter().try_fold(value, |v, key| v.get(*key))?.as_array()
 }
 
-fn contains_path(value: &Value, path: &[&str]) -> bool {
-    path.iter().try_fold(value, |v, key| v.get(*key)).is_some()
+fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(value, |v, key| v.get(*key))
 }
 
 #[cfg(test)]
@@ -749,6 +762,30 @@ mod tests {
     }
 
     #[test]
+    fn wecom_controls_are_restart_required_but_not_secret() {
+        let metadata = field_metadata();
+
+        for path in ["wecom.streaming_enabled", "wecom.debounce_secs"] {
+            let field = metadata
+                .iter()
+                .find(|field| field.path == path)
+                .expect("wecom field metadata should exist");
+            assert_eq!(field.apply_policy, ApplyPolicy::RestartRequired);
+            assert!(!field.secret);
+        }
+    }
+
+    #[test]
+    fn secret_metadata_changes_require_restart() {
+        let paths = changed_restart_required_paths(
+            &json!({ "telegram": { "bot_token": "old-token" } }),
+            &json!({ "telegram": { "bot_token": "new-token" } }),
+        );
+
+        assert_eq!(paths, vec!["telegram.bot_token"]);
+    }
+
+    #[test]
     fn validates_gateway_url_and_webhook_paths() {
         let result = validate_config(&json!({
             "gateway": { "url": "http://bad" },
@@ -790,12 +827,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_applies_runtime_values_and_keeps_restart_pending() {
+    async fn runtime_only_save_does_not_create_restart_pending() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gateway.toml");
         let store = ConfigStore::new(&path);
         store
             .save_atomic(&json!({
+                "telegram": { "rich_messages": false },
+                "line": { "webhook_path": "/hook/line" },
+                "wecom": {
+                    "streaming_enabled": true,
+                    "debounce_secs": 7
+                }
+            }))
+            .await
+            .unwrap();
+
+        let manager = ConfigManager::new(store);
+        let response = manager
+            .save(json!({
+                "telegram": { "rich_messages": true },
+                "line": { "webhook_path": "/hook/line" },
+                "wecom": {
+                    "streaming_enabled": true,
+                    "debounce_secs": 7
+                }
+            }))
+            .await
+            .unwrap();
+
+        assert!(response.validation.ok);
+        assert!(response.status.pending_restart.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_tracks_changed_restart_fields_and_reload_preserves_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gateway.toml");
+        let store = ConfigStore::new(&path);
+        store
+            .save_atomic(&json!({
+                "telegram": {
+                    "rich_messages": false,
+                    "trusted_source_only": false,
+                    "streaming": true
+                },
+                "line": { "webhook_path": "/hook/old" },
+                "wecom": {
+                    "streaming_enabled": true,
+                    "debounce_secs": 7
+                }
+            }))
+            .await
+            .unwrap();
+
+        let manager = ConfigManager::new(store);
+        let save_response = manager
+            .save(json!({
                 "telegram": {
                     "rich_messages": true,
                     "trusted_source_only": true,
@@ -810,18 +898,22 @@ mod tests {
             .await
             .unwrap();
 
-        let manager = ConfigManager::new(store);
+        assert_eq!(
+            save_response.status.pending_restart,
+            vec!["line.webhook_path"]
+        );
+
         let (tx, _rx) = tokio::sync::broadcast::channel(4);
         let state = Arc::new(crate::AppState::test_default(tx));
         manager
             .set_runtime_applier(RuntimeConfigApplier::new(state.clone()))
             .await;
 
-        let resp = manager.reload().await.unwrap();
+        let response = manager.reload().await.unwrap();
 
-        assert!(resp.validation.ok);
+        assert!(response.validation.ok);
         assert_eq!(
-            resp.runtime.applied_paths,
+            response.runtime.applied_paths,
             vec![
                 "telegram.rich_messages",
                 "telegram.trusted_source_only",
@@ -829,15 +921,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            resp.status.pending_restart,
-            vec![
-                "line.webhook_path",
-                "wecom.debounce_secs",
-                "wecom.streaming_enabled"
-            ]
+            response.status.pending_restart,
+            vec!["line.webhook_path"]
         );
         assert!(state.telegram_rich_messages().await);
         assert!(state.telegram_trusted_source_only().await);
-        assert_eq!(state.runtime_config.read().await.telegram_streaming, Some(false));
+        assert_eq!(
+            state.runtime_config.read().await.telegram_streaming,
+            Some(false)
+        );
     }
 }

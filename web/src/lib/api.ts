@@ -4,7 +4,11 @@ import {
   AgentProfileDocument,
   AgentSummary,
   ConfigDocument,
+  ConfigReloadResponse,
   ConfigStatus,
+  ConfigUpdateResponse,
+  ConfigValidationResult,
+  ConfigValues,
   ProfileValidationResult,
   SessionSnapshot,
 } from '../types';
@@ -134,4 +138,18 @@ export const adminApi = {
     ),
   config: () => apiRequest<ConfigDocument>('/api/v1/config'),
   configStatus: () => apiRequest<ConfigStatus>('/api/v1/config/status'),
+  validateConfig: (values: ConfigValues) =>
+    apiRequest<ConfigValidationResult>('/api/v1/config/validate', {
+      method: 'POST',
+      body: JSON.stringify({ values }),
+    }),
+  saveConfig: (values: ConfigValues) =>
+    apiRequest<ConfigUpdateResponse>('/api/v1/config', {
+      method: 'PUT',
+      body: JSON.stringify({ values }),
+    }),
+  reloadConfig: () =>
+    apiRequest<ConfigReloadResponse>('/api/v1/config/reload', {
+      method: 'POST',
+    }),
 };

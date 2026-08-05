@@ -877,3 +877,187 @@ select {
     width: 82px;
   }
 }
+
+
+/* ---------- Gateway 配置编辑 ---------- */
+
+.config-policy-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #e8eef4;
+}
+
+.config-policy-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 4px 14px;
+}
+
+.config-policy-item + .config-policy-item {
+  border-left: 1px solid #e8eef4;
+}
+
+.config-editor-shell {
+  overflow: hidden;
+  border: 1px solid #dfe7ef;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 2px 10px rgba(16, 27, 41, 0.04);
+}
+
+.config-editor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 22px;
+  border-bottom: 1px solid #e8eef4;
+}
+
+.config-editor-toolbar .panel-heading-title .ant-typography {
+  margin: 0;
+}
+
+.config-editor-toolbar .panel-heading-title .ant-typography-secondary {
+  display: block;
+  margin-top: 2px;
+}
+
+.config-search {
+  flex: 0 0 280px;
+}
+
+.config-sections {
+  border: 0;
+  border-radius: 0;
+  background: #ffffff;
+}
+
+.config-sections > .ant-collapse-item {
+  border-bottom: 1px solid #e8eef4;
+}
+
+.config-sections > .ant-collapse-item:last-child {
+  border-bottom: 0;
+}
+
+.config-sections > .ant-collapse-item > .ant-collapse-header {
+  align-items: center !important;
+  padding: 15px 22px !important;
+  background: #f7f9fc;
+}
+
+.config-sections .ant-collapse-content {
+  border-top: 1px solid #e8eef4;
+}
+
+.config-sections .ant-collapse-content-box {
+  padding: 0 !important;
+}
+
+.config-field-list {
+  display: grid;
+}
+
+.config-field-row {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 28px;
+  align-items: center;
+  min-width: 0;
+  padding: 18px 22px;
+}
+
+.config-field-row + .config-field-row {
+  border-top: 1px solid #eef2f6;
+}
+
+.config-field-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.config-field-copy > .ant-typography {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.config-field-row .ant-form-item {
+  min-width: 0;
+  margin: 0;
+}
+
+.config-field-row .ant-input,
+.config-field-row .ant-input-affix-wrapper,
+.config-field-row .ant-input-number,
+.config-field-row .ant-select,
+.config-json-control {
+  width: 100%;
+}
+
+.config-switch-control {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+}
+
+.config-json-control .ant-typography {
+  font-size: 12px;
+}
+
+.config-loading {
+  min-height: 280px;
+  display: grid;
+  place-items: center;
+}
+
+@media (max-width: 900px) {
+  .config-editor-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .config-search {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .config-field-row {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+@media (max-width: 640px) {
+  .config-policy-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .config-policy-item {
+    justify-content: flex-start;
+    padding: 8px 0;
+  }
+
+  .config-policy-item + .config-policy-item {
+    border-left: 0;
+    border-top: 1px solid #eef2f6;
+  }
+
+  .config-editor-toolbar,
+  .config-field-row {
+    padding-inline: 16px;
+  }
+
+  .config-switch-control {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

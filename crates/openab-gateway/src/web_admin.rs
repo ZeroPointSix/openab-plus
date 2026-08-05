@@ -55,7 +55,8 @@ mod tests {
 
     #[test]
     fn embedded_assets_are_production_builds() {
-        assert!(APP_JS.contains("OpenAB Admin"));
+        assert!(INDEX_HTML.contains("<title>OpenAB Admin</title>"));
+        assert!(APP_JS.contains("OpenAB Plus"));
         assert!(STYLES_CSS.contains(".login-page"));
     }
 
