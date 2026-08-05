@@ -535,25 +535,34 @@ fn validate_allowlist(values: &Value, section: &str, errors: &mut Vec<Validation
 }
 
 fn changed_restart_required_paths(previous: &Value, next: &Value) -> Vec<String> {
-    let mut paths = Vec::new();
-    for path in [
+    let mut configured_paths = [
         "gateway.url",
         "gateway.platform",
         "telegram.webhook_path",
         "line.webhook_path",
         "wecom.webhook_path",
-        "wecom.streaming_enabled",
-        "wecom.debounce_secs",
         "googlechat.webhook_path",
         "teams.webhook_path",
         "feishu.webhook_path",
-    ] {
-        let segments = path.split('.').collect::<Vec<_>>();
-        if value_at_path(previous, &segments) != value_at_path(next, &segments) {
-            paths.push(path.to_string());
-        }
-    }
-    paths
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<BTreeSet<_>>();
+
+    configured_paths.extend(
+        field_metadata()
+            .into_iter()
+            .filter(|field| matches!(field.apply_policy, ApplyPolicy::RestartRequired))
+            .map(|field| field.path),
+    );
+
+    configured_paths
+        .into_iter()
+        .filter(|path| {
+            let segments = path.split('.').collect::<Vec<_>>();
+            value_at_path(previous, &segments) != value_at_path(next, &segments)
+        })
+        .collect()
 }
 
 fn field_metadata() -> Vec<FieldMetadata> {
@@ -764,6 +773,16 @@ mod tests {
             assert_eq!(field.apply_policy, ApplyPolicy::RestartRequired);
             assert!(!field.secret);
         }
+    }
+
+    #[test]
+    fn secret_metadata_changes_require_restart() {
+        let paths = changed_restart_required_paths(
+            &json!({ "telegram": { "bot_token": "old-token" } }),
+            &json!({ "telegram": { "bot_token": "new-token" } }),
+        );
+
+        assert_eq!(paths, vec!["telegram.bot_token"]);
     }
 
     #[test]
