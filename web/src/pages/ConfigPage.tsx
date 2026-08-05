@@ -266,6 +266,8 @@ export function ConfigPage() {
       event.returnValue = '';
     };
     const currentIndex = historyIndex(window.history.state);
+    const currentState = window.history.state;
+    const currentUrl = window.location.href;
     let restoring = false;
     const historyNavigation = (event: PopStateEvent) => {
       if (restoring) {
@@ -274,17 +276,21 @@ export function ConfigPage() {
       }
       if (confirmNavigation()) return;
 
+      event.stopImmediatePropagation();
       const delta = cancelledHistoryDelta(currentIndex, event.state);
-      if (delta !== undefined) {
-        restoring = true;
-        window.history.go(delta);
+      if (delta === undefined) {
+        window.history.replaceState(currentState, '', currentUrl);
+        return;
       }
+
+      restoring = true;
+      window.history.go(delta);
     };
     window.addEventListener('beforeunload', beforeUnload);
-    window.addEventListener('popstate', historyNavigation);
+    window.addEventListener('popstate', historyNavigation, true);
     return () => {
       window.removeEventListener('beforeunload', beforeUnload);
-      window.removeEventListener('popstate', historyNavigation);
+      window.removeEventListener('popstate', historyNavigation, true);
     };
   }, [dirty]);
 
