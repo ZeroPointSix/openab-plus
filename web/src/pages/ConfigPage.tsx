@@ -35,13 +35,18 @@ import {
   cloneConfigValues,
   configValuesFrom,
   ConfigEditorField,
+  editableSecretValue,
+  findUnsafeIntegerPaths,
+  MASKED_SECRET,
   maskConfigSecrets,
   parseJsonValue,
   updateConfigValue,
 } from '../lib/config';
 import {
+  cancelledHistoryDelta,
   confirmNavigation,
   discardUnsavedChanges,
+  historyIndex,
   setNavigationDirty,
 } from '../lib/navigationGuard';
 import {
@@ -186,11 +191,13 @@ function ConfigFieldControl({
   if (field.secret) {
     return (
       <Input.Password
-        value={typeof field.value === 'string' ? field.value : ''}
+        value={editableSecretValue(field.value)}
         disabled={disabled}
         visibilityToggle={false}
         prefix={<EyeInvisibleOutlined />}
-        placeholder="未设置；输入新值后保存"
+        placeholder={
+          field.value === MASKED_SECRET ? MASKED_SECRET : '未设置；输入新值后保存'
+        }
         autoComplete="new-password"
         onChange={(event) => onChange(event.target.value)}
       />
@@ -258,8 +265,20 @@ export function ConfigPage() {
       event.preventDefault();
       event.returnValue = '';
     };
-    const historyNavigation = () => {
-      if (!confirmNavigation()) window.history.forward();
+    const currentIndex = historyIndex(window.history.state);
+    let restoring = false;
+    const historyNavigation = (event: PopStateEvent) => {
+      if (restoring) {
+        restoring = false;
+        return;
+      }
+      if (confirmNavigation()) return;
+
+      const delta = cancelledHistoryDelta(currentIndex, event.state);
+      if (delta !== undefined) {
+        restoring = true;
+        window.history.go(delta);
+      }
     };
     window.addEventListener('beforeunload', beforeUnload);
     window.addEventListener('popstate', historyNavigation);
@@ -332,6 +351,18 @@ export function ConfigPage() {
   };
 
   const validateDraft = async () => {
+    const unsafeIntegerPaths = findUnsafeIntegerPaths(draft);
+    if (unsafeIntegerPaths.length) {
+      setFeedback({
+        type: 'error',
+        title: '配置包含无法安全编辑的大整数',
+        description:
+          unsafeIntegerPaths.slice(0, 4).join('、') +
+          ' 超出浏览器安全整数范围。请先在服务端配置文件中处理这些值。',
+      });
+      return;
+    }
+
     setOperation('validating');
     try {
       const result = await adminApi.validateConfig(cloneConfigValues(draft));
@@ -398,6 +429,18 @@ export function ConfigPage() {
   };
 
   const saveAndReload = async () => {
+    const unsafeIntegerPaths = findUnsafeIntegerPaths(draft);
+    if (unsafeIntegerPaths.length) {
+      setFeedback({
+        type: 'error',
+        title: '配置未保存',
+        description:
+          unsafeIntegerPaths.slice(0, 4).join('、') +
+          ' 超出浏览器安全整数范围，继续保存可能损坏原值。',
+      });
+      return;
+    }
+
     const values = cloneConfigValues(draft);
     let saved = false;
     setOperation('saving');
