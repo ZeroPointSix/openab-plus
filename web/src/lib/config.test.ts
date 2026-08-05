@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   areConfigValuesEqual,
   buildConfigFields,
+  editableSecretValue,
+  findUnsafeIntegerPaths,
   getConfigValue,
   maskConfigSecrets,
   updateConfigValue,
@@ -64,6 +66,37 @@ describe('Gateway config editor helpers', () => {
 
     expect(getConfigValue(masked, 'telegram.bot_token')).toBe('********');
     expect(getConfigValue(masked, 'telegram.rich_messages')).toBe(true);
+  });
+
+  it('keeps masked secrets out of the editable input value', () => {
+    expect(editableSecretValue('********')).toBe('');
+    expect(editableSecretValue('new-token')).toBe('new-token');
+  });
+
+  it('masks heuristic secrets nested inside arrays', () => {
+    const masked = maskConfigSecrets(
+      {
+        providers: [
+          { name: 'first', password: 'plain-password' },
+          { name: 'second', options: { access_token: 'plain-token' } },
+        ],
+      },
+      [],
+    );
+
+    expect(masked.providers).toEqual([
+      { name: 'first', password: '********' },
+      { name: 'second', options: { access_token: '********' } },
+    ]);
+  });
+
+  it('reports unsafe integers before a document can be saved', () => {
+    expect(
+      findUnsafeIntegerPaths({
+        gateway: { request_id: Number.MAX_SAFE_INTEGER + 1 },
+        providers: [{ timeout: 30 }, { account_id: 9_007_199_254_740_992 }],
+      }),
+    ).toEqual(['gateway.request_id', 'providers[1].account_id']);
   });
 
   it('compares documents independently of object key order', () => {
