@@ -129,6 +129,33 @@ export function cloneConfigValues(values: ConfigValues): ConfigValues {
   return JSON.parse(JSON.stringify(values)) as ConfigValues;
 }
 
+export function editableSecretValue(value: ConfigValue | undefined): string {
+  return typeof value === 'string' && value !== MASKED_SECRET ? value : '';
+}
+
+export function findUnsafeIntegerPaths(values: ConfigValues): string[] {
+  const paths: string[] = [];
+
+  const visit = (value: unknown, path: string) => {
+    if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      paths.push(path || '<root>');
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => visit(child, path + '[' + index + ']'));
+      return;
+    }
+    if (isRecord(value)) {
+      for (const [key, child] of Object.entries(value)) {
+        visit(child, path ? path + '.' + key : key);
+      }
+    }
+  };
+
+  visit(values, '');
+  return paths;
+}
+
 export function getConfigValue(
   values: ConfigValues,
   path: string,
@@ -210,10 +237,28 @@ export function maskConfigSecrets(
   values: ConfigValues,
   metadata: ConfigMetadata[],
 ): ConfigValues {
-  return buildConfigFields(values, metadata).reduce((next, field) => {
-    if (!field.secret || field.value === undefined) return next;
-    return updateConfigValue(next, field.path, MASKED_SECRET);
-  }, cloneConfigValues(values));
+  const explicitSecrets = new Set(
+    metadata.filter((item) => item.secret).map((item) => item.path),
+  );
+
+  const visit = (value: unknown, path: string): unknown => {
+    if (Array.isArray(value)) {
+      return value.map((child, index) => visit(child, path + '.' + index));
+    }
+    if (!isRecord(value)) return value;
+
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => {
+        const childPath = path ? path + '.' + key : key;
+        if (explicitSecrets.has(childPath) || isSecretPath(childPath)) {
+          return [key, MASKED_SECRET];
+        }
+        return [key, visit(child, childPath)];
+      }),
+    );
+  };
+
+  return visit(values, '') as ConfigValues;
 }
 
 export function parseJsonValue(value: string): ConfigValue {
