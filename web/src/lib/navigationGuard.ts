@@ -22,3 +22,29 @@ export function confirmNavigation(
   navigationDirty = false;
   return true;
 }
+
+
+export function confirmRouteNavigation(
+  currentPath: string,
+  targetPath: string,
+  confirmFn?: (message: string) => boolean,
+): boolean {
+  if (currentPath === targetPath) return false;
+  return confirmNavigation(confirmFn);
+}
+
+export function historyIndex(state: unknown): number | undefined {
+  if (!state || typeof state !== 'object') return undefined;
+  const index = (state as { idx?: unknown }).idx;
+  return typeof index === 'number' && Number.isInteger(index) ? index : undefined;
+}
+
+export function cancelledHistoryDelta(
+  currentIndex: number | undefined,
+  nextState: unknown,
+): number | undefined {
+  const nextIndex = historyIndex(nextState);
+  if (currentIndex === undefined || nextIndex === undefined) return undefined;
+  const delta = currentIndex - nextIndex;
+  return delta === 0 ? undefined : delta;
+}
