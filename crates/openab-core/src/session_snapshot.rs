@@ -162,7 +162,7 @@ pub fn session_external_url(base_url: Option<&str>, session_id: &str) -> Option<
         return None;
     }
     Some(format!(
-        "{base_url}/sessions/{}",
+        "{base_url}/#/sessions/{}",
         encode_path_segment(session_id)
     ))
 }
@@ -193,12 +193,12 @@ mod tests {
     }
 
     #[test]
-    fn external_url_encodes_session_id() {
+    fn external_url_targets_hash_router_session_route() {
         let url = session_external_url(Some("https://openab.example/"), "slack:1729.42");
 
         assert_eq!(
             url.as_deref(),
-            Some("https://openab.example/sessions/slack%3A1729.42")
+            Some("https://openab.example/#/sessions/slack%3A1729.42")
         );
     }
 
