@@ -1069,10 +1069,10 @@ impl AdapterRouter {
                                     // message, and the full buffer (prompt echo, processing
                                     // narration, answer) bursts out as one plain message at the
                                     // end. The receipt carries the OpenAB Plus session link and
-                                    // the first ToolStart takes it over via `update()`. Skipped
-                                    // for post+edit streaming, where the live placeholder
-                                    // already keeps the turn visible in the thread.
-                                    if tool_progress_enabled && (native || buf_tx.is_none()) {
+                                    // the first ToolStart takes it over via `update()`. Seed it in
+                                    // both native and post+edit modes so the progress contract does
+                                    // not depend on Slack assistant-mode capabilities.
+                                    if tool_progress_enabled {
                                         tool_progress.seed_receipt().await;
                                     }
                                     if native {
@@ -1273,7 +1273,9 @@ impl AdapterRouter {
                             "turn ended with running tools; marked them failed"
                         );
                     }
-                    tool_progress.finish(&tool_lines).await;
+                    let turn_failed =
+                        response_error.is_some() || turn_result.is_silent_failure();
+                    tool_progress.finish(&tool_lines, turn_failed).await;
                     // Build final content
                     let final_content =
                         compose_display(&tool_lines, &text_buf, false, reply_tool_display);
@@ -1675,7 +1677,7 @@ impl ToolProgressMessage {
         .await;
     }
 
-    async fn finish(&mut self, tools: &[ToolEntry]) {
+    async fn finish(&mut self, tools: &[ToolEntry], turn_failed: bool) {
         if !self.enabled {
             return;
         }
@@ -1684,8 +1686,13 @@ impl ToolProgressMessage {
             // stay "正在回复…" forever. When no receipt was seeded (the turn
             // produced no text at all) there is nothing to edit.
             if self.message.is_some() {
+                let state = if turn_failed {
+                    "会话已启动，回复失败"
+                } else {
+                    "会话已启动，回复完成"
+                };
                 self.write(append_session_link(
-                    "会话已启动，回复完成",
+                    state,
                     self.external_url.as_deref(),
                     self.link_label,
                 ))
@@ -2469,7 +2476,7 @@ mod tests {
         tools.push(tool("2", "cargo test", ToolState::Running));
         progress.update(&tools).await;
         tools[1].state = ToolState::Failed;
-        progress.finish(&tools).await;
+        progress.finish(&tools, false).await;
 
         let sends = adapter.sends.lock().unwrap();
         let edits = adapter.edits.lock().unwrap();
@@ -2544,6 +2551,7 @@ mod tests {
         );
 
         progress.seed_receipt().await;
+        progress.seed_receipt().await;
         {
             let sends = adapter.sends.lock().unwrap();
             assert_eq!(sends.len(), 1, "receipt must create exactly one message");
@@ -2559,7 +2567,7 @@ mod tests {
             );
         }
 
-        progress.finish(&[]).await;
+        progress.finish(&[], false).await;
         let edits = adapter.edits.lock().unwrap();
         assert_eq!(
             edits.len(),
@@ -2576,6 +2584,16 @@ mod tests {
             "got: {}",
             edits[0]
         );
+        drop(edits);
+        progress.finish(&[], true).await;
+        let edits = adapter.edits.lock().unwrap();
+        assert_eq!(edits.len(), 2, "failed finish must edit the same receipt");
+        assert!(
+            edits[1].contains("会话已启动，回复失败"),
+            "got: {}",
+            edits[1]
+        );
+        assert!(!edits[1].contains("回复完成"), "got: {}", edits[1]);
     }
 
     #[tokio::test]
@@ -2647,7 +2665,7 @@ mod tests {
         );
 
         progress.seed_receipt().await;
-        progress.finish(&[]).await;
+        progress.finish(&[], false).await;
 
         assert!(adapter.sends.lock().unwrap().is_empty());
         assert!(adapter.edits.lock().unwrap().is_empty());
