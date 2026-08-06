@@ -110,6 +110,34 @@ In a channel where the bot is invited:
 
 The bot will reply in a thread. After that, just type in the thread — no @mention needed for follow-ups.
 
+## Session progress messages and OpenAB Plus session links
+
+Each Slack turn keeps tool activity in a single progress message:
+
+- When the agent starts a tool, the progress message opens with
+  `会话已启动，正在调用 ... 工具（已调用 1 个）` and is edited in place as
+  tool activity continues. It finishes with a per-tool or count-only
+  success/failure summary.
+- When the agent answers without any tool call, the same progress message
+  opens on the first streamed text as `会话已启动，正在回复…` and is closed
+  as `会话已启动，回复完成` when the turn ends. In assistant mode the answer
+  then streams live below the receipt (native streaming is per-turn and
+  requires `assistant:write`).
+
+To append an `Open in OpenAB Plus` session link to the progress message and
+the final reply, configure the public base URL of the OpenAB Plus web console
+(any of the following environment variables, checked in this order):
+
+```bash
+export OPENAB_SESSION_PUBLIC_BASE_URL="https://openab.example.com"   # recommended
+# OPENAB_PUBLIC_BASE_URL / GATEWAY_PUBLIC_URL / PUBLIC_BASE_URL also work
+```
+
+The link points to `<base>/#/sessions/<session-id>` (the OpenAB Plus admin
+console session route). Without one of these variables no link is appended;
+restart the process after setting it. Configuring this public base URL is a
+deployment step — see ZER-403.
+
 ## Slash commands are not supported on Slack
 
 openab supports `/models`, `/agents`, and `/cancel` on **Discord**, but **not on Slack**. If you previously configured these commands in your Slack app's **Slash Commands** page, you can safely delete them — the Slack adapter ignores both `slash_commands` and `interactive` envelope types.
