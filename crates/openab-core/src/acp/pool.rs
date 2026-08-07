@@ -478,6 +478,7 @@ impl SessionPool {
             &effective_workdir,
             &self.config.env,
             &self.config.inherit_env,
+            self.config.images,
         )
         .await?;
 

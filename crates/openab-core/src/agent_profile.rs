@@ -750,6 +750,7 @@ fn clone_agent_config(config: &AgentConfig) -> AgentConfig {
         working_dir: config.working_dir.clone(),
         env: config.env.clone(),
         inherit_env: config.inherit_env.clone(),
+        images: config.images,
         command_explicit: config.command_explicit,
     }
 }
@@ -921,6 +922,7 @@ mod tests {
             working_dir: "/workspace".into(),
             env: HashMap::new(),
             inherit_env: Vec::new(),
+            images: crate::config::ImageHandling::default(),
             command_explicit: false,
         }
     }

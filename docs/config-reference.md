@@ -288,6 +288,7 @@ The AI agent subprocess that OpenAB spawns to handle messages via ACP.
 | `working_dir` | string | `$HOME` | Working directory for the agent process. Optional — defaults to container's `$HOME`. |
 | `env` | map | `{}` | Extra environment variables (e.g. `{ OPENAI_API_KEY = "${OPENAI_API_KEY}" }`). |
 | `inherit_env` | string[] | `[]` | Env var names to inherit from the OAB process (e.g. vars injected via K8s `envFrom`). Keys in `env` take precedence. |
+| `images` | string | `"send"` | How inbound image attachments are delivered to the agent. `"send"` (default) converts images to ACP image blocks, requiring a vision-capable model downstream. `"skip"` replaces each image with a text note instead of sending image content, for text-only models that reject multimodal input (e.g. upstream `not a multimodal model` 4xx). |
 
 > **Default inherited vars:** After `env_clear()`, the agent always receives `HOME`, `PATH`, and `USER` (on Windows: `USERPROFILE`, `USERNAME`, `PATH`, `SystemRoot`, `SystemDrive`). Use `inherit_env` to pass additional vars beyond this baseline.
 

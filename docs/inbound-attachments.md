@@ -42,6 +42,20 @@ User sends media (photo/voice/file)
 
 OpenAB can create the ACP image block, but downstream coding agents and selected models must also support image input. For local `llama.cpp` examples, see [Local OpenAI-Compatible Vision Models](local-vision-models.md).
 
+If the configured agent model is text-only (for example a proxy
+`deepseek-v4-flash` that returns `not a multimodal model`), set:
+
+```toml
+[agent]
+images = "skip"
+```
+
+With `images = "skip"`, image attachments never reach the agent. Each image
+block is replaced with a text note so the agent can tell the user the image
+was not processed, instead of failing the whole turn with an upstream 400.
+Omit the key (or use `images = "send"`) to keep the historical behavior of
+forwarding images to the model.
+
 ### Audio / Voice Messages
 
 1. Gateway downloads raw audio (ogg/m4a/mp3)

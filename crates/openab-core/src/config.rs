@@ -1425,6 +1425,21 @@ impl PlatformTrustConfig {
     }
 }
 
+/// How inbound image attachments are delivered to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageHandling {
+    /// Convert images to ACP image blocks and send them to the agent.
+    /// This is the default and preserves historical behavior.
+    #[default]
+    Send,
+    /// Do not send image content to the agent. Each image block is replaced
+    /// with a text note so the agent can inform the user that the image was
+    /// skipped (e.g. when the configured model is text-only and rejects
+    /// multimodal input with a 4xx error).
+    Skip,
+}
+
 /// Raw intermediate struct for serde — uses `Option` to detect explicit fields.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -1434,6 +1449,7 @@ struct AgentConfigRaw {
     working_dir: String,
     env: HashMap<String, String>,
     inherit_env: Vec<String>,
+    images: Option<ImageHandling>,
 }
 
 impl Default for AgentConfigRaw {
@@ -1444,6 +1460,7 @@ impl Default for AgentConfigRaw {
             working_dir: default_working_dir(),
             env: HashMap::new(),
             inherit_env: Vec::new(),
+            images: None,
         }
     }
 }
@@ -1455,6 +1472,8 @@ pub struct AgentConfig {
     pub working_dir: String,
     pub env: HashMap<String, String>,
     pub inherit_env: Vec<String>,
+    /// How inbound image attachments are delivered to the agent.
+    pub images: ImageHandling,
     /// Whether the command was explicitly set in config (vs defaulted from env/fallback).
     pub command_explicit: bool,
 }
@@ -1467,6 +1486,7 @@ impl Default for AgentConfig {
             working_dir: default_working_dir(),
             env: HashMap::new(),
             inherit_env: Vec::new(),
+            images: ImageHandling::default(),
             command_explicit: false,
         }
     }
@@ -1493,6 +1513,7 @@ impl<'de> serde::Deserialize<'de> for AgentConfig {
             working_dir: raw.working_dir,
             env: raw.env,
             inherit_env: raw.inherit_env,
+            images: raw.images.unwrap_or_default(),
             command_explicit: cmd_explicit,
         })
     }
@@ -2072,6 +2093,7 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
                 working_dir: config.agent.working_dir.clone(),
                 env: config.agent.env.clone(),
                 inherit_env: config.agent.inherit_env.clone(),
+                images: config.agent.images,
                 command_explicit: true, // synthesized counts as explicit
             };
         }
@@ -3113,6 +3135,45 @@ command = "echo"
         assert_eq!(cfg.agent.command, "echo");
         assert_eq!(cfg.pool.max_sessions, 10);
         assert!(cfg.reactions.enabled);
+    }
+
+    #[test]
+    fn parse_agent_images_defaults_to_send() {
+        // Backward compatibility: omitting `images` keeps historical behavior.
+        let cfg = parse_config(MINIMAL_TOML, "test").unwrap();
+        assert_eq!(cfg.agent.images, ImageHandling::Send);
+    }
+
+    #[test]
+    fn parse_agent_images_skip() {
+        let toml = r#"
+[agent]
+command = "echo"
+images = "skip"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert_eq!(cfg.agent.images, ImageHandling::Skip);
+    }
+
+    #[test]
+    fn parse_agent_images_send_explicit() {
+        let toml = r#"
+[agent]
+command = "echo"
+images = "send"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert_eq!(cfg.agent.images, ImageHandling::Send);
+    }
+
+    #[test]
+    fn parse_agent_images_rejects_unknown_value() {
+        let toml = r#"
+[agent]
+command = "echo"
+images = "maybe"
+"#;
+        assert!(parse_config(toml, "test").is_err());
     }
 
     #[test]
