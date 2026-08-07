@@ -1062,6 +1062,19 @@ impl AdapterRouter {
                             match event {
                                 AcpEvent::Text(t) => {
                                     text_buf.push_str(&t);
+                                    // Tool-progress adapters seed the session receipt on the
+                                    // first text. A turn that never calls a tool would otherwise
+                                    // open no progress message: the "会话已启动" receipt never
+                                    // appears, the native stream stays gated behind the missing
+                                    // message, and the full buffer (prompt echo, processing
+                                    // narration, answer) bursts out as one plain message at the
+                                    // end. The receipt carries the OpenAB Plus session link and
+                                    // the first ToolStart takes it over via `update()`. Seed it in
+                                    // both native and post+edit modes so the progress contract does
+                                    // not depend on Slack assistant-mode capabilities.
+                                    if tool_progress_enabled {
+                                        tool_progress.seed_receipt().await;
+                                    }
                                     if native {
                                         native_pending.push_str(&t);
                                         // Tool-progress adapters delay the final stream until the
@@ -1260,7 +1273,9 @@ impl AdapterRouter {
                             "turn ended with running tools; marked them failed"
                         );
                     }
-                    tool_progress.finish(&tool_lines).await;
+                    let turn_failed =
+                        response_error.is_some() || turn_result.is_silent_failure();
+                    tool_progress.finish(&tool_lines, turn_failed).await;
                     // Build final content
                     let final_content =
                         compose_display(&tool_lines, &text_buf, false, reply_tool_display);
@@ -1628,6 +1643,27 @@ impl ToolProgressMessage {
         }
     }
 
+    /// Post the session receipt on the first text of a turn.
+    ///
+    /// Tool progress is driven by ToolStart events, so a turn that never
+    /// calls a tool would open no progress message at all. For
+    /// tool-progress adapters that means the "会话已启动" receipt never
+    /// appears and the native stream stays gated behind the missing message
+    /// (the whole reply then bursts out as plain messages at the end).
+    /// Seeding the receipt here restores both; the first ToolStart takes the
+    /// message over via [`Self::update`]. No-op once a message exists.
+    async fn seed_receipt(&mut self) {
+        if !self.enabled || self.message.is_some() {
+            return;
+        }
+        self.write(append_session_link(
+            "会话已启动，正在回复…",
+            self.external_url.as_deref(),
+            self.link_label,
+        ))
+        .await;
+    }
+
     async fn update(&mut self, tools: &[ToolEntry]) {
         if !self.enabled || tools.is_empty() {
             return;
@@ -1641,8 +1677,27 @@ impl ToolProgressMessage {
         .await;
     }
 
-    async fn finish(&mut self, tools: &[ToolEntry]) {
-        if !self.enabled || tools.is_empty() {
+    async fn finish(&mut self, tools: &[ToolEntry], turn_failed: bool) {
+        if !self.enabled {
+            return;
+        }
+        if tools.is_empty() {
+            // No tool ever ran: close the receipt in place so it does not
+            // stay "正在回复…" forever. When no receipt was seeded (the turn
+            // produced no text at all) there is nothing to edit.
+            if self.message.is_some() {
+                let state = if turn_failed {
+                    "会话已启动，回复失败"
+                } else {
+                    "会话已启动，回复完成"
+                };
+                self.write(append_session_link(
+                    state,
+                    self.external_url.as_deref(),
+                    self.link_label,
+                ))
+                .await;
+            }
             return;
         }
         let content = compose_tool_progress(tools, true, self.display);
@@ -2421,7 +2476,7 @@ mod tests {
         tools.push(tool("2", "cargo test", ToolState::Running));
         progress.update(&tools).await;
         tools[1].state = ToolState::Failed;
-        progress.finish(&tools).await;
+        progress.finish(&tools, false).await;
 
         let sends = adapter.sends.lock().unwrap();
         let edits = adapter.edits.lock().unwrap();
@@ -2474,6 +2529,146 @@ mod tests {
             adapter.events.lock().unwrap().as_slice(),
             ["progress", "final"]
         );
+    }
+
+    #[tokio::test]
+    async fn no_tool_turn_seeds_receipt_then_closes_in_place() {
+        let adapter = Arc::new(ProgressTestAdapter::default());
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C1".into(),
+            thread_id: Some("1700.1".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let mut progress = ToolProgressMessage::new(
+            true,
+            adapter.clone(),
+            channel,
+            Some("https://openab.example/sessions/slack%3A1700.1".into()),
+            Some("Open in OpenAB Plus"),
+            ToolDisplay::Full,
+        );
+
+        progress.seed_receipt().await;
+        progress.seed_receipt().await;
+        {
+            let sends = adapter.sends.lock().unwrap();
+            assert_eq!(sends.len(), 1, "receipt must create exactly one message");
+            assert!(
+                sends[0].contains("会话已启动，正在回复"),
+                "got: {}",
+                sends[0]
+            );
+            assert!(
+                sends[0].contains("[Open in OpenAB Plus]("),
+                "got: {}",
+                sends[0]
+            );
+        }
+
+        progress.finish(&[], false).await;
+        let edits = adapter.edits.lock().unwrap();
+        assert_eq!(
+            edits.len(),
+            1,
+            "no-tool finish must close the receipt with one edit"
+        );
+        assert!(
+            edits[0].contains("会话已启动，回复完成"),
+            "got: {}",
+            edits[0]
+        );
+        assert!(
+            edits[0].contains("[Open in OpenAB Plus]("),
+            "got: {}",
+            edits[0]
+        );
+        drop(edits);
+        progress.finish(&[], true).await;
+        let edits = adapter.edits.lock().unwrap();
+        assert_eq!(edits.len(), 2, "failed finish must edit the same receipt");
+        assert!(
+            edits[1].contains("会话已启动，回复失败"),
+            "got: {}",
+            edits[1]
+        );
+        assert!(!edits[1].contains("回复完成"), "got: {}", edits[1]);
+    }
+
+    #[tokio::test]
+    async fn no_tool_native_stream_begins_after_receipt_seed() {
+        // Regression for ZER-472: with no tool calls the progress message
+        // never arrived, so the ordering gate kept the native stream closed
+        // for the whole turn and the reply burst out as plain messages.
+        let adapter = Arc::new(ProgressTestAdapter::default());
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C1".into(),
+            thread_id: Some("1700.1".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let mut progress = ToolProgressMessage::new(
+            true,
+            adapter.clone(),
+            channel,
+            None,
+            None,
+            ToolDisplay::Full,
+        );
+        let mut native_msg = None;
+        let mut stream_begin_failed = false;
+
+        progress
+            .begin_native_stream_when_ready(None, &mut native_msg, &mut stream_begin_failed)
+            .await;
+        assert!(
+            native_msg.is_none(),
+            "stream must stay gated before the receipt exists"
+        );
+
+        progress.seed_receipt().await;
+        progress
+            .begin_native_stream_when_ready(None, &mut native_msg, &mut stream_begin_failed)
+            .await;
+
+        assert!(
+            native_msg.is_some(),
+            "stream must begin once the receipt exists"
+        );
+        assert!(!stream_begin_failed);
+        assert_eq!(
+            adapter.events.lock().unwrap().as_slice(),
+            ["progress", "final"],
+            "receipt is posted before the stream opens"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_is_not_seeded_when_progress_disabled() {
+        let adapter = Arc::new(ProgressTestAdapter::default());
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C1".into(),
+            thread_id: Some("1700.1".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let mut progress = ToolProgressMessage::new(
+            false,
+            adapter.clone(),
+            channel,
+            None,
+            None,
+            ToolDisplay::Full,
+        );
+
+        progress.seed_receipt().await;
+        progress.finish(&[], false).await;
+
+        assert!(adapter.sends.lock().unwrap().is_empty());
+        assert!(adapter.edits.lock().unwrap().is_empty());
     }
 
     #[test]
