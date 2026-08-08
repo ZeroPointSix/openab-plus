@@ -1690,7 +1690,7 @@ impl ToolProgressMessage {
             return;
         }
         self.write(append_session_link(
-            "会话已启动，正在回复…",
+            "OpenAB · 正在处理…",
             self.external_url.as_deref(),
             self.link_label,
         ))
@@ -1701,7 +1701,7 @@ impl ToolProgressMessage {
         if !self.enabled || tools.is_empty() {
             return;
         }
-        let content = compose_tool_progress(tools, false, self.display);
+        let content = compose_tool_progress(tools, false, false, self.display);
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
@@ -1720,9 +1720,9 @@ impl ToolProgressMessage {
             // produced no text at all) there is nothing to edit.
             if self.message.is_some() {
                 let state = if turn_failed {
-                    "会话已启动，回复失败"
+                    "OpenAB · 处理失败"
                 } else {
-                    "会话已启动，回复完成"
+                    "OpenAB · 已完成"
                 };
                 self.write(append_session_link(
                     state,
@@ -1733,7 +1733,7 @@ impl ToolProgressMessage {
             }
             return;
         }
-        let content = compose_tool_progress(tools, true, self.display);
+        let content = compose_tool_progress(tools, true, turn_failed, self.display);
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
@@ -1777,9 +1777,22 @@ fn fail_running_tools(tools: &mut [ToolEntry]) -> usize {
     failed
 }
 
-fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDisplay) -> String {
+fn compose_tool_progress(
+    tools: &[ToolEntry],
+    finished: bool,
+    turn_failed: bool,
+    display: ToolDisplay,
+) -> String {
     let mut out = if finished {
-        format!("工具调用完成（共 {} 个）", tools.len())
+        match display {
+            ToolDisplay::None if turn_failed => {
+                format!("OpenAB · 处理失败（共 {} 个工具）", tools.len())
+            }
+            ToolDisplay::None => format!("OpenAB · 已完成（共 {} 个工具）", tools.len()),
+            ToolDisplay::Full | ToolDisplay::Compact => {
+                format!("工具调用完成（共 {} 个）", tools.len())
+            }
+        }
     } else if let Some(tool) = tools
         .iter()
         .rev()
@@ -1797,15 +1810,28 @@ fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDispl
                     tools.len()
                 )
             }
-            ToolDisplay::Compact | ToolDisplay::None if session_started => {
+            ToolDisplay::Compact if session_started => {
                 "会话已启动，正在调用工具（已调用 1 个）".to_string()
             }
-            ToolDisplay::Compact | ToolDisplay::None => {
+            ToolDisplay::Compact => {
                 format!("正在调用工具（已调用 {} 个）", tools.len())
+            }
+            ToolDisplay::None if session_started => {
+                "OpenAB · 正在处理…（已调用 1 个工具）".to_string()
+            }
+            ToolDisplay::None => {
+                format!("OpenAB · 正在处理…（已调用 {} 个工具）", tools.len())
             }
         }
     } else {
-        format!("最近一个工具已完成（已调用 {} 个）", tools.len())
+        match display {
+            ToolDisplay::None => {
+                format!("OpenAB · 正在整理结果…（已调用 {} 个工具）", tools.len())
+            }
+            ToolDisplay::Full | ToolDisplay::Compact => {
+                format!("最近一个工具已完成（已调用 {} 个）", tools.len())
+            }
+        }
     };
 
     if finished && display == ToolDisplay::None {
@@ -2726,7 +2752,7 @@ mod tests {
             let sends = adapter.sends.lock().unwrap();
             assert_eq!(sends.len(), 1, "receipt must create exactly one message");
             assert!(
-                sends[0].contains("会话已启动，正在回复"),
+                sends[0].contains("OpenAB · 正在处理"),
                 "got: {}",
                 sends[0]
             );
@@ -2745,7 +2771,7 @@ mod tests {
             "no-tool finish must close the receipt with one edit"
         );
         assert!(
-            edits[0].contains("会话已启动，回复完成"),
+            edits[0].contains("OpenAB · 已完成"),
             "got: {}",
             edits[0]
         );
@@ -2759,11 +2785,11 @@ mod tests {
         let edits = adapter.edits.lock().unwrap();
         assert_eq!(edits.len(), 2, "failed finish must edit the same receipt");
         assert!(
-            edits[1].contains("会话已启动，回复失败"),
+            edits[1].contains("OpenAB · 处理失败"),
             "got: {}",
             edits[1]
         );
-        assert!(!edits[1].contains("回复完成"), "got: {}", edits[1]);
+        assert!(!edits[1].contains("已完成"), "got: {}", edits[1]);
     }
 
     #[tokio::test]
@@ -2855,7 +2881,7 @@ mod tests {
         assert_eq!(tools[2].state, ToolState::Failed);
         assert_eq!(fail_running_tools(&mut tools), 0);
 
-        let output = compose_tool_progress(&tools, true, ToolDisplay::None);
+        let output = compose_tool_progress(&tools, true, false, ToolDisplay::None);
         assert!(output.contains("✅ 成功 1 个"));
         assert!(output.contains("❌ 失败 2 个"));
     }
@@ -2937,12 +2963,23 @@ mod tests {
             tool("2", "cargo test", ToolState::Failed),
         ];
 
-        let output = compose_tool_progress(&tools, true, ToolDisplay::None);
+        let output = compose_tool_progress(&tools, true, false, ToolDisplay::None);
+        let failed_output = compose_tool_progress(&tools, true, true, ToolDisplay::None);
+        let running_output = compose_tool_progress(
+            &[tool("3", "secret_tool_name", ToolState::Running)],
+            false,
+            false,
+            ToolDisplay::None,
+        );
 
+        assert!(output.starts_with("OpenAB · 已完成"));
+        assert!(failed_output.starts_with("OpenAB · 处理失败"));
+        assert!(running_output.starts_with("OpenAB · 正在处理"));
         assert!(output.contains("✅ 成功 1 个"));
         assert!(output.contains("❌ 失败 1 个"));
         assert!(!output.contains("web_search"));
         assert!(!output.contains("cargo test"));
+        assert!(!running_output.contains("secret_tool_name"));
     }
 
     #[test]
