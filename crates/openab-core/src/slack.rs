@@ -694,7 +694,7 @@ impl ChatAdapter for SlackAdapter {
     }
 
     fn session_link_label(&self) -> Option<&'static str> {
-        Some("Open in OpenAB Plus")
+        Some("Open in OpenAB")
     }
 }
 
