@@ -167,7 +167,7 @@ impl SessionPool {
         let workdir = working_dir_override
             .unwrap_or(&resolved.config.working_dir)
             .to_string();
-        let model = resolved.config_options.get("model").cloned();
+        let model = configured_model(&resolved.config, &resolved.config_options);
         let policy = ThreadProfilePolicy {
             timeout_secs: resolved.timeout_secs,
             recovery_strategy: resolved.recovery_strategy.clone(),
@@ -645,6 +645,62 @@ fn model_from_options(options: &[ConfigOption]) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn configured_model(
+    config: &AgentConfig,
+    config_options: &HashMap<String, String>,
+) -> Option<String> {
+    config_options
+        .get("model")
+        .and_then(|value| non_empty_string(value))
+        .or_else(|| model_from_agent_env(config))
+}
+
+fn model_from_agent_env(config: &AgentConfig) -> Option<String> {
+    for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "CLAUDE_MODEL"] {
+        if let Some(value) = agent_env_value(config, key) {
+            return Some(value);
+        }
+    }
+
+    agent_env_value(config, "CLAUDE_MODEL_CONFIG")
+        .and_then(|value| model_from_claude_model_config(&value))
+}
+
+fn agent_env_value(config: &AgentConfig, key: &str) -> Option<String> {
+    config
+        .env
+        .get(key)
+        .and_then(|value| non_empty_string(value))
+        .or_else(|| {
+            config
+                .inherit_env
+                .iter()
+                .any(|inherited| inherited == key)
+                .then(|| env::var(key).ok())
+                .flatten()
+                .and_then(|value| non_empty_string(&value))
+        })
+}
+
+fn model_from_claude_model_config(value: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(value).ok()?;
+    let models = parsed.get("availableModels")?.as_array()?;
+
+    models.iter().find_map(|model| match model {
+        serde_json::Value::String(value) => non_empty_string(value),
+        serde_json::Value::Object(model) => ["modelId", "id", "value"]
+            .iter()
+            .find_map(|key| model.get(*key).and_then(|value| value.as_str()))
+            .and_then(non_empty_string),
+        _ => None,
+    })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 fn session_external_base_url_from_env() -> Option<String> {
     [
         "OPENAB_SESSION_PUBLIC_BASE_URL",
@@ -708,6 +764,49 @@ mod tests {
         ];
 
         assert_eq!(model_from_options(&options).as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn configured_model_prefers_runtime_option_over_agent_env() {
+        let mut config = AgentConfig::default();
+        config.env.insert(
+            "ANTHROPIC_MODEL".into(),
+            "deepseek/deepseek-v4-flash".into(),
+        );
+        let options = HashMap::from([("model".into(), "claude-sonnet-4".into())]);
+
+        assert_eq!(
+            configured_model(&config, &options).as_deref(),
+            Some("claude-sonnet-4")
+        );
+    }
+
+    #[test]
+    fn configured_model_falls_back_to_anthropic_agent_env() {
+        let mut config = AgentConfig::default();
+        config.env.insert(
+            "ANTHROPIC_MODEL".into(),
+            " deepseek/deepseek-v4-flash ".into(),
+        );
+
+        assert_eq!(
+            configured_model(&config, &HashMap::new()).as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn configured_model_falls_back_to_claude_model_config() {
+        let mut config = AgentConfig::default();
+        config.env.insert(
+            "CLAUDE_MODEL_CONFIG".into(),
+            r#"{"availableModels":["deepseek/deepseek-v4-flash"]}"#.into(),
+        );
+
+        assert_eq!(
+            configured_model(&config, &HashMap::new()).as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
     }
 
     #[tokio::test]

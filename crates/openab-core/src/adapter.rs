@@ -2014,7 +2014,7 @@ fn sanitize_user_visible_text(content: &str) -> String {
         visible = strip_delimited_blocks(&visible, start, end);
     }
 
-    let visible = visible.trim();
+    let visible = trim_after_last_private_role_close(&visible).trim();
     if visible.is_empty() {
         "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。".to_string()
     } else {
@@ -2099,6 +2099,52 @@ fn strip_delimited_blocks(content: &str, start_marker: &str, end_marker: &str) -
     }
     visible.push_str(&content[cursor..]);
     visible
+}
+
+/// Keep only the text after the last private-role closing tag that was not
+/// removed as part of a balanced block. Some ACP wrappers emit a private
+/// preamble as plain text and terminate it with a misspelled or otherwise
+/// non-matching tag such as `</system-remision>`.
+fn trim_after_last_private_role_close(content: &str) -> &str {
+    let mut cursor = 0;
+    let mut last_end = None;
+
+    while let Some(start) = find_ascii_case_insensitive(content, "</", cursor) {
+        if let Some(end) = private_role_close_end(content, start) {
+            last_end = Some(end);
+            cursor = end;
+        } else {
+            cursor = start + 2;
+        }
+    }
+
+    last_end
+        .and_then(|end| content.get(end..))
+        .unwrap_or(content)
+}
+
+fn private_role_close_end(content: &str, start: usize) -> Option<usize> {
+    if !content.get(start..)?.starts_with("</") {
+        return None;
+    }
+
+    let name_start = start + 2;
+    let close_start = content.get(name_start..)?.find('>')? + name_start;
+    let name = content.get(name_start..close_start)?.trim();
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+
+    let lower_name = name.to_ascii_lowercase();
+    if lower_name.starts_with("system") || lower_name.starts_with("developer") {
+        Some(close_start + 1)
+    } else {
+        None
+    }
 }
 
 fn find_opening_tag(content: &str, tag: &str, from: usize) -> Option<(usize, usize)> {
@@ -3075,6 +3121,22 @@ mod tests {
             sanitize_user_visible_text("Visible answer\n<reasoning>private tail"),
             "Visible answer"
         );
+    }
+
+    #[test]
+    fn privacy_filter_drops_unpaired_private_preamble_with_misspelled_close() {
+        let input = "internal skill instructions and security rules\n\
+                     </system-remision>\n\
+                     您好！我是 Claude，下面是面向用户的回答。";
+        let output = sanitize_user_visible_text(input);
+        assert_eq!(output, "您好！我是 Claude，下面是面向用户的回答。");
+        assert!(!output.contains("security rules"));
+    }
+
+    #[test]
+    fn privacy_filter_drops_unpaired_developer_preamble() {
+        let input = "private developer context\n</developer-context>\nPublic answer";
+        assert_eq!(sanitize_user_visible_text(input), "Public answer");
     }
 
     #[test]
