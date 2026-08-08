@@ -689,8 +689,12 @@ impl ChatAdapter for SlackAdapter {
         true
     }
 
+    fn exposes_intermediate_text(&self) -> bool {
+        false
+    }
+
     fn session_link_label(&self) -> Option<&'static str> {
-        Some("Open in OpenAB Plus")
+        Some("Open in OpenAB")
     }
 }
 
@@ -2477,6 +2481,10 @@ mod tests {
         // off when another bot is present; post+edit streaming on regardless.
         let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Off, true, crate::multibot_cache::MultibotCache::load("/dev/null".into()), true);
         assert!(adapter.uses_assistant_status(), "assistant_mode enables status API");
+        assert!(
+            !adapter.exposes_intermediate_text(),
+            "Slack must keep raw intermediate agent text private"
+        );
         assert!(adapter.use_streaming(false), "post+edit streaming on when no other bot");
         assert!(adapter.uses_native_streaming(false), "native streaming on when no other bot");
         assert!(!adapter.uses_native_streaming(true), "other bot present disables native");

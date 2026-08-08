@@ -14,7 +14,7 @@ use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
-use crate::session_snapshot::SessionStatus;
+use crate::session_snapshot::{SessionSnapshot, SessionStatus};
 
 // --- Output directive parsing ---
 
@@ -463,6 +463,13 @@ pub trait ChatAdapter: Send + Sync + 'static {
         false
     }
 
+    /// Whether raw, intermediate agent text may be published while a turn is
+    /// running. Adapters with a strict external privacy boundary return false:
+    /// they show only high-level status until the finalized answer is ready.
+    fn exposes_intermediate_text(&self) -> bool {
+        true
+    }
+
     /// Label for a session deep link appended to progress and final messages.
     /// Returning None keeps existing output unchanged for platforms without a
     /// user-facing session console.
@@ -674,10 +681,17 @@ impl AdapterRouter {
         {
             Ok(created) => created,
             Err(e) => {
-                let msg = format_user_error(&e.to_string());
-                let _ = adapter
-                    .send_message(&thread_channel, &format!("⚠️ {msg}"))
-                    .await;
+                let content = if adapter.exposes_intermediate_text() {
+                    let msg = format_user_error(&e.to_string());
+                    format!("⚠️ {msg}")
+                } else {
+                    append_observability_footer(
+                        &format_public_error(&e.to_string()),
+                        None,
+                        adapter.session_link_label(),
+                    )
+                };
+                let _ = adapter.send_message(&thread_channel, &content).await;
                 error!("pool error: {e}");
                 return Err(e);
             }
@@ -738,9 +752,17 @@ impl AdapterRouter {
         }
 
         if let Err(ref e) = result {
-            let _ = adapter
-                .send_message(&thread_channel, &format!("⚠️ {e}"))
-                .await;
+            let content = if adapter.exposes_intermediate_text() {
+                format!("⚠️ {e}")
+            } else {
+                let snapshot = self.pool.session_snapshot(&thread_key).await;
+                append_observability_footer(
+                    &format_public_error(&e.to_string()),
+                    snapshot.as_ref(),
+                    adapter.session_link_label(),
+                )
+            };
+            let _ = adapter.send_message(&thread_channel, &content).await;
         }
 
         result
@@ -786,15 +808,17 @@ impl AdapterRouter {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
         let message_limit = adapter.message_limit();
-        let streaming = adapter.use_streaming(other_bot_present);
-        // Keep the full turn text (incl. inter-tool narration) when streaming
-        // (it was already shown live) OR when `[reactions] narration_display` is
-        // set. Otherwise a send-once turn delivers only the final answer block.
-        // Platform-agnostic — read from the shared reactions config, alongside
-        // `tool_display`. `streaming` still drives the placeholder / native-stream
-        // paths below; only the final-text selection uses `keep_full_text`.
-        let keep_full_text = streaming || self.reactions_config.narration_display;
-        let native = adapter.uses_native_streaming(other_bot_present);
+        let exposes_intermediate_text = adapter.exposes_intermediate_text();
+        // A strict privacy-boundary adapter (Slack) never publishes raw agent
+        // chunks while a turn is running. It keeps the status/progress message,
+        // then sends only the finalized answer.
+        let streaming =
+            adapter.use_streaming(other_bot_present) && exposes_intermediate_text;
+        // Intermediate narration is never retained across a strict privacy
+        // boundary, even if the shared narration_display setting is enabled.
+        let keep_full_text = exposes_intermediate_text
+            && (streaming || self.reactions_config.narration_display);
+        let native = streaming && adapter.uses_native_streaming(other_bot_present);
         let assistant_status = adapter.uses_assistant_status();
         // Platforms that render Markdown tables natively (e.g. Slack Block Kit
         // `markdown` blocks / `markdown_text` stream chunks) skip the
@@ -804,7 +828,13 @@ impl AdapterRouter {
         } else {
             self.table_mode
         };
-        let tool_display = self.reactions_config.tool_display;
+        // Tool titles can contain command arguments or other execution detail.
+        // Strict privacy-boundary adapters expose only generic counts/states.
+        let tool_display = if exposes_intermediate_text {
+            self.reactions_config.tool_display
+        } else {
+            ToolDisplay::None
+        };
         let tool_progress_enabled = adapter.uses_tool_progress_message();
         let reply_tool_display = if tool_progress_enabled {
             ToolDisplay::None
@@ -860,6 +890,10 @@ impl AdapterRouter {
                         session_link_label,
                         tool_display,
                     );
+                    // Acknowledge the request immediately. The first tool event
+                    // updates this message in place; no raw agent text is needed
+                    // to prove that the turn is running.
+                    tool_progress.seed_receipt().await;
                     // Byte offset into `text_buf` where the final answer block
                     // begins — advanced to the buffer end on every tool
                     // completion so it tracks "just past the last tool". Used by
@@ -1121,11 +1155,12 @@ impl AdapterRouter {
                                 AcpEvent::ToolStart { id, title } if !title.is_empty() => {
                                     // Live indicator: assistant status line vs emoji reaction.
                                     if assistant_status {
+                                        let status = assistant_tool_status(
+                                            &title,
+                                            exposes_intermediate_text,
+                                        );
                                         let _ = adapter
-                                            .set_status(
-                                                &thread_channel,
-                                                &format!("Using {title}…"),
-                                            )
+                                            .set_status(&thread_channel, &status)
                                             .await;
                                     } else {
                                         reactions.set_tool(&title).await;
@@ -1265,6 +1300,11 @@ impl AdapterRouter {
                     // exactly that case. `finalize_body` is the pure helper that
                     // encodes the four-corner truth table so it can be unit-tested.
                     let text_buf = finalize_body(reset, keep_full_text, answer_start, text_buf);
+                    let text_buf = if exposes_intermediate_text {
+                        text_buf
+                    } else {
+                        sanitize_user_visible_text(&text_buf)
+                    };
 
                     let interrupted_tools = fail_running_tools(&mut tool_lines);
                     if interrupted_tools > 0 {
@@ -1289,17 +1329,31 @@ impl AdapterRouter {
                                 "agent returned empty turn (0 output tokens) — likely provider/model/auth failure"
                             );
                         }
-                        classify_empty_turn(response_error.as_deref(), &turn_result)
+                        if let Some(err) = response_error.as_deref() {
+                            format_response_error(err, exposes_intermediate_text)
+                        } else {
+                            classify_empty_turn(None, &turn_result)
+                        }
                     } else if let Some(err) = response_error {
-                        format!("⚠️ {err}\n\n{final_content}")
+                        let error = format_response_error(&err, exposes_intermediate_text);
+                        format!("{error}\n\n{final_content}")
                     } else {
                         final_content
                     };
-                    let final_content = append_session_link(
-                        &final_content,
-                        external_url.as_deref(),
-                        session_link_label,
-                    );
+                    let final_snapshot = session_pool.session_snapshot(&session_key).await;
+                    let final_content = if exposes_intermediate_text {
+                        append_session_link(
+                            &final_content,
+                            external_url.as_deref(),
+                            session_link_label,
+                        )
+                    } else {
+                        append_observability_footer(
+                            &final_content,
+                            final_snapshot.as_ref(),
+                            session_link_label,
+                        )
+                    };
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
                     let chunks = if adapter.platform() == "discord" {
@@ -1657,7 +1711,7 @@ impl ToolProgressMessage {
             return;
         }
         self.write(append_session_link(
-            "会话已启动，正在回复…",
+            "OpenAB · 正在处理…",
             self.external_url.as_deref(),
             self.link_label,
         ))
@@ -1668,7 +1722,7 @@ impl ToolProgressMessage {
         if !self.enabled || tools.is_empty() {
             return;
         }
-        let content = compose_tool_progress(tools, false, self.display);
+        let content = compose_tool_progress(tools, false, false, self.display);
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
@@ -1687,9 +1741,9 @@ impl ToolProgressMessage {
             // produced no text at all) there is nothing to edit.
             if self.message.is_some() {
                 let state = if turn_failed {
-                    "会话已启动，回复失败"
+                    "OpenAB · 处理失败"
                 } else {
-                    "会话已启动，回复完成"
+                    "OpenAB · 已完成"
                 };
                 self.write(append_session_link(
                     state,
@@ -1700,7 +1754,7 @@ impl ToolProgressMessage {
             }
             return;
         }
-        let content = compose_tool_progress(tools, true, self.display);
+        let content = compose_tool_progress(tools, true, turn_failed, self.display);
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
@@ -1744,9 +1798,22 @@ fn fail_running_tools(tools: &mut [ToolEntry]) -> usize {
     failed
 }
 
-fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDisplay) -> String {
+fn compose_tool_progress(
+    tools: &[ToolEntry],
+    finished: bool,
+    turn_failed: bool,
+    display: ToolDisplay,
+) -> String {
     let mut out = if finished {
-        format!("工具调用完成（共 {} 个）", tools.len())
+        match display {
+            ToolDisplay::None if turn_failed => {
+                format!("OpenAB · 处理失败（共 {} 个工具）", tools.len())
+            }
+            ToolDisplay::None => format!("OpenAB · 已完成（共 {} 个工具）", tools.len()),
+            ToolDisplay::Full | ToolDisplay::Compact => {
+                format!("工具调用完成（共 {} 个）", tools.len())
+            }
+        }
     } else if let Some(tool) = tools
         .iter()
         .rev()
@@ -1764,15 +1831,28 @@ fn compose_tool_progress(tools: &[ToolEntry], finished: bool, display: ToolDispl
                     tools.len()
                 )
             }
-            ToolDisplay::Compact | ToolDisplay::None if session_started => {
+            ToolDisplay::Compact if session_started => {
                 "会话已启动，正在调用工具（已调用 1 个）".to_string()
             }
-            ToolDisplay::Compact | ToolDisplay::None => {
+            ToolDisplay::Compact => {
                 format!("正在调用工具（已调用 {} 个）", tools.len())
+            }
+            ToolDisplay::None if session_started => {
+                "OpenAB · 正在处理…（已调用 1 个工具）".to_string()
+            }
+            ToolDisplay::None => {
+                format!("OpenAB · 正在处理…（已调用 {} 个工具）", tools.len())
             }
         }
     } else {
-        format!("最近一个工具已完成（已调用 {} 个）", tools.len())
+        match display {
+            ToolDisplay::None => {
+                format!("OpenAB · 正在整理结果…（已调用 {} 个工具）", tools.len())
+            }
+            ToolDisplay::Full | ToolDisplay::Compact => {
+                format!("最近一个工具已完成（已调用 {} 个）", tools.len())
+            }
+        }
     };
 
     if finished && display == ToolDisplay::None {
@@ -1805,6 +1885,249 @@ fn append_session_link(content: &str, url: Option<&str>, label: Option<&str>) ->
     } else {
         format!("{content}\n\n[{label}]({url})")
     }
+}
+
+fn assistant_tool_status(title: &str, exposes_intermediate_text: bool) -> String {
+    if exposes_intermediate_text {
+        format!("Using {title}…")
+    } else {
+        "正在执行…".to_string()
+    }
+}
+
+fn format_public_error(message: &str) -> String {
+    let message = message.to_ascii_lowercase();
+    let summary = if message.contains("timeout waiting for") {
+        "请求超时，请稍后重试。"
+    } else if message.contains("connection closed") || message.contains("channel closed") {
+        "与 Agent 的连接已中断，请重试。"
+    } else if message.contains("failed to spawn") || message.contains("no such file") {
+        "无法启动 Agent，请检查配置。"
+    } else if message.contains("pool exhausted") {
+        "服务繁忙，请稍后重试。"
+    } else if message.contains("invalid api key") || message.contains("unauthorized") {
+        "鉴权失败，请检查配置。"
+    } else {
+        "请在 OpenAB 中查看运行详情。"
+    };
+    format!("这次任务执行失败：{summary}")
+}
+
+fn format_response_error(message: &str, exposes_intermediate_text: bool) -> String {
+    if exposes_intermediate_text {
+        format!("⚠️ {message}")
+    } else {
+        format_public_error(message)
+    }
+}
+
+fn append_observability_footer(
+    content: &str,
+    snapshot: Option<&SessionSnapshot>,
+    label: Option<&str>,
+) -> String {
+    let mut fields = Vec::with_capacity(3);
+    if let Some((url, label)) =
+        snapshot.and_then(|value| value.external_url.as_deref()).zip(label)
+    {
+        fields.push(format!("[{label}]({url})"));
+    }
+
+    let model = snapshot
+        .and_then(|value| non_empty(value.model.as_deref()))
+        .unwrap_or("not reported");
+    let agent = snapshot
+        .and_then(|value| {
+            non_empty(value.profile_name.as_deref())
+                .or_else(|| non_empty(Some(value.agent.as_str())))
+        })
+        .unwrap_or("not reported");
+    fields.push(format!("Model: `{}`", inline_metadata(model)));
+    fields.push(format!("Agent: `{}`", inline_metadata(agent)));
+
+    let footer = fields.join(" · ");
+    let content = content.trim_end();
+    if content.is_empty() {
+        footer
+    } else {
+        format!("{content}\n\n{footer}")
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn inline_metadata(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('`', "'")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+/// Remove protocol-level private blocks before text crosses a strict external
+/// privacy boundary. The preferred `<final>` block wins when an agent provides
+/// one; otherwise known hidden XML-style blocks are removed from the answer.
+fn sanitize_user_visible_text(content: &str) -> String {
+    const HIDDEN_TAGS: &[&str] = &[
+        "think",
+        "thinking",
+        "analysis",
+        "reasoning",
+        "system",
+        "developer",
+        "system-reminder",
+        "tool",
+        "tools",
+        "tool_call",
+        "tool_result",
+        "tool-input",
+        "tool_input",
+        "tool-output",
+        "tool_output",
+        "tool-schema",
+        "tool_schema",
+        "tool-instructions",
+        "tool_instructions",
+        "available-tools",
+        "available_tools",
+        "function_call",
+        "function_result",
+    ];
+    const HIDDEN_ROLE_BLOCKS: &[(&str, &str)] = &[
+        ("<|start|>system<|message|>", "<|end|>"),
+        ("<|start|>developer<|message|>", "<|end|>"),
+        ("<|im_start|>system", "<|im_end|>"),
+        ("<|im_start|>developer", "<|im_end|>"),
+    ];
+
+    let selected = last_tagged_body(content, "final").unwrap_or(content);
+    let mut visible = selected.to_string();
+    for tag in HIDDEN_TAGS {
+        visible = strip_tagged_blocks(&visible, tag);
+    }
+    for (start, end) in HIDDEN_ROLE_BLOCKS {
+        visible = strip_delimited_blocks(&visible, start, end);
+    }
+
+    let visible = visible.trim();
+    if visible.is_empty() {
+        "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。".to_string()
+    } else {
+        visible.to_string()
+    }
+}
+
+fn last_tagged_body<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
+    let close = format!("</{tag}>");
+    let mut cursor = 0;
+    let mut last = None;
+    while let Some((_, body_start)) = find_opening_tag(content, tag, cursor) {
+        if let Some(close_start) = find_ascii_case_insensitive(content, &close, body_start) {
+            last = content.get(body_start..close_start);
+            cursor = close_start + close.len();
+        } else {
+            last = content.get(body_start..);
+            break;
+        }
+    }
+    last
+}
+
+fn strip_tagged_blocks(content: &str, tag: &str) -> String {
+    let mut visible = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while let Some((open_start, body_start)) = find_opening_tag(content, tag, cursor) {
+        visible.push_str(&content[cursor..open_start]);
+        if let Some(block_end) = find_matching_tag_end(content, tag, body_start) {
+            cursor = block_end;
+        } else {
+            cursor = content.len();
+            break;
+        }
+    }
+    visible.push_str(&content[cursor..]);
+    visible
+}
+
+fn find_matching_tag_end(content: &str, tag: &str, from: usize) -> Option<usize> {
+    let close = format!("</{tag}>");
+    let mut depth = 1usize;
+    let mut cursor = from;
+
+    while depth > 0 {
+        let next_open = find_opening_tag(content, tag, cursor);
+        let next_close = find_ascii_case_insensitive(content, &close, cursor);
+        match (next_open, next_close) {
+            (Some((open_start, body_start)), Some(close_start))
+                if open_start < close_start =>
+            {
+                depth += 1;
+                cursor = body_start;
+            }
+            (_, Some(close_start)) => {
+                depth -= 1;
+                cursor = close_start + close.len();
+            }
+            _ => return None,
+        }
+    }
+
+    Some(cursor)
+}
+
+fn strip_delimited_blocks(content: &str, start_marker: &str, end_marker: &str) -> String {
+    let mut visible = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while let Some(start) = find_ascii_case_insensitive(content, start_marker, cursor) {
+        visible.push_str(&content[cursor..start]);
+        let body_start = start + start_marker.len();
+        if let Some(end_start) =
+            find_ascii_case_insensitive(content, end_marker, body_start)
+        {
+            cursor = end_start + end_marker.len();
+        } else {
+            cursor = content.len();
+            break;
+        }
+    }
+    visible.push_str(&content[cursor..]);
+    visible
+}
+
+fn find_opening_tag(content: &str, tag: &str, from: usize) -> Option<(usize, usize)> {
+    let needle = format!("<{tag}");
+    let mut cursor = from;
+    while let Some(start) = find_ascii_case_insensitive(content, &needle, cursor) {
+        let after_name = start + needle.len();
+        let delimiter = content.as_bytes().get(after_name).copied();
+        if matches!(delimiter, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n'))
+        {
+            let body_start = content[after_name..].find('>')? + after_name + 1;
+            return Some((start, body_start));
+        }
+        cursor = after_name;
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(content: &str, needle: &str, from: usize) -> Option<usize> {
+    if needle.is_empty() || from > content.len() || !content.is_char_boundary(from) {
+        return None;
+    }
+    content[from..].char_indices().find_map(|(offset, _)| {
+        let start = from + offset;
+        content
+            .get(start..start + needle.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(needle))
+            .map(|_| start)
+    })
 }
 
 impl ToolEntry {
@@ -2556,7 +2879,7 @@ mod tests {
             let sends = adapter.sends.lock().unwrap();
             assert_eq!(sends.len(), 1, "receipt must create exactly one message");
             assert!(
-                sends[0].contains("会话已启动，正在回复"),
+                sends[0].contains("OpenAB · 正在处理"),
                 "got: {}",
                 sends[0]
             );
@@ -2575,7 +2898,7 @@ mod tests {
             "no-tool finish must close the receipt with one edit"
         );
         assert!(
-            edits[0].contains("会话已启动，回复完成"),
+            edits[0].contains("OpenAB · 已完成"),
             "got: {}",
             edits[0]
         );
@@ -2589,11 +2912,11 @@ mod tests {
         let edits = adapter.edits.lock().unwrap();
         assert_eq!(edits.len(), 2, "failed finish must edit the same receipt");
         assert!(
-            edits[1].contains("会话已启动，回复失败"),
+            edits[1].contains("OpenAB · 处理失败"),
             "got: {}",
             edits[1]
         );
-        assert!(!edits[1].contains("回复完成"), "got: {}", edits[1]);
+        assert!(!edits[1].contains("已完成"), "got: {}", edits[1]);
     }
 
     #[tokio::test]
@@ -2685,7 +3008,7 @@ mod tests {
         assert_eq!(tools[2].state, ToolState::Failed);
         assert_eq!(fail_running_tools(&mut tools), 0);
 
-        let output = compose_tool_progress(&tools, true, ToolDisplay::None);
+        let output = compose_tool_progress(&tools, true, false, ToolDisplay::None);
         assert!(output.contains("✅ 成功 1 个"));
         assert!(output.contains("❌ 失败 2 个"));
     }
@@ -2712,18 +3035,143 @@ mod tests {
     }
 
     #[test]
+    fn private_adapter_tool_status_hides_tool_title() {
+        let output = assistant_tool_status("shell token=private", false);
+        assert_eq!(output, "正在执行…");
+        assert!(!output.contains("shell"));
+        assert!(!output.contains("private"));
+
+        assert_eq!(
+            assistant_tool_status("web_search", true),
+            "Using web_search…"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_removes_hidden_blocks_case_insensitively() {
+        let input = "before\n<THINK>private reasoning</THINK>\nanswer\n\
+                     <system-reminder>private policy</system-reminder>";
+        let output = sanitize_user_visible_text(input);
+        assert_eq!(output, "before\n\nanswer");
+        assert!(!output.contains("private"));
+    }
+
+    #[test]
+    fn privacy_filter_removes_nested_hidden_blocks() {
+        let input =
+            "before<analysis>outer<ANALYSIS>nested secret</ANALYSIS>tail</analysis>after";
+        assert_eq!(sanitize_user_visible_text(input), "beforeafter");
+    }
+
+    #[test]
+    fn privacy_filter_prefers_final_block() {
+        let input = "<analysis>secret</analysis><final>Visible answer</final>ignored";
+        assert_eq!(sanitize_user_visible_text(input), "Visible answer");
+    }
+
+    #[test]
+    fn privacy_filter_drops_unclosed_hidden_tail() {
+        assert_eq!(
+            sanitize_user_visible_text("Visible answer\n<reasoning>private tail"),
+            "Visible answer"
+        );
+    }
+
+    #[test]
+    fn privacy_filter_removes_tool_schema_and_role_transcripts() {
+        let input = "<tools>{\"secret\":true}</tools>\n\
+                     <|start|>system<|message|>private prompt<|end|>\n\
+                     Visible answer";
+        let output = sanitize_user_visible_text(input);
+        assert_eq!(output, "Visible answer");
+        assert!(!output.contains("secret"));
+        assert!(!output.contains("private prompt"));
+    }
+
+    #[test]
+    fn privacy_filter_uses_safe_fallback_when_no_public_text() {
+        let output = sanitize_user_visible_text("<analysis>private only</analysis>");
+        assert!(output.contains("没有返回可公开展示的结果"));
+        assert!(!output.contains("private only"));
+    }
+
+    #[test]
+    fn public_error_never_echoes_raw_details() {
+        let output = format_public_error(
+            "<system>private prompt</system> tool schema at /srv/secrets",
+        );
+        assert!(output.contains("任务执行失败"));
+        assert!(!output.contains("private prompt"));
+        assert!(!output.contains("/srv/secrets"));
+    }
+
+    #[test]
+    fn private_adapter_response_error_never_echoes_raw_details() {
+        let output = format_response_error(
+            "<system>private prompt</system> stack at /srv/secrets",
+            false,
+        );
+        assert!(output.contains("任务执行失败"));
+        assert!(!output.contains("private prompt"));
+        assert!(!output.contains("/srv/secrets"));
+    }
+
+    #[test]
+    fn non_private_adapter_response_error_preserves_existing_detail() {
+        let output = format_response_error("Agent process died", true);
+        assert_eq!(output, "⚠️ Agent process died");
+    }
+
+    #[test]
+    fn observability_footer_contains_link_model_and_agent() {
+        let snapshot = SessionSnapshot::new(
+            "slack:1700.1".into(),
+            "codex-acp".into(),
+            "/workspace".into(),
+            Some("codex".into()),
+            Some("Codex Web".into()),
+            Some("gpt-5".into()),
+            Some("https://openab.example"),
+        );
+        let output =
+            append_observability_footer("完成", Some(&snapshot), Some("Open in OpenAB Plus"));
+        assert!(output.contains("[Open in OpenAB Plus](https://openab.example/#/sessions/"));
+        assert!(output.contains("Model: `gpt-5`"));
+        assert!(output.contains("Agent: `Codex Web`"));
+    }
+
+    #[test]
+    fn observability_footer_reports_missing_runtime_metadata() {
+        let output = append_observability_footer("完成", None, Some("Open in OpenAB Plus"));
+        assert!(!output.contains("Open in OpenAB Plus"));
+        assert!(output.contains("Model: `not reported`"));
+        assert!(output.contains("Agent: `not reported`"));
+    }
+
+    #[test]
     fn hidden_tool_titles_still_report_final_outcomes() {
         let tools = vec![
             tool("1", "web_search", ToolState::Completed),
             tool("2", "cargo test", ToolState::Failed),
         ];
 
-        let output = compose_tool_progress(&tools, true, ToolDisplay::None);
+        let output = compose_tool_progress(&tools, true, false, ToolDisplay::None);
+        let failed_output = compose_tool_progress(&tools, true, true, ToolDisplay::None);
+        let running_output = compose_tool_progress(
+            &[tool("3", "secret_tool_name", ToolState::Running)],
+            false,
+            false,
+            ToolDisplay::None,
+        );
 
+        assert!(output.starts_with("OpenAB · 已完成"));
+        assert!(failed_output.starts_with("OpenAB · 处理失败"));
+        assert!(running_output.starts_with("OpenAB · 正在处理"));
         assert!(output.contains("✅ 成功 1 个"));
         assert!(output.contains("❌ 失败 1 个"));
         assert!(!output.contains("web_search"));
         assert!(!output.contains("cargo test"));
+        assert!(!running_output.contains("secret_tool_name"));
     }
 
     #[test]

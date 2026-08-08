@@ -79,9 +79,9 @@ export SLACK_APP_TOKEN="xapp-..."
 
 ### Assistant Mode (default: enabled)
 
-`assistant_mode` is **enabled by default**. This uses Slack's native AI-app APIs for streaming (`chat.startStream`/`appendStream`/`stopStream`) and status indicators (`assistant.threads.setStatus`) instead of the legacy post+edit loop and emoji reactions.
+`assistant_mode` is **enabled by default**. It uses `assistant.threads.setStatus` for a short, high-level status instead of emoji reactions. OpenAB does not stream raw agent text to Slack. It posts one finalized answer after the turn ends.
 
-**Requirements:** Your Slack app must be an [AI app](https://api.slack.com/docs/apps/ai) with the `assistant:write` scope. If your app already has `chat:write`, you only need to add `assistant:write` and reinstall.
+**Requirements:** Your Slack app must be an [AI app](https://api.slack.com/docs/apps/ai) with the `assistant:write` scope. If your app already has `chat:write`, add `assistant:write` and reinstall.
 
 **Non-AI app compatibility:** If your Slack app is **not** an AI app (or lacks `assistant:write`), set:
 
@@ -90,7 +90,7 @@ export SLACK_APP_TOKEN="xapp-..."
 assistant_mode = false
 ```
 
-This keeps the previous behavior: post+edit streaming with emoji reactions (👀 / ✅ / ❌) for status indicators. Without this opt-out, message delivery still works (native streaming degrades to post+edit automatically), but thinking/tool-use indicators will not be visible.
+This uses emoji reactions (👀 / ✅ / ❌) for status. The final answer still arrives once in the original message thread. Raw reasoning, prompts, and tool input/output are not posted in either mode.
 
 ## 7. Invite the Bot
 
@@ -112,20 +112,20 @@ The bot will reply in a thread. After that, just type in the thread — no @ment
 
 ## Session progress messages and OpenAB Plus session links
 
-Each Slack turn keeps tool activity in a single progress message:
+Each Slack turn keeps user-visible progress in one short thread message:
 
-- When the agent starts a tool, the progress message opens with
-  `会话已启动，正在调用 ... 工具（已调用 1 个）` and is edited in place as
-  tool activity continues. It finishes with a per-tool or count-only
-  success/failure summary.
-- When the agent answers without any tool call, the same progress message
-  opens on the first streamed text as `会话已启动，正在回复…` and is closed
-  as `会话已启动，回复完成` when the turn ends. In assistant mode the answer
-  then streams live below the receipt (native streaming is per-turn and
-  requires `assistant:write`).
+- OpenAB posts `OpenAB · 正在处理…` as soon as the turn starts.
+- Tool activity updates the same message with a high-level state and counts.
+  Tool names, arguments, raw output, prompts, and reasoning are not shown.
+- The final answer is a separate in-thread message. It is sent only after the
+  turn finishes and remains understandable without opening the web console.
+- Known internal blocks such as `<think>`, `<analysis>`,
+  `<system-reminder>`, developer prompts, and tool blocks are removed before
+  delivery.
 
-To append an `Open in OpenAB Plus` session link to the progress message and
-the final reply, configure the public base URL of the OpenAB Plus web console
+The final reply footer includes `Open in OpenAB`, the actual `Model`,
+and the actual `Agent`. Configure the public base URL of the OpenAB Plus web
+console to enable the run link
 (any of the following environment variables, checked in this order):
 
 ```bash
