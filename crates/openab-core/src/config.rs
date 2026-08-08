@@ -562,13 +562,10 @@ pub struct SlackConfig {
     /// that are not AI apps (no `assistant:write`) to keep emoji-reaction status.
     #[serde(default = "default_true")]
     pub assistant_mode: bool,
-    /// Master streaming switch. When `false`, the Slack adapter always posts a
-    /// single final message (send-once) — no native streaming, no post+edit
-    /// placeholder — regardless of `assistant_mode`. Default `true`. Useful for
-    /// multi-agent threads to avoid streamed-message edit states re-firing
-    /// `app_mention`. Mirrors `[gateway] streaming` in concept, but the default
-    /// deliberately differs: `GatewayConfig.streaming` defaults to `false`,
-    /// whereas this defaults to `true` to preserve current Slack streaming.
+    /// Legacy Slack streaming preference. Kept for config compatibility.
+    /// Slack public-reply mode always withholds raw agent deltas and sends only
+    /// the final user-facing answer. This value remains available for a future
+    /// stream implementation that can prove every delta is public.
     #[serde(default = "default_true")]
     pub streaming: bool,
 }
