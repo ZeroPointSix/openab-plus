@@ -1329,9 +1329,14 @@ impl AdapterRouter {
                                 "agent returned empty turn (0 output tokens) — likely provider/model/auth failure"
                             );
                         }
-                        classify_empty_turn(response_error.as_deref(), &turn_result)
+                        if let Some(err) = response_error.as_deref() {
+                            format_response_error(err, exposes_intermediate_text)
+                        } else {
+                            classify_empty_turn(None, &turn_result)
+                        }
                     } else if let Some(err) = response_error {
-                        format!("⚠️ {err}\n\n{final_content}")
+                        let error = format_response_error(&err, exposes_intermediate_text);
+                        format!("{error}\n\n{final_content}")
                     } else {
                         final_content
                     };
@@ -1906,6 +1911,14 @@ fn format_public_error(message: &str) -> String {
         "请在 OpenAB 中查看运行详情。"
     };
     format!("这次任务执行失败：{summary}")
+}
+
+fn format_response_error(message: &str, exposes_intermediate_text: bool) -> String {
+    if exposes_intermediate_text {
+        format!("⚠️ {message}")
+    } else {
+        format_public_error(message)
+    }
 }
 
 fn append_observability_footer(
@@ -3090,6 +3103,23 @@ mod tests {
         assert!(output.contains("任务执行失败"));
         assert!(!output.contains("private prompt"));
         assert!(!output.contains("/srv/secrets"));
+    }
+
+    #[test]
+    fn private_adapter_response_error_never_echoes_raw_details() {
+        let output = format_response_error(
+            "<system>private prompt</system> stack at /srv/secrets",
+            false,
+        );
+        assert!(output.contains("任务执行失败"));
+        assert!(!output.contains("private prompt"));
+        assert!(!output.contains("/srv/secrets"));
+    }
+
+    #[test]
+    fn non_private_adapter_response_error_preserves_existing_detail() {
+        let output = format_response_error("Agent process died", true);
+        assert_eq!(output, "⚠️ Agent process died");
     }
 
     #[test]
