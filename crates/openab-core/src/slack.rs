@@ -689,8 +689,12 @@ impl ChatAdapter for SlackAdapter {
         true
     }
 
+    fn uses_public_reply_mode(&self) -> bool {
+        true
+    }
+
     fn session_link_label(&self) -> Option<&'static str> {
-        Some("Open in OpenAB Plus")
+        Some("Open in OpenAB")
     }
 }
 
