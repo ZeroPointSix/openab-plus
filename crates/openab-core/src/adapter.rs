@@ -1155,11 +1155,12 @@ impl AdapterRouter {
                                 AcpEvent::ToolStart { id, title } if !title.is_empty() => {
                                     // Live indicator: assistant status line vs emoji reaction.
                                     if assistant_status {
+                                        let status = assistant_tool_status(
+                                            &title,
+                                            exposes_intermediate_text,
+                                        );
                                         let _ = adapter
-                                            .set_status(
-                                                &thread_channel,
-                                                &format!("Using {title}…"),
-                                            )
+                                            .set_status(&thread_channel, &status)
                                             .await;
                                     } else {
                                         reactions.set_tool(&title).await;
@@ -1881,6 +1882,14 @@ fn append_session_link(content: &str, url: Option<&str>, label: Option<&str>) ->
     }
 }
 
+fn assistant_tool_status(title: &str, exposes_intermediate_text: bool) -> String {
+    if exposes_intermediate_text {
+        format!("Using {title}…")
+    } else {
+        "正在执行…".to_string()
+    }
+}
+
 fn format_public_error(message: &str) -> String {
     let message = message.to_ascii_lowercase();
     let summary = if message.contains("timeout waiting for") {
@@ -2017,14 +2026,13 @@ fn last_tagged_body<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
 }
 
 fn strip_tagged_blocks(content: &str, tag: &str) -> String {
-    let close = format!("</{tag}>");
     let mut visible = String::with_capacity(content.len());
     let mut cursor = 0;
 
     while let Some((open_start, body_start)) = find_opening_tag(content, tag, cursor) {
         visible.push_str(&content[cursor..open_start]);
-        if let Some(close_start) = find_ascii_case_insensitive(content, &close, body_start) {
-            cursor = close_start + close.len();
+        if let Some(block_end) = find_matching_tag_end(content, tag, body_start) {
+            cursor = block_end;
         } else {
             cursor = content.len();
             break;
@@ -2032,6 +2040,32 @@ fn strip_tagged_blocks(content: &str, tag: &str) -> String {
     }
     visible.push_str(&content[cursor..]);
     visible
+}
+
+fn find_matching_tag_end(content: &str, tag: &str, from: usize) -> Option<usize> {
+    let close = format!("</{tag}>");
+    let mut depth = 1usize;
+    let mut cursor = from;
+
+    while depth > 0 {
+        let next_open = find_opening_tag(content, tag, cursor);
+        let next_close = find_ascii_case_insensitive(content, &close, cursor);
+        match (next_open, next_close) {
+            (Some((open_start, body_start)), Some(close_start))
+                if open_start < close_start =>
+            {
+                depth += 1;
+                cursor = body_start;
+            }
+            (_, Some(close_start)) => {
+                depth -= 1;
+                cursor = close_start + close.len();
+            }
+            _ => return None,
+        }
+    }
+
+    Some(cursor)
 }
 
 fn strip_delimited_blocks(content: &str, start_marker: &str, end_marker: &str) -> String {
@@ -2988,12 +3022,32 @@ mod tests {
     }
 
     #[test]
+    fn private_adapter_tool_status_hides_tool_title() {
+        let output = assistant_tool_status("shell token=private", false);
+        assert_eq!(output, "正在执行…");
+        assert!(!output.contains("shell"));
+        assert!(!output.contains("private"));
+
+        assert_eq!(
+            assistant_tool_status("web_search", true),
+            "Using web_search…"
+        );
+    }
+
+    #[test]
     fn privacy_filter_removes_hidden_blocks_case_insensitively() {
         let input = "before\n<THINK>private reasoning</THINK>\nanswer\n\
                      <system-reminder>private policy</system-reminder>";
         let output = sanitize_user_visible_text(input);
         assert_eq!(output, "before\n\nanswer");
         assert!(!output.contains("private"));
+    }
+
+    #[test]
+    fn privacy_filter_removes_nested_hidden_blocks() {
+        let input =
+            "before<analysis>outer<ANALYSIS>nested secret</ANALYSIS>tail</analysis>after";
+        assert_eq!(sanitize_user_visible_text(input), "beforeafter");
     }
 
     #[test]
