@@ -79,7 +79,7 @@ export SLACK_APP_TOKEN="xapp-..."
 
 ### Assistant Mode (default: enabled)
 
-`assistant_mode` is **enabled by default**. This uses Slack's native AI-app APIs for streaming (`chat.startStream`/`appendStream`/`stopStream`) and status indicators (`assistant.threads.setStatus`) instead of the legacy post+edit loop and emoji reactions.
+`assistant_mode` is **enabled by default**. It uses Slack's native AI-app status API (`assistant.threads.setStatus`) for a short high-level status line. Slack reply content always uses **public-reply mode**: OpenAB buffers agent output, hides internal reasoning and execution context, and posts only the final user-facing answer. Raw ACP text deltas are never streamed into Slack.
 
 **Requirements:** Your Slack app must be an [AI app](https://api.slack.com/docs/apps/ai) with the `assistant:write` scope. If your app already has `chat:write`, you only need to add `assistant:write` and reinstall.
 
@@ -90,8 +90,7 @@ export SLACK_APP_TOKEN="xapp-..."
 assistant_mode = false
 ```
 
-This keeps the previous behavior: post+edit streaming with emoji reactions (👀 / ✅ / ❌) for status indicators. Without this opt-out, message delivery still works (native streaming degrades to post+edit automatically), but thinking/tool-use indicators will not be visible.
-
+This keeps the same public-reply message flow and uses the concise thread status message plus emoji reactions (👀 / ✅ / ❌). Tool names, tool inputs, prompts, and reasoning are not used as status text.
 ## 7. Invite the Bot
 
 In each Slack channel where you want to use the bot:
@@ -110,21 +109,16 @@ In a channel where the bot is invited:
 
 The bot will reply in a thread. After that, just type in the thread — no @mention needed for follow-ups.
 
-## Session progress messages and OpenAB Plus session links
+## Public Slack replies and OpenAB session links
 
-Each Slack turn keeps tool activity in a single progress message:
+Each Slack turn keeps user-visible feedback in the original message thread:
 
-- When the agent starts a tool, the progress message opens with
-  `会话已启动，正在调用 ... 工具（已调用 1 个）` and is edited in place as
-  tool activity continues. It finishes with a per-tool or count-only
-  success/failure summary.
-- When the agent answers without any tool call, the same progress message
-  opens on the first streamed text as `会话已启动，正在回复…` and is closed
-  as `会话已启动，回复完成` when the turn ends. In assistant mode the answer
-  then streams live below the receipt (native streaming is per-turn and
-  requires `assistant:write`).
+- OpenAB immediately posts a short status such as `OpenAB · 正在处理…`.
+- The status can change to `正在执行…` or `正在整理结果…`, but it never contains prompts, reasoning, tool names, tool inputs, tool output, or system instructions.
+- OpenAB does not stream raw agent text into Slack. It buffers the turn, removes private tagged blocks, drops inter-tool narration, and posts the final answer as a separate thread reply.
+- The final footer shows the OpenAB run link, the reported model, and the active agent. Missing runtime metadata is shown as `未报告` instead of being guessed.
 
-To append an `Open in OpenAB Plus` session link to the progress message and
+To append an `Open in OpenAB` session link to the progress message and
 the final reply, configure the public base URL of the OpenAB Plus web console
 (any of the following environment variables, checked in this order):
 
@@ -190,15 +184,16 @@ On Discord, none of these apply: slash commands work in thread-channels, the cha
 2. Reinstall the app after adding the scope
 3. If `assistant_mode = true` (the default), emoji reactions are intentionally suppressed — status is shown via the assistant status line instead. Set `assistant_mode = false` if you want emoji reactions back.
 
-### Assistant status line not showing ("Thinking…" / "Using tool…")
+### Assistant status line not showing ("正在处理…" / "正在执行…")
 
 1. Verify your Slack app is configured as an [AI app](https://api.slack.com/docs/apps/ai)
 2. Verify `assistant:write` scope is added under **Bot Token Scopes**
 3. Reinstall the app after adding the scope
 4. If your app cannot be an AI app, set `assistant_mode = false` to use emoji reactions instead
 
-### Native streaming not working (replies appear all at once)
+### Replies are not streaming live
 
-1. `chat.startStream` requires the `assistant:write` scope — the adapter automatically degrades to post+edit if the API call fails
-2. Native streaming is also suppressed when another bot is present in the thread (to avoid edit interference)
-3. Check logs for `warn` messages about `stream_begin` failures
+This is intentional. Slack public-reply mode never exposes raw agent deltas because they can contain internal narration or private execution context. The thread shows a concise status while the turn runs, then receives one final user-facing answer with the OpenAB link, Model, and Agent fields.
+
+
+
