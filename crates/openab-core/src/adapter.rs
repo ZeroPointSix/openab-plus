@@ -14,7 +14,7 @@ use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
-use crate::session_snapshot::SessionStatus;
+use crate::session_snapshot::{SessionSnapshot, SessionStatus};
 
 // --- Output directive parsing ---
 
@@ -463,6 +463,13 @@ pub trait ChatAdapter: Send + Sync + 'static {
         false
     }
 
+    /// Whether raw, intermediate agent text may be published while a turn is
+    /// running. Adapters with a strict external privacy boundary return false:
+    /// they show only high-level status until the finalized answer is ready.
+    fn exposes_intermediate_text(&self) -> bool {
+        true
+    }
+
     /// Label for a session deep link appended to progress and final messages.
     /// Returning None keeps existing output unchanged for platforms without a
     /// user-facing session console.
@@ -786,15 +793,17 @@ impl AdapterRouter {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
         let message_limit = adapter.message_limit();
-        let streaming = adapter.use_streaming(other_bot_present);
-        // Keep the full turn text (incl. inter-tool narration) when streaming
-        // (it was already shown live) OR when `[reactions] narration_display` is
-        // set. Otherwise a send-once turn delivers only the final answer block.
-        // Platform-agnostic — read from the shared reactions config, alongside
-        // `tool_display`. `streaming` still drives the placeholder / native-stream
-        // paths below; only the final-text selection uses `keep_full_text`.
-        let keep_full_text = streaming || self.reactions_config.narration_display;
-        let native = adapter.uses_native_streaming(other_bot_present);
+        let exposes_intermediate_text = adapter.exposes_intermediate_text();
+        // A strict privacy-boundary adapter (Slack) never publishes raw agent
+        // chunks while a turn is running. It keeps the status/progress message,
+        // then sends only the finalized answer.
+        let streaming =
+            adapter.use_streaming(other_bot_present) && exposes_intermediate_text;
+        // Intermediate narration is never retained across a strict privacy
+        // boundary, even if the shared narration_display setting is enabled.
+        let keep_full_text = exposes_intermediate_text
+            && (streaming || self.reactions_config.narration_display);
+        let native = streaming && adapter.uses_native_streaming(other_bot_present);
         let assistant_status = adapter.uses_assistant_status();
         // Platforms that render Markdown tables natively (e.g. Slack Block Kit
         // `markdown` blocks / `markdown_text` stream chunks) skip the
@@ -804,7 +813,13 @@ impl AdapterRouter {
         } else {
             self.table_mode
         };
-        let tool_display = self.reactions_config.tool_display;
+        // Tool titles can contain command arguments or other execution detail.
+        // Strict privacy-boundary adapters expose only generic counts/states.
+        let tool_display = if exposes_intermediate_text {
+            self.reactions_config.tool_display
+        } else {
+            ToolDisplay::None
+        };
         let tool_progress_enabled = adapter.uses_tool_progress_message();
         let reply_tool_display = if tool_progress_enabled {
             ToolDisplay::None
@@ -860,6 +875,10 @@ impl AdapterRouter {
                         session_link_label,
                         tool_display,
                     );
+                    // Acknowledge the request immediately. The first tool event
+                    // updates this message in place; no raw agent text is needed
+                    // to prove that the turn is running.
+                    tool_progress.seed_receipt().await;
                     // Byte offset into `text_buf` where the final answer block
                     // begins — advanced to the buffer end on every tool
                     // completion so it tracks "just past the last tool". Used by
@@ -1265,6 +1284,11 @@ impl AdapterRouter {
                     // exactly that case. `finalize_body` is the pure helper that
                     // encodes the four-corner truth table so it can be unit-tested.
                     let text_buf = finalize_body(reset, keep_full_text, answer_start, text_buf);
+                    let text_buf = if exposes_intermediate_text {
+                        text_buf
+                    } else {
+                        sanitize_user_visible_text(&text_buf)
+                    };
 
                     let interrupted_tools = fail_running_tools(&mut tool_lines);
                     if interrupted_tools > 0 {
@@ -1295,11 +1319,20 @@ impl AdapterRouter {
                     } else {
                         final_content
                     };
-                    let final_content = append_session_link(
-                        &final_content,
-                        external_url.as_deref(),
-                        session_link_label,
-                    );
+                    let final_snapshot = session_pool.session_snapshot(&session_key).await;
+                    let final_content = if exposes_intermediate_text {
+                        append_session_link(
+                            &final_content,
+                            external_url.as_deref(),
+                            session_link_label,
+                        )
+                    } else {
+                        append_observability_footer(
+                            &final_content,
+                            final_snapshot.as_ref(),
+                            session_link_label,
+                        )
+                    };
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
                     let chunks = if adapter.platform() == "discord" {
@@ -1805,6 +1838,143 @@ fn append_session_link(content: &str, url: Option<&str>, label: Option<&str>) ->
     } else {
         format!("{content}\n\n[{label}]({url})")
     }
+}
+
+fn append_observability_footer(
+    content: &str,
+    snapshot: Option<&SessionSnapshot>,
+    label: Option<&str>,
+) -> String {
+    let mut fields = Vec::with_capacity(3);
+    if let Some((url, label)) =
+        snapshot.and_then(|value| value.external_url.as_deref()).zip(label)
+    {
+        fields.push(format!("[{label}]({url})"));
+    }
+
+    let model = snapshot
+        .and_then(|value| non_empty(value.model.as_deref()))
+        .unwrap_or("not reported");
+    let agent = snapshot
+        .and_then(|value| {
+            non_empty(value.profile_name.as_deref())
+                .or_else(|| non_empty(Some(value.agent.as_str())))
+        })
+        .unwrap_or("not reported");
+    fields.push(format!("Model: `{}`", inline_metadata(model)));
+    fields.push(format!("Agent: `{}`", inline_metadata(agent)));
+
+    let footer = fields.join(" · ");
+    let content = content.trim_end();
+    if content.is_empty() {
+        footer
+    } else {
+        format!("{content}\n\n{footer}")
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn inline_metadata(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('`', "'")
+        .chars()
+        .take(80)
+        .collect()
+}
+
+/// Remove protocol-level private blocks before text crosses a strict external
+/// privacy boundary. The preferred `<final>` block wins when an agent provides
+/// one; otherwise known hidden XML-style blocks are removed from the answer.
+fn sanitize_user_visible_text(content: &str) -> String {
+    const HIDDEN_TAGS: &[&str] = &[
+        "think",
+        "thinking",
+        "analysis",
+        "reasoning",
+        "system",
+        "developer",
+        "system-reminder",
+        "tool",
+        "tool_call",
+        "tool_result",
+        "function_call",
+    ];
+
+    let selected = last_tagged_body(content, "final").unwrap_or(content);
+    let mut visible = selected.to_string();
+    for tag in HIDDEN_TAGS {
+        visible = strip_tagged_blocks(&visible, tag);
+    }
+    visible.trim().to_string()
+}
+
+fn last_tagged_body<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
+    let close = format!("</{tag}>");
+    let mut cursor = 0;
+    let mut last = None;
+    while let Some((_, body_start)) = find_opening_tag(content, tag, cursor) {
+        if let Some(close_start) = find_ascii_case_insensitive(content, &close, body_start) {
+            last = content.get(body_start..close_start);
+            cursor = close_start + close.len();
+        } else {
+            last = content.get(body_start..);
+            break;
+        }
+    }
+    last
+}
+
+fn strip_tagged_blocks(content: &str, tag: &str) -> String {
+    let close = format!("</{tag}>");
+    let mut visible = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while let Some((open_start, body_start)) = find_opening_tag(content, tag, cursor) {
+        visible.push_str(&content[cursor..open_start]);
+        if let Some(close_start) = find_ascii_case_insensitive(content, &close, body_start) {
+            cursor = close_start + close.len();
+        } else {
+            cursor = content.len();
+            break;
+        }
+    }
+    visible.push_str(&content[cursor..]);
+    visible
+}
+
+fn find_opening_tag(content: &str, tag: &str, from: usize) -> Option<(usize, usize)> {
+    let needle = format!("<{tag}");
+    let mut cursor = from;
+    while let Some(start) = find_ascii_case_insensitive(content, &needle, cursor) {
+        let after_name = start + needle.len();
+        let delimiter = content.as_bytes().get(after_name).copied();
+        if matches!(delimiter, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n'))
+        {
+            let body_start = content[after_name..].find('>')? + after_name + 1;
+            return Some((start, body_start));
+        }
+        cursor = after_name;
+    }
+    None
+}
+
+fn find_ascii_case_insensitive(content: &str, needle: &str, from: usize) -> Option<usize> {
+    if needle.is_empty() || from > content.len() || !content.is_char_boundary(from) {
+        return None;
+    }
+    content[from..].char_indices().find_map(|(offset, _)| {
+        let start = from + offset;
+        content
+            .get(start..start + needle.len())
+            .filter(|candidate| candidate.eq_ignore_ascii_case(needle))
+            .map(|_| start)
+    })
 }
 
 impl ToolEntry {
@@ -2709,6 +2879,55 @@ mod tests {
             append_session_link("完成", None, Some("Open in OpenAB Plus")),
             "完成"
         );
+    }
+
+    #[test]
+    fn privacy_filter_removes_hidden_blocks_case_insensitively() {
+        let input = "before\n<THINK>private reasoning</THINK>\nanswer\n\
+                     <system-reminder>private policy</system-reminder>";
+        let output = sanitize_user_visible_text(input);
+        assert_eq!(output, "before\n\nanswer");
+        assert!(!output.contains("private"));
+    }
+
+    #[test]
+    fn privacy_filter_prefers_final_block() {
+        let input = "<analysis>secret</analysis><final>Visible answer</final>ignored";
+        assert_eq!(sanitize_user_visible_text(input), "Visible answer");
+    }
+
+    #[test]
+    fn privacy_filter_drops_unclosed_hidden_tail() {
+        assert_eq!(
+            sanitize_user_visible_text("Visible answer\n<reasoning>private tail"),
+            "Visible answer"
+        );
+    }
+
+    #[test]
+    fn observability_footer_contains_link_model_and_agent() {
+        let snapshot = SessionSnapshot::new(
+            "slack:1700.1".into(),
+            "codex-acp".into(),
+            "/workspace".into(),
+            Some("codex".into()),
+            Some("Codex Web".into()),
+            Some("gpt-5".into()),
+            Some("https://openab.example"),
+        );
+        let output =
+            append_observability_footer("完成", Some(&snapshot), Some("Open in OpenAB Plus"));
+        assert!(output.contains("[Open in OpenAB Plus](https://openab.example/#/sessions/"));
+        assert!(output.contains("Model: `gpt-5`"));
+        assert!(output.contains("Agent: `Codex Web`"));
+    }
+
+    #[test]
+    fn observability_footer_reports_missing_runtime_metadata() {
+        let output = append_observability_footer("完成", None, Some("Open in OpenAB Plus"));
+        assert!(!output.contains("Open in OpenAB Plus"));
+        assert!(output.contains("Model: `not reported`"));
+        assert!(output.contains("Agent: `not reported`"));
     }
 
     #[test]
