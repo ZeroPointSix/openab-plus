@@ -555,20 +555,19 @@ pub struct SlackConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
-    /// Slack "AI app / Assistant" mode: stream replies via chat.startStream +
-    /// assistant.threads.setStatus instead of post+edit + emoji reactions.
-    /// Requires the Slack app to be an AI app (assistant feature enabled) with
-    /// the `assistant:write` scope. Default: true — set to false for Slack apps
-    /// that are not AI apps (no `assistant:write`) to keep emoji-reaction status.
+    /// Slack "AI app / Assistant" mode: use assistant.threads.setStatus instead
+    /// of emoji reactions for the high-level status line. Raw agent text is
+    /// never streamed to Slack; the finalized answer is posted once. Requires
+    /// the Slack app to be an AI app (assistant feature enabled) with the
+    /// `assistant:write` scope. Default: true — set to false for Slack apps
+    /// that are not AI apps to keep emoji-reaction status.
     #[serde(default = "default_true")]
     pub assistant_mode: bool,
-    /// Master streaming switch. When `false`, the Slack adapter always posts a
-    /// single final message (send-once) — no native streaming, no post+edit
-    /// placeholder — regardless of `assistant_mode`. Default `true`. Useful for
-    /// multi-agent threads to avoid streamed-message edit states re-firing
-    /// `app_mention`. Mirrors `[gateway] streaming` in concept, but the default
-    /// deliberately differs: `GatewayConfig.streaming` defaults to `false`,
-    /// whereas this defaults to `true` to preserve current Slack streaming.
+    /// Retained for configuration compatibility. The Slack privacy boundary
+    /// suppresses all raw intermediate content regardless of this value and
+    /// posts one finalized answer after the status/progress message. Default
+    /// remains `true` so existing configuration files continue to deserialize
+    /// without a behavior-dependent migration.
     #[serde(default = "default_true")]
     pub streaming: bool,
 }
@@ -1643,12 +1642,10 @@ pub struct ReactionsConfig {
     /// the last tool call), so the message reads like the single composed
     /// artefact a tool-posted comment is. Set `true` to keep the full text.
     ///
-    /// Platform-agnostic (sits beside `tool_display`): the trimming lives in the
-    /// shared adapter layer and applies to every send-once turn — Slack
-    /// `streaming=false`, Slack/Discord multi-bot threads, and gateway. Only
-    /// affects send-once; live streaming always shows the text as produced.
-    /// Orthogonal to `streaming`, which is the per-platform stream-vs-send-once
-    /// switch.
+    /// The trimming lives in the shared adapter layer. Strict privacy-boundary
+    /// adapters such as Slack ignore this opt-in and always suppress intermediate
+    /// narration; other send-once platforms may still use it. Live streaming on
+    /// non-privacy-boundary platforms shows text as produced.
     #[serde(default)]
     pub narration_display: bool,
     #[serde(default)]
