@@ -123,7 +123,7 @@ Each Slack turn keeps user-visible progress in one short thread message:
   `<system-reminder>`, developer prompts, and tool blocks are removed before
   delivery.
 
-The final reply footer includes `Open in OpenAB Plus`, the actual `Model`,
+The final reply footer includes `Open in OpenAB`, the actual `Model`,
 and the actual `Agent`. Configure the public base URL of the OpenAB Plus web
 console to enable the run link
 (any of the following environment variables, checked in this order):
