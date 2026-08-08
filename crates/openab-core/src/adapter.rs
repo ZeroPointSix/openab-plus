@@ -681,10 +681,17 @@ impl AdapterRouter {
         {
             Ok(created) => created,
             Err(e) => {
-                let msg = format_user_error(&e.to_string());
-                let _ = adapter
-                    .send_message(&thread_channel, &format!("⚠️ {msg}"))
-                    .await;
+                let content = if adapter.exposes_intermediate_text() {
+                    let msg = format_user_error(&e.to_string());
+                    format!("⚠️ {msg}")
+                } else {
+                    append_observability_footer(
+                        &format_public_error(&e.to_string()),
+                        None,
+                        adapter.session_link_label(),
+                    )
+                };
+                let _ = adapter.send_message(&thread_channel, &content).await;
                 error!("pool error: {e}");
                 return Err(e);
             }
@@ -745,9 +752,17 @@ impl AdapterRouter {
         }
 
         if let Err(ref e) = result {
-            let _ = adapter
-                .send_message(&thread_channel, &format!("⚠️ {e}"))
-                .await;
+            let content = if adapter.exposes_intermediate_text() {
+                format!("⚠️ {e}")
+            } else {
+                let snapshot = self.pool.session_snapshot(&thread_key).await;
+                append_observability_footer(
+                    &format_public_error(&e.to_string()),
+                    snapshot.as_ref(),
+                    adapter.session_link_label(),
+                )
+            };
+            let _ = adapter.send_message(&thread_channel, &content).await;
         }
 
         result
@@ -1866,6 +1881,24 @@ fn append_session_link(content: &str, url: Option<&str>, label: Option<&str>) ->
     }
 }
 
+fn format_public_error(message: &str) -> String {
+    let message = message.to_ascii_lowercase();
+    let summary = if message.contains("timeout waiting for") {
+        "请求超时，请稍后重试。"
+    } else if message.contains("connection closed") || message.contains("channel closed") {
+        "与 Agent 的连接已中断，请重试。"
+    } else if message.contains("failed to spawn") || message.contains("no such file") {
+        "无法启动 Agent，请检查配置。"
+    } else if message.contains("pool exhausted") {
+        "服务繁忙，请稍后重试。"
+    } else if message.contains("invalid api key") || message.contains("unauthorized") {
+        "鉴权失败，请检查配置。"
+    } else {
+        "请在 OpenAB 中查看运行详情。"
+    };
+    format!("这次任务执行失败：{summary}")
+}
+
 fn append_observability_footer(
     content: &str,
     snapshot: Option<&SessionSnapshot>,
@@ -1927,9 +1960,27 @@ fn sanitize_user_visible_text(content: &str) -> String {
         "developer",
         "system-reminder",
         "tool",
+        "tools",
         "tool_call",
         "tool_result",
+        "tool-input",
+        "tool_input",
+        "tool-output",
+        "tool_output",
+        "tool-schema",
+        "tool_schema",
+        "tool-instructions",
+        "tool_instructions",
+        "available-tools",
+        "available_tools",
         "function_call",
+        "function_result",
+    ];
+    const HIDDEN_ROLE_BLOCKS: &[(&str, &str)] = &[
+        ("<|start|>system<|message|>", "<|end|>"),
+        ("<|start|>developer<|message|>", "<|end|>"),
+        ("<|im_start|>system", "<|im_end|>"),
+        ("<|im_start|>developer", "<|im_end|>"),
     ];
 
     let selected = last_tagged_body(content, "final").unwrap_or(content);
@@ -1937,7 +1988,16 @@ fn sanitize_user_visible_text(content: &str) -> String {
     for tag in HIDDEN_TAGS {
         visible = strip_tagged_blocks(&visible, tag);
     }
-    visible.trim().to_string()
+    for (start, end) in HIDDEN_ROLE_BLOCKS {
+        visible = strip_delimited_blocks(&visible, start, end);
+    }
+
+    let visible = visible.trim();
+    if visible.is_empty() {
+        "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。".to_string()
+    } else {
+        visible.to_string()
+    }
 }
 
 fn last_tagged_body<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
@@ -1965,6 +2025,26 @@ fn strip_tagged_blocks(content: &str, tag: &str) -> String {
         visible.push_str(&content[cursor..open_start]);
         if let Some(close_start) = find_ascii_case_insensitive(content, &close, body_start) {
             cursor = close_start + close.len();
+        } else {
+            cursor = content.len();
+            break;
+        }
+    }
+    visible.push_str(&content[cursor..]);
+    visible
+}
+
+fn strip_delimited_blocks(content: &str, start_marker: &str, end_marker: &str) -> String {
+    let mut visible = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while let Some(start) = find_ascii_case_insensitive(content, start_marker, cursor) {
+        visible.push_str(&content[cursor..start]);
+        let body_start = start + start_marker.len();
+        if let Some(end_start) =
+            find_ascii_case_insensitive(content, end_marker, body_start)
+        {
+            cursor = end_start + end_marker.len();
         } else {
             cursor = content.len();
             break;
@@ -2928,6 +3008,34 @@ mod tests {
             sanitize_user_visible_text("Visible answer\n<reasoning>private tail"),
             "Visible answer"
         );
+    }
+
+    #[test]
+    fn privacy_filter_removes_tool_schema_and_role_transcripts() {
+        let input = "<tools>{\"secret\":true}</tools>\n\
+                     <|start|>system<|message|>private prompt<|end|>\n\
+                     Visible answer";
+        let output = sanitize_user_visible_text(input);
+        assert_eq!(output, "Visible answer");
+        assert!(!output.contains("secret"));
+        assert!(!output.contains("private prompt"));
+    }
+
+    #[test]
+    fn privacy_filter_uses_safe_fallback_when_no_public_text() {
+        let output = sanitize_user_visible_text("<analysis>private only</analysis>");
+        assert!(output.contains("没有返回可公开展示的结果"));
+        assert!(!output.contains("private only"));
+    }
+
+    #[test]
+    fn public_error_never_echoes_raw_details() {
+        let output = format_public_error(
+            "<system>private prompt</system> tool schema at /srv/secrets",
+        );
+        assert!(output.contains("任务执行失败"));
+        assert!(!output.contains("private prompt"));
+        assert!(!output.contains("/srv/secrets"));
     }
 
     #[test]
