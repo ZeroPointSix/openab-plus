@@ -2,6 +2,7 @@ use crate::acp::protocol::{
     parse_config_options, parse_usage_report, ConfigOption, JsonRpcMessage, JsonRpcRequest,
     JsonRpcResponse, UsageReport,
 };
+use crate::config::ImageHandling;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -11,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 /// Pick the most permissive selectable permission option from ACP options.
 fn pick_best_option(options: &[Value]) -> Option<String> {
@@ -108,6 +109,46 @@ impl ContentBlock {
     }
 }
 
+/// Text note that replaces an image block when `ImageHandling::Skip` is
+/// configured. Instructs the agent to tell the user why the image was not
+/// processed instead of silently dropping it.
+const IMAGE_SKIPPED_NOTE: &str =
+    "[Image attachment skipped: the configured agent model does not support image input. \
+     Inform the user that the attached image cannot be processed with the current model.]";
+
+/// Apply the configured image handling policy to a prompt's content blocks.
+///
+/// `ImageHandling::Send` (the default) returns the blocks unchanged.
+/// `ImageHandling::Skip` replaces every image block with a single shared text
+/// note, so text-only agents/models never receive image content while the user
+/// still gets an explanation from the agent.
+fn apply_image_policy(blocks: Vec<ContentBlock>, handling: ImageHandling) -> Vec<ContentBlock> {
+    if handling == ImageHandling::Send {
+        return blocks;
+    }
+
+    let mut skipped = 0usize;
+    let mapped: Vec<ContentBlock> = blocks
+        .into_iter()
+        .map(|block| match block {
+            ContentBlock::Image { .. } => {
+                skipped += 1;
+                ContentBlock::Text {
+                    text: IMAGE_SKIPPED_NOTE.to_string(),
+                }
+            }
+            other => other,
+        })
+        .collect();
+    if skipped > 0 {
+        warn!(
+            skipped,
+            "image attachments skipped (agent model does not support image input)"
+        );
+    }
+    mapped
+}
+
 /// Lock-free view of session activity, readable without the connection mutex.
 pub struct SessionActivity {
     /// Milliseconds since process boot (monotonic) of the last observed activity.
@@ -187,6 +228,8 @@ pub struct AcpConnection {
     pub last_active: Instant,
     pub activity: Arc<SessionActivity>,
     pub session_reset: bool,
+    /// How inbound image attachments are delivered to the agent.
+    image_handling: ImageHandling,
     _reader_handle: JoinHandle<()>,
     _stderr_handle: Option<JoinHandle<()>>,
 }
@@ -331,6 +374,7 @@ impl AcpConnection {
         working_dir: &str,
         env: &std::collections::HashMap<String, String>,
         inherit_env: &[String],
+        image_handling: ImageHandling,
     ) -> Result<Self> {
         info!(cmd = command, ?args, cwd = working_dir, "spawning agent");
 
@@ -483,6 +527,7 @@ impl AcpConnection {
             last_active: Instant::now(),
             activity,
             session_reset: false,
+            image_handling,
             _reader_handle: reader_handle,
             _stderr_handle: stderr_handle,
         })
@@ -709,6 +754,12 @@ impl AcpConnection {
 
         let id = self.next_id();
 
+        // Apply the configured image handling policy before serializing.
+        // With ImageHandling::Skip, image blocks never reach a text-only agent
+        // (a 4xx "not a multimodal model" upstream error would otherwise
+        // surface as a JSON-RPC -32603 internal error on every image turn).
+        let content_blocks = apply_image_policy(content_blocks, self.image_handling);
+
         // Convert content blocks to JSON
         let prompt_json: Vec<Value> = content_blocks.iter().map(|b| b.to_json()).collect();
 
@@ -836,8 +887,61 @@ impl Drop for AcpConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_agent_env, build_permission_response, pick_best_option};
+    use super::{
+        apply_image_policy, build_agent_env, build_permission_response, pick_best_option,
+        ContentBlock, ImageHandling, IMAGE_SKIPPED_NOTE,
+    };
     use serde_json::json;
+
+    fn text(text: &str) -> ContentBlock {
+        ContentBlock::Text {
+            text: text.to_string(),
+        }
+    }
+
+    fn image() -> ContentBlock {
+        ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+        }
+    }
+
+    #[test]
+    fn image_policy_send_preserves_blocks_unchanged() {
+        let blocks = vec![text("prompt"), image()];
+        let out = apply_image_policy(blocks, ImageHandling::Send);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], ContentBlock::Text { .. }));
+        assert!(matches!(out[1], ContentBlock::Image { .. }));
+    }
+
+    #[test]
+    fn image_policy_skip_replaces_images_with_note() {
+        let blocks = vec![text("header"), text("prompt"), image(), image()];
+        let out = apply_image_policy(blocks, ImageHandling::Skip);
+        assert_eq!(out.len(), 4, "block count is preserved 1:1");
+        assert!(matches!(&out[0], ContentBlock::Text { text } if text == "header"));
+        assert!(matches!(&out[1], ContentBlock::Text { text } if text == "prompt"));
+        assert!(matches!(
+            &out[2],
+            ContentBlock::Text { text } if text.contains("Image attachment skipped")
+        ));
+        assert!(matches!(
+            &out[3],
+            ContentBlock::Text { text } if text == IMAGE_SKIPPED_NOTE
+        ));
+        assert!(
+            out.iter().all(|b| matches!(b, ContentBlock::Text { .. })),
+            "no image block may reach a text-only agent"
+        );
+    }
+
+    #[test]
+    fn image_policy_skip_without_images_is_noop() {
+        let out = apply_image_policy(vec![text("a"), text("b")], ImageHandling::Skip);
+        assert!(matches!(&out[0], ContentBlock::Text { text } if text == "a"));
+        assert!(matches!(&out[1], ContentBlock::Text { text } if text == "b"));
+    }
 
     #[test]
     fn picks_allow_always_over_other_options() {

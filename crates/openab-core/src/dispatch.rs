@@ -1221,6 +1221,7 @@ mod tests {
             working_dir: "/tmp".into(),
             env: std::collections::HashMap::new(),
             inherit_env: vec![],
+            images: crate::config::ImageHandling::default(),
             command_explicit: true,
         };
         let pool = Arc::new(SessionPool::new(

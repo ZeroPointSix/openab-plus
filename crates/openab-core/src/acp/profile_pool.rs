@@ -631,6 +631,7 @@ fn clone_agent_config(config: &AgentConfig) -> AgentConfig {
         working_dir: config.working_dir.clone(),
         env: config.env.clone(),
         inherit_env: config.inherit_env.clone(),
+        images: config.images,
         command_explicit: config.command_explicit,
     }
 }

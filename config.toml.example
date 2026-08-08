@@ -163,6 +163,13 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 command = "kiro-cli"
 args = ["acp", "--trust-all-tools"]
 working_dir = "/home/agent"
+# How inbound image attachments are delivered to the agent:
+#   images = "send"  (default) — images become ACP image blocks (requires a
+#                                vision-capable model downstream).
+#   images = "skip"  — images are replaced with a text note; use this when the
+#                      configured agent model is text-only and rejects image
+#                      input with "not a multimodal model"-style 4xx errors.
+# images = "send"
 
 # [agent]
 # command = "claude-agent-acp"
