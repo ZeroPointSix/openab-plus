@@ -34,16 +34,12 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
                                         # "multibot-mentions" = like "involved", but require @mention
                                         #   once another bot has posted in the thread
 # max_bot_turns = 100                  # soft cap on consecutive bot turns per thread (human msg resets)
-# assistant_mode = true                # default true: native streaming (chat.startStream) +
-#                                       # assistant.threads.setStatus status line instead of
-#                                       # post+edit + emoji reactions. Requires the Slack app to be
-#                                       # an AI app with the `assistant:write` scope (plus chat:write).
-#                                       # Set false for non-AI Slack apps to keep emoji reactions.
-# streaming = true                     # default true: stream the reply live (native or post+edit).
-#                                       # Set false to always post a single final message (send-once),
-#                                       # regardless of assistant_mode — useful in multi-agent threads
-#                                       # to avoid streamed-edit states re-firing app_mention.
-#                                       # What a send-once message *contains* is controlled by [reactions] narration_display.
+# assistant_mode = true                # default true: use assistant.threads.setStatus instead
+#                                       # of emoji reactions. Requires an AI app with
+#                                       # assistant:write; set false for non-AI Slack apps.
+# streaming = true                     # retained for config compatibility. Slack never publishes
+#                                       # raw intermediate agent text: it shows a short status,
+#                                       # then posts one finalized answer in the thread.
 
 # [gateway]
 # url = "ws://openab-gateway:8080/ws"  # WebSocket URL of the custom gateway
@@ -286,15 +282,12 @@ tables = "code"  # "code" (default) | "bullets" | "off"
 enabled = true
 remove_after_reply = false
 # tool_display = "full"                 # "full" (default) | "compact" | "none"
-#                                       # Controls how tool calls appear in the final message.
-#                                       # Applies to both assistant_mode and post+edit mode.
-#                                       # Set "none" to hide the tool summary entirely.
+#                                       # Controls tool summaries on platforms that expose them.
+#                                       # Slack always uses generic high-level status and counts.
 # narration_display = false             # default false: in send-once mode, deliver ONLY the final
 #                                       # answer block (text after the last tool call); inter-tool
 #                                       # narration ("let me check… / now reading X") is dropped.
-#                                       # Set true to keep the full text. Platform-agnostic (Slack
-#                                       # streaming=false, multi-bot threads, gateway). No effect
-#                                       # while streaming — streamed text is shown live as produced.
+#                                       # Slack ignores a true value to preserve its privacy boundary.
 
 [reactions.emojis]
 queued = "👀"
