@@ -463,6 +463,13 @@ pub trait ChatAdapter: Send + Sync + 'static {
         false
     }
 
+    /// Whether user-visible output must contain only public, final-answer text.
+    /// Public-reply adapters suppress raw agent deltas, use generic progress
+    /// states, and remove private tagged blocks before delivery.
+    fn uses_public_reply_mode(&self) -> bool {
+        false
+    }
+
     /// Label for a session deep link appended to progress and final messages.
     /// Returning None keeps existing output unchanged for platforms without a
     /// user-facing session console.
@@ -675,9 +682,18 @@ impl AdapterRouter {
             Ok(created) => created,
             Err(e) => {
                 let msg = format_user_error(&e.to_string());
-                let _ = adapter
-                    .send_message(&thread_channel, &format!("⚠️ {msg}"))
-                    .await;
+                let content = if adapter.uses_public_reply_mode() {
+                    append_run_observability(
+                        &format!("这次任务执行失败：{msg}"),
+                        None,
+                        adapter.session_link_label(),
+                        None,
+                        None,
+                    )
+                } else {
+                    format!("⚠️ {msg}")
+                };
+                let _ = adapter.send_message(&thread_channel, &content).await;
                 error!("pool error: {e}");
                 return Err(e);
             }
@@ -738,9 +754,24 @@ impl AdapterRouter {
         }
 
         if let Err(ref e) = result {
-            let _ = adapter
-                .send_message(&thread_channel, &format!("⚠️ {e}"))
-                .await;
+            let content = if adapter.uses_public_reply_mode() {
+                let snapshot = self.pool.session_snapshot(&thread_key).await;
+                append_run_observability(
+                    &format!(
+                        "这次任务执行失败：{}",
+                        format_user_error(&e.to_string())
+                    ),
+                    snapshot
+                        .as_ref()
+                        .and_then(|value| value.external_url.as_deref()),
+                    adapter.session_link_label(),
+                    snapshot.as_ref().and_then(|value| value.model.as_deref()),
+                    snapshot.as_ref().map(|value| value.agent.as_str()),
+                )
+            } else {
+                format!("⚠️ {e}")
+            };
+            let _ = adapter.send_message(&thread_channel, &content).await;
         }
 
         result
@@ -786,15 +817,23 @@ impl AdapterRouter {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
         let message_limit = adapter.message_limit();
-        let streaming = adapter.use_streaming(other_bot_present);
+        let public_reply_mode = adapter.uses_public_reply_mode();
+        let streaming = should_stream_agent_text(
+            adapter.use_streaming(other_bot_present),
+            public_reply_mode,
+        );
         // Keep the full turn text (incl. inter-tool narration) when streaming
         // (it was already shown live) OR when `[reactions] narration_display` is
         // set. Otherwise a send-once turn delivers only the final answer block.
         // Platform-agnostic — read from the shared reactions config, alongside
         // `tool_display`. `streaming` still drives the placeholder / native-stream
         // paths below; only the final-text selection uses `keep_full_text`.
-        let keep_full_text = streaming || self.reactions_config.narration_display;
-        let native = adapter.uses_native_streaming(other_bot_present);
+        let keep_full_text = should_keep_full_text(
+            streaming,
+            self.reactions_config.narration_display,
+            public_reply_mode,
+        );
+        let native = streaming && adapter.uses_native_streaming(other_bot_present);
         let assistant_status = adapter.uses_assistant_status();
         // Platforms that render Markdown tables natively (e.g. Slack Block Kit
         // `markdown` blocks / `markdown_text` stream chunks) skip the
@@ -845,7 +884,12 @@ impl AdapterRouter {
                         }
                     };
                     if assistant_status {
-                        let _ = adapter.set_status(&thread_channel, "Thinking…").await;
+                        let status = if public_reply_mode {
+                            "正在处理…"
+                        } else {
+                            "Thinking…"
+                        };
+                        let _ = adapter.set_status(&thread_channel, status).await;
                     } else {
                         reactions.set_thinking().await;
                     }
@@ -860,6 +904,9 @@ impl AdapterRouter {
                         session_link_label,
                         tool_display,
                     );
+                    if tool_progress_enabled {
+                        tool_progress.seed_receipt().await;
+                    }
                     // Byte offset into `text_buf` where the final answer block
                     // begins — advanced to the buffer end on every tool
                     // completion so it tracks "just past the last tool". Used by
@@ -1111,9 +1158,12 @@ impl AdapterRouter {
                                 }
                                 AcpEvent::Thinking => {
                                     if assistant_status {
-                                        let _ = adapter
-                                            .set_status(&thread_channel, "Thinking…")
-                                            .await;
+                                        let status = if public_reply_mode {
+                                            "正在处理…"
+                                        } else {
+                                            "Thinking…"
+                                        };
+                                        let _ = adapter.set_status(&thread_channel, status).await;
                                     } else {
                                         reactions.set_thinking().await;
                                     }
@@ -1121,12 +1171,13 @@ impl AdapterRouter {
                                 AcpEvent::ToolStart { id, title } if !title.is_empty() => {
                                     // Live indicator: assistant status line vs emoji reaction.
                                     if assistant_status {
-                                        let _ = adapter
-                                            .set_status(
-                                                &thread_channel,
-                                                &format!("Using {title}…"),
-                                            )
-                                            .await;
+                                        let status = if public_reply_mode {
+                                            "正在执行…".to_string()
+                                        } else {
+                                            format!("Using {title}…")
+                                        };
+                                        let _ =
+                                            adapter.set_status(&thread_channel, &status).await;
                                     } else {
                                         reactions.set_tool(&title).await;
                                     }
@@ -1177,9 +1228,12 @@ impl AdapterRouter {
                                     answer_start = text_buf.len();
                                     // Live indicator: assistant status line vs emoji reaction.
                                     if assistant_status {
-                                        let _ = adapter
-                                            .set_status(&thread_channel, "Thinking…")
-                                            .await;
+                                        let status = if public_reply_mode {
+                                            "正在整理结果…"
+                                        } else {
+                                            "Thinking…"
+                                        };
+                                        let _ = adapter.set_status(&thread_channel, status).await;
                                     } else {
                                         reactions.set_thinking().await;
                                     }
@@ -1295,11 +1349,41 @@ impl AdapterRouter {
                     } else {
                         final_content
                     };
-                    let final_content = append_session_link(
-                        &final_content,
-                        external_url.as_deref(),
-                        session_link_label,
-                    );
+                    let final_content = if public_reply_mode {
+                        sanitize_public_reply(&final_content)
+                    } else {
+                        final_content
+                    };
+                    let final_content = if public_reply_mode {
+                        let snapshot = session_pool.session_snapshot(&session_key).await;
+                        let model = conn
+                            .config_options
+                            .iter()
+                            .find(|option| option.id == "model")
+                            .map(|option| option.current_value.trim())
+                            .filter(|value| !value.is_empty())
+                            .or_else(|| {
+                                snapshot
+                                    .as_ref()
+                                    .and_then(|value| value.model.as_deref())
+                            });
+                        append_run_observability(
+                            &final_content,
+                            snapshot
+                                .as_ref()
+                                .and_then(|value| value.external_url.as_deref())
+                                .or(external_url.as_deref()),
+                            session_link_label,
+                            model,
+                            snapshot.as_ref().map(|value| value.agent.as_str()),
+                        )
+                    } else {
+                        append_session_link(
+                            &final_content,
+                            external_url.as_deref(),
+                            session_link_label,
+                        )
+                    };
 
                     let final_content = markdown::convert_tables(&final_content, table_mode);
                     let chunks = if adapter.platform() == "discord" {
@@ -1597,6 +1681,7 @@ struct ToolProgressMessage {
     external_url: Option<String>,
     link_label: Option<&'static str>,
     display: ToolDisplay,
+    concise: bool,
 }
 
 impl ToolProgressMessage {
@@ -1608,6 +1693,7 @@ impl ToolProgressMessage {
         link_label: Option<&'static str>,
         display: ToolDisplay,
     ) -> Self {
+        let concise = adapter.uses_public_reply_mode();
         Self {
             enabled,
             adapter,
@@ -1616,6 +1702,7 @@ impl ToolProgressMessage {
             external_url,
             link_label,
             display,
+            concise,
         }
     }
 
@@ -1656,8 +1743,13 @@ impl ToolProgressMessage {
         if !self.enabled || self.message.is_some() {
             return;
         }
+        let state = if self.concise {
+            "OpenAB · 正在处理…"
+        } else {
+            "会话已启动，正在回复…"
+        };
         self.write(append_session_link(
-            "会话已启动，正在回复…",
+            state,
             self.external_url.as_deref(),
             self.link_label,
         ))
@@ -1668,7 +1760,18 @@ impl ToolProgressMessage {
         if !self.enabled || tools.is_empty() {
             return;
         }
-        let content = compose_tool_progress(tools, false, self.display);
+        let content = if self.concise {
+            if tools
+                .iter()
+                .any(|tool| tool.state == ToolState::Running)
+            {
+                "OpenAB · 正在执行…".to_string()
+            } else {
+                "OpenAB · 正在整理结果…".to_string()
+            }
+        } else {
+            compose_tool_progress(tools, false, self.display)
+        };
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
@@ -1679,6 +1782,20 @@ impl ToolProgressMessage {
 
     async fn finish(&mut self, tools: &[ToolEntry], turn_failed: bool) {
         if !self.enabled {
+            return;
+        }
+        if self.concise {
+            let state = if turn_failed {
+                "OpenAB · 执行失败"
+            } else {
+                "OpenAB · 已完成"
+            };
+            self.write(append_session_link(
+                state,
+                self.external_url.as_deref(),
+                self.link_label,
+            ))
+            .await;
             return;
         }
         if tools.is_empty() {
@@ -1805,6 +1922,186 @@ fn append_session_link(content: &str, url: Option<&str>, label: Option<&str>) ->
     } else {
         format!("{content}\n\n[{label}]({url})")
     }
+}
+
+fn should_stream_agent_text(requested: bool, public_reply_mode: bool) -> bool {
+    requested && !public_reply_mode
+}
+
+fn should_keep_full_text(
+    streaming: bool,
+    narration_display: bool,
+    public_reply_mode: bool,
+) -> bool {
+    !public_reply_mode && (streaming || narration_display)
+}
+
+const PRIVATE_REPLY_TAGS: &[&str] = &[
+    "think",
+    "thinking",
+    "reasoning",
+    "system-reminder",
+    "system",
+    "developer",
+    "tools",
+    "tool-schema",
+    "tool-instructions",
+    "available-tools",
+];
+
+fn sanitize_public_reply(content: &str) -> String {
+    let mut cleaned = content.to_string();
+    for tag in PRIVATE_REPLY_TAGS {
+        cleaned = strip_private_tagged_blocks(&cleaned, tag);
+    }
+    for (start, end) in [
+        ("<|start|>system<|message|>", "<|end|>"),
+        ("<|start|>developer<|message|>", "<|end|>"),
+        ("<|im_start|>system", "<|im_end|>"),
+        ("<|im_start|>developer", "<|im_end|>"),
+    ] {
+        cleaned = strip_delimited_blocks(&cleaned, start, end);
+    }
+
+    let cleaned = normalize_public_whitespace(&cleaned);
+    if cleaned.is_empty() {
+        "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn strip_private_tagged_blocks(content: &str, tag: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    let open_prefix = format!("<{tag}");
+    let close_prefix = format!("</{tag}");
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while cursor < content.len() {
+        let Some(relative_start) = lower[cursor..].find(&open_prefix) else {
+            output.push_str(&content[cursor..]);
+            break;
+        };
+        let start = cursor + relative_start;
+        let after_name = start + open_prefix.len();
+        let valid_boundary = matches!(
+            lower.as_bytes().get(after_name),
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        );
+        if !valid_boundary {
+            output.push_str(&content[cursor..after_name]);
+            cursor = after_name;
+            continue;
+        }
+
+        output.push_str(&content[cursor..start]);
+        let Some(open_tail) = lower[after_name..].find('>') else {
+            break;
+        };
+        let body_start = after_name + open_tail + 1;
+        let Some(relative_close) = lower[body_start..].find(&close_prefix) else {
+            break;
+        };
+        let close_start = body_start + relative_close;
+        let close_after_name = close_start + close_prefix.len();
+        let Some(close_tail) = lower[close_after_name..].find('>') else {
+            break;
+        };
+        cursor = close_after_name + close_tail + 1;
+    }
+
+    output
+}
+
+fn strip_delimited_blocks(content: &str, start_marker: &str, end_marker: &str) -> String {
+    let lower = content.to_ascii_lowercase();
+    let start_marker = start_marker.to_ascii_lowercase();
+    let end_marker = end_marker.to_ascii_lowercase();
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0;
+
+    while cursor < content.len() {
+        let Some(relative_start) = lower[cursor..].find(&start_marker) else {
+            output.push_str(&content[cursor..]);
+            break;
+        };
+        let start = cursor + relative_start;
+        output.push_str(&content[cursor..start]);
+        let body_start = start + start_marker.len();
+        let Some(relative_end) = lower[body_start..].find(&end_marker) else {
+            break;
+        };
+        cursor = body_start + relative_end + end_marker.len();
+    }
+
+    output
+}
+
+fn normalize_public_whitespace(content: &str) -> String {
+    let mut lines = Vec::new();
+    let mut previous_blank = false;
+
+    for line in content.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            if !previous_blank && !lines.is_empty() {
+                lines.push(String::new());
+            }
+            previous_blank = true;
+        } else {
+            lines.push(line.to_string());
+            previous_blank = false;
+        }
+    }
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n").trim().to_string()
+}
+
+fn append_run_observability(
+    content: &str,
+    url: Option<&str>,
+    link_label: Option<&str>,
+    model: Option<&str>,
+    agent: Option<&str>,
+) -> String {
+    let mut fields = Vec::with_capacity(3);
+    if let Some((url, label)) = url.zip(link_label) {
+        fields.push(format!("[{label}]({url})"));
+    }
+    fields.push(format!("Model: {}", metadata_value(model)));
+    fields.push(format!("Agent: {}", metadata_value(agent)));
+
+    let footer = fields.join(" · ");
+    let content = content.trim_end();
+    if content.is_empty() {
+        footer
+    } else {
+        format!("{content}\n\n{footer}")
+    }
+}
+
+fn metadata_value(value: Option<&str>) -> String {
+    let normalized = value
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let normalized = if normalized.is_empty() {
+        "未报告".to_string()
+    } else {
+        normalized
+    };
+    let mut value = normalized.chars().take(80).collect::<String>();
+    if normalized.chars().count() > 80 {
+        value.push('…');
+    }
+    value
+        .replace(char::from(96u8), "'")
+        .replace('<', "‹")
+        .replace('>', "›")
 }
 
 impl ToolEntry {
@@ -2169,6 +2466,55 @@ mod tests {
     }
 
     #[test]
+    fn public_reply_mode_disables_streaming_and_full_narration() {
+        assert!(!should_stream_agent_text(true, true));
+        assert!(!should_keep_full_text(true, true, true));
+        assert!(should_stream_agent_text(true, false));
+        assert!(should_keep_full_text(false, true, false));
+    }
+
+    #[test]
+    fn public_reply_strips_private_blocks_and_transcripts() {
+        let input = concat!(
+            "<system-reminder>hidden policy</system-reminder>",
+            "<think>secret reasoning</think>",
+            "<tools>{\"schema\":\"private\"}</tools>",
+            "<|start|>developer<|message|>private prompt<|end|>",
+            "Final answer"
+        );
+
+        assert_eq!(sanitize_public_reply(input), "Final answer");
+    }
+
+    #[test]
+    fn public_reply_drops_unclosed_private_tail() {
+        assert_eq!(
+            sanitize_public_reply("Visible answer\n<think>unfinished private reasoning"),
+            "Visible answer"
+        );
+        assert_eq!(
+            sanitize_public_reply("<developer>private only"),
+            "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。"
+        );
+    }
+
+    #[test]
+    fn observability_footer_reports_link_model_and_agent() {
+        let output = append_run_observability(
+            "完成",
+            Some("https://openab.example/#/sessions/slack%3A1700.1"),
+            Some("Open in OpenAB"),
+            Some("gpt-5"),
+            Some("codex"),
+        );
+
+        assert_eq!(
+            output,
+            "完成\n\n[Open in OpenAB](https://openab.example/#/sessions/slack%3A1700.1) · Model: gpt-5 · Agent: codex"
+        );
+    }
+
+    #[test]
     fn split_delivery_send_once_preserves_leading_directive_across_tools() {
         // Regression: a [[reply_to:...]] emitted at output start, followed by
         // narration + a tool, must survive even though the narration is dropped.
@@ -2391,6 +2737,7 @@ mod tests {
         sends: std::sync::Mutex<Vec<String>>,
         edits: std::sync::Mutex<Vec<String>>,
         events: std::sync::Mutex<Vec<&'static str>>,
+        public_reply_mode: bool,
     }
 
     #[async_trait]
@@ -2449,6 +2796,55 @@ mod tests {
         fn use_streaming(&self, _other_bot_present: bool) -> bool {
             false
         }
+
+        fn uses_public_reply_mode(&self) -> bool {
+            self.public_reply_mode
+        }
+    }
+
+    #[tokio::test]
+    async fn concise_progress_never_exposes_tool_titles() {
+        let adapter = Arc::new(ProgressTestAdapter {
+            public_reply_mode: true,
+            ..Default::default()
+        });
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C1".into(),
+            thread_id: Some("1700.1".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let mut progress = ToolProgressMessage::new(
+            true,
+            adapter.clone(),
+            channel,
+            Some("https://openab.example/#/sessions/slack%3A1700.1".into()),
+            Some("Open in OpenAB"),
+            ToolDisplay::Full,
+        );
+        let tools = vec![tool(
+            "1",
+            "Bash { command: cat /private/prompt }",
+            ToolState::Running,
+        )];
+
+        progress.seed_receipt().await;
+        progress.update(&tools).await;
+        progress.finish(&tools, false).await;
+
+        let sends = adapter.sends.lock().unwrap().clone();
+        let edits = adapter.edits.lock().unwrap().clone();
+        let visible = sends
+            .into_iter()
+            .chain(edits)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(visible.contains("OpenAB · 正在处理"));
+        assert!(visible.contains("OpenAB · 正在执行"));
+        assert!(visible.contains("OpenAB · 已完成"));
+        assert!(!visible.contains("Bash"));
+        assert!(!visible.contains("/private/prompt"));
     }
 
     #[tokio::test]
