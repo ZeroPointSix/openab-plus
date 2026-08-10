@@ -2,7 +2,7 @@ use crate::acp::connection::{AcpConnection, SessionActivity};
 use crate::acp::protocol::ConfigOption;
 use crate::agent_profile::RecoveryStrategy;
 use crate::config::AgentConfig;
-use crate::session_snapshot::ProfileConfigError;
+use crate::session_snapshot::{ProfileConfigError, SessionRuntimeMetadata};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,26 +71,39 @@ pub struct SessionEnsureOutcome {
     pub created: bool,
     pub recovered: bool,
     pub profile_config_errors: Vec<ProfileConfigError>,
+    pub runtime_metadata: SessionRuntimeMetadata,
 }
 
 impl SessionEnsureOutcome {
-    fn existing() -> Self {
-        Self::new(false, false, Vec::new())
+    fn existing(runtime_metadata: SessionRuntimeMetadata) -> Self {
+        Self::new(false, false, Vec::new(), runtime_metadata)
     }
 
-    fn created(profile_config_errors: Vec<ProfileConfigError>) -> Self {
-        Self::new(true, false, profile_config_errors)
+    fn created(
+        profile_config_errors: Vec<ProfileConfigError>,
+        runtime_metadata: SessionRuntimeMetadata,
+    ) -> Self {
+        Self::new(true, false, profile_config_errors, runtime_metadata)
     }
 
-    fn recovered(profile_config_errors: Vec<ProfileConfigError>) -> Self {
-        Self::new(false, true, profile_config_errors)
+    fn recovered(
+        profile_config_errors: Vec<ProfileConfigError>,
+        runtime_metadata: SessionRuntimeMetadata,
+    ) -> Self {
+        Self::new(false, true, profile_config_errors, runtime_metadata)
     }
 
-    fn new(created: bool, recovered: bool, profile_config_errors: Vec<ProfileConfigError>) -> Self {
+    fn new(
+        created: bool,
+        recovered: bool,
+        profile_config_errors: Vec<ProfileConfigError>,
+        runtime_metadata: SessionRuntimeMetadata,
+    ) -> Self {
         Self {
             created,
             recovered,
             profile_config_errors,
+            runtime_metadata,
         }
     }
 }
@@ -368,10 +381,12 @@ impl SessionPool {
             // Lock held = busy streaming = alive (same convention as
             // has_active_session); cleanup_idle owns hung recovery.
             let Ok(conn) = conn.try_lock() else {
-                return Ok(SessionEnsureOutcome::existing());
+                return Ok(SessionEnsureOutcome::existing(
+                    SessionRuntimeMetadata::default(),
+                ));
             };
             if conn.alive() {
-                return Ok(SessionEnsureOutcome::existing());
+                return Ok(SessionEnsureOutcome::existing(conn.runtime_metadata()));
             }
             dead_existing = true;
             if saved_session_id.is_none() {
@@ -550,6 +565,7 @@ impl SessionPool {
         let activity_handle = new_conn.activity_handle();
         let child_pgid = new_conn.child_pgid();
         let cancel_session_id = new_conn.acp_session_id.clone().unwrap_or_default();
+        let runtime_metadata = new_conn.runtime_metadata();
         let new_conn = Arc::new(Mutex::new(new_conn));
 
         let mut state = self.state.write().await;
@@ -558,10 +574,12 @@ impl SessionPool {
         // initializing this one.
         if let Some(existing) = state.active.get(thread_id).cloned() {
             let Ok(existing) = existing.try_lock() else {
-                return Ok(SessionEnsureOutcome::existing());
+                return Ok(SessionEnsureOutcome::existing(
+                    SessionRuntimeMetadata::default(),
+                ));
             };
             if existing.alive() {
-                return Ok(SessionEnsureOutcome::existing());
+                return Ok(SessionEnsureOutcome::existing(existing.runtime_metadata()));
             }
             warn!(thread_id, "stale connection, rebuilding");
             drop(existing);
@@ -633,9 +651,15 @@ impl SessionPool {
         }
 
         if had_prior_state {
-            Ok(SessionEnsureOutcome::recovered(profile_config_errors))
+            Ok(SessionEnsureOutcome::recovered(
+                profile_config_errors,
+                runtime_metadata,
+            ))
         } else {
-            Ok(SessionEnsureOutcome::created(profile_config_errors))
+            Ok(SessionEnsureOutcome::created(
+                profile_config_errors,
+                runtime_metadata,
+            ))
         }
     }
 
@@ -726,6 +750,15 @@ impl SessionPool {
         drop(state);
         let conn = conn.lock().await;
         conn.config_options.clone()
+    }
+
+    pub async fn runtime_metadata(&self, thread_id: &str) -> Option<SessionRuntimeMetadata> {
+        let conn = {
+            let state = self.state.read().await;
+            state.active.get(thread_id)?.clone()
+        };
+        let conn = conn.lock().await;
+        Some(conn.runtime_metadata())
     }
 
     /// Set a config option (e.g. model) via ACP and return updated options.
