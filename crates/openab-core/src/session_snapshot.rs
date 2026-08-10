@@ -208,12 +208,8 @@ impl SessionSnapshot {
     }
 
     pub fn update_runtime_config_metadata(&mut self, metadata: SessionRuntimeMetadata) {
-        if metadata.model.is_some() {
-            self.model = metadata.model;
-        }
-        if metadata.reasoning_effort.is_some() {
-            self.reasoning_effort = metadata.reasoning_effort;
-        }
+        self.model = metadata.model;
+        self.reasoning_effort = metadata.reasoning_effort;
         if metadata.metadata_source.is_some() {
             self.metadata_source = metadata.metadata_source;
         }
