@@ -1147,6 +1147,6 @@ mod tests {
     fn ignores_empty_model_config_value() {
         let options = vec![config_option("model", "   ")];
 
-        assert_eq!(model_from_options(&options), None);
+        assert_eq!(runtime_metadata_from_options(None, &options).model, None);
     }
 }
