@@ -8,7 +8,7 @@ ACP-over-WebSocket conformance suite — upstream client<->gateway `/acp` hop.
 
 Exercises the WebSocket ACP server this PR adds (GET /acp on the openab gateway /
 embedded `openab run`) against a LIVE deployment, and prints an item-by-item report
-suitable for pasting into the PR as evidence. It covers three groups:
+suitable for pasting into the PR as evidence. It covers four groups:
 
   [Transport / Auth]  — a transport token is REQUIRED off loopback: no-token and
                         wrong-token connections are rejected, the valid token is accepted.
@@ -17,6 +17,8 @@ suitable for pasting into the PR as evidence. It covers three groups:
   [Protocol edge cases] — hardening: version negotiation & rejects, param validation,
                         content-block policy, notification silence, oversized-reply whole
                         delivery, and Unicode/emoji stream integrity.
+  [Lifecycle / transport] — frame limits, header auth, exclusive resume ownership,
+                        owner release after disconnect, and cancellation.
 
 A live agent backend is required (prompt turns hit the real model).
 
@@ -291,6 +293,53 @@ async def section_lifecycle():
             record("life", True, "oversized frame closes the connection")
         except asyncio.TimeoutError:
             record("life", False, "oversized frame closes the connection", "no close within 8s")
+
+    # A resumable session has one process-wide connection owner. A second live
+    # connection is rejected; after the first disconnects, retrying resume succeeds.
+    ws_a = await try_connect(TOKEN)
+    ws_b = await try_connect(TOKEN)
+    try:
+        a = Conn(ws_a)
+        b = Conn(ws_b)
+        await a.initialize()
+        await b.initialize()
+        sid = await a.new_session()
+
+        r = await b.call(
+            "session/resume",
+            {"sessionId": sid, "cwd": "/home/agent", "mcpServers": []},
+        )
+        record(
+            "life",
+            r.get("error", {}).get("code") == -32001,
+            "concurrent session/resume is rejected (-32001)",
+        )
+
+        await ws_a.close()
+        released = False
+        detail = ""
+        deadline = asyncio.get_running_loop().time() + 8
+        while asyncio.get_running_loop().time() < deadline:
+            r = await b.call(
+                "session/resume",
+                {"sessionId": sid, "cwd": "/home/agent", "mcpServers": []},
+            )
+            if r.get("result") == {} and not r.get("error"):
+                released = True
+                break
+            detail = repr(r.get("error") or r)
+            if r.get("error", {}).get("code") != -32001:
+                break
+            await asyncio.sleep(0.1)
+        record(
+            "life",
+            released,
+            "session owner is released after disconnect",
+            detail if not released else "",
+        )
+    finally:
+        await ws_a.close()
+        await ws_b.close()
 
     # session/cancel → the in-flight prompt ends with stopReason:"cancelled"
     async with await try_connect(TOKEN) as ws:
