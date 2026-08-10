@@ -100,7 +100,7 @@ pub struct AcpConfig {
 impl AcpConfig {
     pub fn from_env() -> Option<Self> {
         let enabled = std::env::var("OPENAB_ACP_ENABLED")
-            .map(|v| v == "true" || v == "1")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if !enabled {
             return None;
@@ -398,7 +398,10 @@ pub async fn ws_upgrade(
     // Echo the `acp.v1` subprotocol so a browser that offered it (alongside its
     // `openab.bearer.<token>` entry) completes the handshake. Clients that offer no
     // subprotocol are unaffected.
-    ws.protocols([ACP_SUBPROTOCOL])
+    // Enforce the same cap in tungstenite before it buffers a complete message.
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
+        .protocols([ACP_SUBPROTOCOL])
         .on_upgrade(move |socket| handle_acp_connection(state, socket))
 }
 
