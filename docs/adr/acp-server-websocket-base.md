@@ -119,25 +119,33 @@ all `false` in the base (text only). `protocolVersion` is the integer `1`.
   `cancelled`. A backend timeout has no ACP stopReason, so it returns a JSON-RPC
   error (`-32603`) instead.
 
-### Concurrency, caps & reply fencing
+### Concurrency, caps, ownership & backpressure
 
 - **Per-connection caps** — `MAX_SESSIONS_PER_CONNECTION` (128) and
   `MAX_INFLIGHT_PROMPTS` (32) bound one connection's growth; overflow returns `-32000`
   (`ACP_OVERLOADED`). The session cap is enforced on **both** `session/new` and
-  `session/resume` — resume is not an unbounded insert path (a client can mint unlimited
-  well-formed `sess_<uuid>`).
-- **Stale-reply fencing** — after a prompt times out or is cancelled, the next prompt on
-  the same session reuses the same deterministic `channel_id`. Each turn registers its
-  reply sink under the originating `GatewayEvent` id (`evt_<uuid>`, round-tripped as
-  `GatewayReply.reply_to`); `handle_reply` drops a reply whose `reply_to` no longer
-  matches the active turn, so a late reply from the superseded turn cannot leak into the
-  new prompt's stream.
-- **Backend work is not yet cancelled** — the inflight cap counts *gateway* stream tasks,
-  not downstream agent work. A timed-out / cancelled turn keeps running on the backend
-  until it finishes on its own; a `prompt → cancel` loop can therefore queue backend work
-  beyond the 32 cap. Bounding this needs true agent→core cancel propagation — tracked as a
-  follow-up, not addressed in the base (the fence above still prevents its late output from
-  corrupting a later turn).
+  `session/resume` — resume is not an unbounded insert path.
+- **Exclusive process-wide ownership** — each deterministic `channel_id` has one live
+  connection owner. A concurrent `session/resume` returns `-32001` until the old
+  connection has fully drained. Sink removal and disconnect cleanup both compare owner
+  and turn ids, so delayed completion from an old connection cannot delete a replacement
+  connection's sink.
+- **Process-wide backend cap** — a shared 32-permit semaphore is acquired before a prompt
+  is dispatched and released only after the backend's terminal reply is drained. A
+  `session/cancel` still answers the client immediately with `stopReason:"cancelled"`,
+  but it does not recycle `busy` or the backend permit while the uncancelled downstream
+  agent is still running. A prompt/cancel loop therefore cannot exceed the cap. If the
+  backend never terminates, the permit remains occupied (intentional fail-closed behavior);
+  true downstream cancellation remains a follow-up.
+- **Bounded outbound queues** — each WebSocket connection buffers at most 64 client frames,
+  and each active prompt buffers at most 32 full-text reply snapshots. Slow WebSocket
+  consumers apply backpressure to prompt tasks. Intermediate snapshots are dropped when
+  only two reply slots remain, reserving capacity for the terminal full-text snapshot plus
+  `Done`; memory does not grow without bound and the final answer remains deliverable.
+- **Stale-reply fencing** — each turn registers its sink under the originating
+  `GatewayEvent` id (`evt_<uuid>`, round-tripped as `GatewayReply.reply_to`).
+  `handle_reply` drops a reply whose `reply_to` does not match the active turn, so late
+  output cannot leak into a later prompt.
 
 ### Session ↔ core mapping
 
@@ -211,8 +219,10 @@ and rejecting forged ids.
   the ACP `cwd` **through** the same `resolve_workspace` containment (arbitrary paths rejected,
   only existing dirs under `bot_home` honored) — not straight into `current_dir`.
 - **Emoji** — inline 顏文字 flow through as text; reaction emoji stay no-op in the base.
-- **Reconnect** — on WS disconnect the per-connection session map is dropped; the
-  client reconnects with `session/resume` + its persisted `sessionId`.
+- **Reconnect** — on WS disconnect the client reconnects with `session/resume` + its
+  persisted `sessionId`. Ownership is released after any active backend turn drains;
+  a reconnect that overlaps that drain receives `-32001` and retries, which prevents
+  two live connections from racing the same reply channel.
 
 ## 6. Roadmap (re-scoped; not the original proposal's numbered phases)
 
