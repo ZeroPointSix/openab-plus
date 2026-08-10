@@ -784,15 +784,17 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 let out_tx_clone = out_tx.clone();
                 let handle = tokio::spawn(async move {
                     handle_session_prompt(
-                        &state_clone,
-                        &sessions_clone,
-                        &registry_clone,
+                        AcpPromptTask {
+                            state: &state_clone,
+                            sessions: &sessions_clone,
+                            registry: &registry_clone,
+                            out_tx: &out_tx_clone,
+                            session_id,
+                            cancel,
+                            _backend_permit: backend_permit,
+                        },
                         id,
                         req.params.as_ref(),
-                        &out_tx_clone,
-                        session_id,
-                        cancel,
-                        backend_permit,
                     )
                     .await;
                 });
@@ -1061,17 +1063,30 @@ async fn release_prompt(
     }
 }
 
-async fn handle_session_prompt(
-    state: &Arc<crate::AppState>,
-    sessions: &Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
-    registry: &AcpReplyRegistry,
-    id: Value,
-    params: Option<&Value>,
-    out_tx: &mpsc::Sender<String>,
+struct AcpPromptTask<'a> {
+    state: &'a Arc<crate::AppState>,
+    sessions: &'a Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
+    registry: &'a AcpReplyRegistry,
+    out_tx: &'a mpsc::Sender<String>,
     session_id: String,
     cancel: Arc<tokio::sync::Notify>,
     _backend_permit: OwnedSemaphorePermit,
+}
+
+async fn handle_session_prompt(
+    task: AcpPromptTask<'_>,
+    id: Value,
+    params: Option<&Value>,
 ) {
+    let AcpPromptTask {
+        state,
+        sessions,
+        registry,
+        out_tx,
+        session_id,
+        cancel,
+        _backend_permit,
+    } = task;
     let prompt_text = match extract_prompt_params(params) {
         Ok((_sid, text)) => text,
         Err(e) => {
@@ -2220,15 +2235,17 @@ mod acp_review_fixes {
             let params =
                 json!({"sessionId": sid2, "prompt": [{"type": "text", "text": "hi"}]});
             handle_session_prompt(
-                &st2,
-                &sessions2,
-                &registry2,
+                AcpPromptTask {
+                    state: &st2,
+                    sessions: &sessions2,
+                    registry: &registry2,
+                    out_tx: &out_tx,
+                    session_id: sid2.clone(),
+                    cancel: cancel2,
+                    _backend_permit: backend_permit,
+                },
                 json!(7),
                 Some(&params),
-                &out_tx,
-                sid2.clone(),
-                cancel2,
-                backend_permit,
             )
             .await;
         });
@@ -2393,15 +2410,17 @@ mod acp_review_fixes {
         let handle = tokio::spawn(async move {
             let params = json!({"sessionId": sid2, "prompt": [{"type": "text", "text": "hi"}]});
             handle_session_prompt(
-                &st2,
-                &sessions2,
-                &registry2,
+                AcpPromptTask {
+                    state: &st2,
+                    sessions: &sessions2,
+                    registry: &registry2,
+                    out_tx: &out_tx,
+                    session_id: sid2.clone(),
+                    cancel,
+                    _backend_permit: backend_permit,
+                },
                 json!(11),
                 Some(&params),
-                &out_tx,
-                sid2.clone(),
-                cancel,
-                backend_permit,
             )
             .await;
         });
