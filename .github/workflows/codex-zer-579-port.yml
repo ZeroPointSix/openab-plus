@@ -38,12 +38,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -f crates/openab-gateway/src/adapters/acp_server.rs ]]; then echo 'ACP port already applied'; exit 0; fi
           git config user.name codexweb
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git remote add openab-upstream https://github.com/openabdev/openab.git
           git fetch --no-tags openab-upstream main refs/pull/1418/head
           git diff --binary 2e3292bc3e3e01f0fb203dc38003ad4c9afc7ca5 c0cb2f1f564aedd6b5f11e001dd6d0001f414437 -- \
-            .github/workflows/ci.yml \
             Cargo.lock Cargo.toml \
             crates/openab-core/Cargo.toml \
             crates/openab-core/src/adapter.rs \
@@ -178,7 +178,6 @@ jobs:
           perl -0pi -e 's/(\[package\]\nname = "openab-core"\nversion = )"0\.8\.13"/${1}"0.8.14"/' crates/openab-core/Cargo.toml
           perl -0pi -e 's/(\[package\]\nname = "openab-gateway"\nversion = )"0\.5\.9"/${1}"0.5.10"/' crates/openab-gateway/Cargo.toml
           cargo metadata --format-version 1 --no-deps > /dev/null
-          git rm .github/workflows/codex-zer-579-port.yml
           git add .
           git diff --cached --check
           git commit -m "feat: port ACP WebSocket server (ZER-579)"
