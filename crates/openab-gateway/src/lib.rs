@@ -594,7 +594,10 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     // ACP Server adapter. Fail-open (no transport key) is only allowed on a loopback
     // bind; a non-loopback bind without OPENAB_ACP_AUTH_KEY refuses to mount /acp.
     #[cfg(feature = "acp")]
-    if std::env::var("OPENAB_ACP_ENABLED").map(|v| v == "true" || v == "1").unwrap_or(false) {
+    if std::env::var("OPENAB_ACP_ENABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
         let acp_key = std::env::var("OPENAB_ACP_AUTH_KEY").ok();
         match adapters::acp_server::acp_auth_ok_for_bind(acp_key.as_deref(), &listen_addr) {
             Ok(()) => {
