@@ -3,9 +3,10 @@ use crate::acp::protocol::{
     JsonRpcResponse, UsageReport,
 };
 use crate::config::ImageHandling;
+use crate::session_snapshot::SessionRuntimeMetadata;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -225,6 +226,7 @@ pub struct AcpConnection {
     /// Used to gate agent-specific extension methods.
     pub agent_name: String,
     pub config_options: Vec<ConfigOption>,
+    reported_config_options: HashSet<String>,
     pub last_active: Instant,
     pub activity: Arc<SessionActivity>,
     pub session_reset: bool,
@@ -232,6 +234,31 @@ pub struct AcpConnection {
     image_handling: ImageHandling,
     _reader_handle: JoinHandle<()>,
     _stderr_handle: Option<JoinHandle<()>>,
+}
+
+pub(crate) fn runtime_metadata_from_options(
+    agent: Option<&str>,
+    options: &[ConfigOption],
+) -> SessionRuntimeMetadata {
+    let agent = agent.and_then(non_empty_metadata_value);
+    let model = config_option_value(options, &["model"]);
+    let reasoning_effort = config_option_value(
+        options,
+        &["reasoning_effort", "reasoning-effort", "reasoningEffort"],
+    );
+    SessionRuntimeMetadata::acp(agent, model, reasoning_effort)
+}
+
+fn config_option_value(options: &[ConfigOption], ids: &[&str]) -> Option<String> {
+    options
+        .iter()
+        .find(|option| ids.iter().any(|id| option.id.eq_ignore_ascii_case(id)))
+        .and_then(|option| non_empty_metadata_value(&option.current_value))
+}
+
+fn non_empty_metadata_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Build the final set of env vars for the agent subprocess.
@@ -524,6 +551,7 @@ impl AcpConnection {
             supports_load_session: false,
             agent_name: String::new(),
             config_options: Vec::new(),
+            reported_config_options: HashSet::new(),
             last_active: Instant::now(),
             activity,
             session_reset: false,
@@ -592,7 +620,7 @@ impl AcpConnection {
             .and_then(|r| r.get("agentInfo"))
             .and_then(|a| a.get("name"))
             .and_then(|n| n.as_str())
-            .unwrap_or("unknown");
+            .unwrap_or_default();
         self.agent_name = agent_name.to_string();
         self.supports_load_session = result
             .and_then(|r| r.get("agentCapabilities"))
@@ -623,7 +651,7 @@ impl AcpConnection {
         info!(session_id = %session_id, "session created");
         self.acp_session_id = Some(session_id.clone());
         if let Some(result) = resp.result.as_ref() {
-            self.config_options = parse_config_options(result);
+            self.replace_config_options_from_acp(parse_config_options(result));
             if !self.config_options.is_empty() {
                 info!(count = self.config_options.len(), "parsed configOptions");
             }
@@ -657,8 +685,15 @@ impl AcpConnection {
 
         match resp {
             Ok(r) => {
-                if let Some(result) = r.result.as_ref() {
-                    self.config_options = parse_config_options(result);
+                let options = r
+                    .result
+                    .as_ref()
+                    .map(parse_config_options)
+                    .unwrap_or_default();
+                if options.is_empty() {
+                    self.update_config_option_cache(config_id, value);
+                } else {
+                    self.replace_config_options_from_acp(options);
                 }
                 info!(config_id, value, "config option set");
             }
@@ -678,15 +713,37 @@ impl AcpConnection {
                         })),
                     )
                     .await?;
-                for opt in &mut self.config_options {
-                    if opt.id == config_id {
-                        opt.current_value = value.to_string();
-                    }
-                }
+                self.update_config_option_cache(config_id, value);
             }
         }
 
         Ok(self.config_options.clone())
+    }
+
+    pub fn runtime_metadata(&self) -> SessionRuntimeMetadata {
+        let reported_options = self
+            .config_options
+            .iter()
+            .filter(|option| self.reported_config_options.contains(&option.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        runtime_metadata_from_options(Some(&self.agent_name), &reported_options)
+    }
+
+    pub(crate) fn replace_config_options_from_acp(&mut self, options: Vec<ConfigOption>) {
+        self.reported_config_options = options.iter().map(|option| option.id.clone()).collect();
+        self.config_options = options;
+    }
+
+    fn update_config_option_cache(&mut self, config_id: &str, value: &str) {
+        self.reported_config_options.remove(config_id);
+        if let Some(option) = self
+            .config_options
+            .iter_mut()
+            .find(|option| option.id == config_id)
+        {
+            option.current_value = value.to_string();
+        }
     }
 
     /// Query account-level usage/billing via kiro-cli's
@@ -842,7 +899,7 @@ impl AcpConnection {
         info!(session_id, "session loaded");
         self.acp_session_id = Some(session_id.to_string());
         if let Some(result) = resp.result.as_ref() {
-            self.config_options = parse_config_options(result);
+            self.replace_config_options_from_acp(parse_config_options(result));
         }
         Ok(())
     }
@@ -889,9 +946,23 @@ impl Drop for AcpConnection {
 mod tests {
     use super::{
         apply_image_policy, build_agent_env, build_permission_response, pick_best_option,
-        ContentBlock, ImageHandling, IMAGE_SKIPPED_NOTE,
+        runtime_metadata_from_options, ContentBlock, ImageHandling, IMAGE_SKIPPED_NOTE,
     };
+    use crate::acp::protocol::{ConfigOption, ConfigOptionValue};
+    use crate::session_snapshot::SessionMetadataSource;
     use serde_json::json;
+
+    fn config_option(id: &str, current_value: &str) -> ConfigOption {
+        ConfigOption {
+            id: id.into(),
+            name: id.into(),
+            description: None,
+            category: None,
+            option_type: "string".into(),
+            current_value: current_value.into(),
+            options: Vec::<ConfigOptionValue>::new(),
+        }
+    }
 
     fn text(text: &str) -> ContentBlock {
         ContentBlock::Text {
@@ -941,6 +1012,32 @@ mod tests {
         let out = apply_image_policy(vec![text("a"), text("b")], ImageHandling::Skip);
         assert!(matches!(&out[0], ContentBlock::Text { text } if text == "a"));
         assert!(matches!(&out[1], ContentBlock::Text { text } if text == "b"));
+    }
+
+    #[test]
+    fn runtime_metadata_uses_live_acp_values() {
+        let metadata = runtime_metadata_from_options(
+            Some(" Codex ACP "),
+            &[
+                config_option("model", "gpt-5"),
+                config_option("reasoningEffort", "high"),
+            ],
+        );
+
+        assert_eq!(metadata.agent.as_deref(), Some("Codex ACP"));
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5"));
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(metadata.metadata_source, Some(SessionMetadataSource::Acp));
+    }
+
+    #[test]
+    fn runtime_metadata_omits_unreported_config_values() {
+        let metadata = runtime_metadata_from_options(Some("Codex ACP"), &[]);
+
+        assert_eq!(metadata.agent.as_deref(), Some("Codex ACP"));
+        assert_eq!(metadata.model, None);
+        assert_eq!(metadata.reasoning_effort, None);
+        assert_eq!(metadata.metadata_source, Some(SessionMetadataSource::Acp));
     }
 
     #[test]
