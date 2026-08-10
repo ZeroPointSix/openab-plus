@@ -6,18 +6,36 @@ on:
       - codex/zer-579-acp-websocket
     paths:
       - .github/workflows/codex-zer-579-port.yml
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
 
 permissions:
   contents: write
+  statuses: write
+
+concurrency:
+  group: codex-zer-579-port
+  cancel-in-progress: false
 
 jobs:
   port:
+    if: github.event_name == 'push' || github.event.pull_request.head.ref == 'codex/zer-579-acp-websocket'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: codex/zer-579-acp-websocket
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - name: Mark port pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }} -f state=pending -f context='ZER-579 port' -f description='Applying upstream ACP WebSocket change'
       - name: Apply upstream ACP WebSocket change
         shell: bash
         run: |
@@ -54,3 +72,8 @@ jobs:
           git add .
           git commit -m "feat: port ACP WebSocket server (ZER-579)"
           git push origin HEAD:codex/zer-579-acp-websocket
+      - name: Mark port success
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }} -f state=success -f context='ZER-579 port' -f description='Upstream ACP WebSocket change applied'
