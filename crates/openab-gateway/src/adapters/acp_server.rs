@@ -1323,39 +1323,52 @@ pub async fn handle_reply(reply: &GatewayReply, registry: &AcpReplyRegistry) {
         return;
     }
 
-    let (tx, owner_id, turn_id) = {
-        let sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
-        match sinks.get(key) {
-            Some(sink) if reply.reply_to.is_empty() || reply.reply_to == sink.turn_id => (
-                sink.tx.clone(),
-                sink.owner_id.clone(),
-                sink.turn_id.clone(),
-            ),
-            Some(_) => {
-                debug!(channel = key, "ACP dropping stale reply from a superseded turn");
-                return;
+    // Serialize sends per sink under the registry lock. Intermediate snapshots
+    // may be dropped when only the two terminal slots remain; because each chunk
+    // carries the full text so far, the final Text + Done still completes exactly.
+    let mut sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
+    let should_remove = {
+        let Some(sink) = sinks.get(key) else {
+            return;
+        };
+        if !reply.reply_to.is_empty() && reply.reply_to != sink.turn_id {
+            debug!(channel = key, "ACP dropping stale reply from a superseded turn");
+            return;
+        }
+
+        match reply.command.as_deref() {
+            Some("edit_message") => {
+                if sink.tx.capacity() <= 2 {
+                    debug!(
+                        channel = key,
+                        "ACP reply queue saturated; dropping intermediate snapshot"
+                    );
+                    false
+                } else {
+                    match sink.tx.try_send(ReplyChunk::Text(full_text)) {
+                        Ok(()) => false,
+                        Err(mpsc::error::TrySendError::Full(_)) => false,
+                        Err(mpsc::error::TrySendError::Closed(_)) => true,
+                    }
+                }
             }
-            None => return,
+            None | Some("send_message") => {
+                let text_sent = sink.tx.try_send(ReplyChunk::Text(full_text)).is_ok();
+                let done_sent = text_sent && sink.tx.try_send(ReplyChunk::Done).is_ok();
+                if !done_sent {
+                    warn!(
+                        channel = key,
+                        "ACP final reply queue closed before terminal delivery"
+                    );
+                }
+                true
+            }
+            Some("add_reaction") | Some("remove_reaction") => false,
+            _ => false,
         }
     };
-
-    match reply.command.as_deref() {
-        Some("edit_message") => {
-            if tx.try_send(ReplyChunk::Text(full_text)).is_err() {
-                warn!(channel = key, "ACP reply queue full or closed; dropping active sink");
-                remove_reply_sink_if_matches(registry, key, &owner_id, &turn_id);
-            }
-        }
-        None | Some("send_message") => {
-            let text_sent = tx.try_send(ReplyChunk::Text(full_text)).is_ok();
-            let done_sent = text_sent && tx.try_send(ReplyChunk::Done).is_ok();
-            if !done_sent {
-                warn!(channel = key, "ACP final reply queue full or closed");
-            }
-            remove_reply_sink_if_matches(registry, key, &owner_id, &turn_id);
-        }
-        Some("add_reaction") | Some("remove_reaction") => {}
-        _ => {}
+    if should_remove {
+        sinks.remove(key);
     }
 }
 // ---------------------------------------------------------------------------
@@ -2043,10 +2056,10 @@ mod acp_review_fixes {
     }
 
     #[tokio::test]
-    async fn overflowing_reply_queue_removes_active_sink() {
+    async fn saturated_reply_queue_reserves_terminal_delivery() {
         let registry = new_reply_registry();
         assert!(claim_session_owner(&registry, "acp_slow", "conn_a"));
-        let (tx, _rx) = reply_channel();
+        let (tx, mut rx) = reply_channel();
         assert!(register_reply_sink(
             &registry,
             "acp_slow",
@@ -2074,15 +2087,16 @@ mod acp_review_fixes {
                 .sinks
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .contains_key("acp_slow")
+                .contains_key("acp_slow"),
+            "saturation must retain the sink for terminal delivery"
         );
 
         handle_reply(
             &reply(
                 "acp_slow",
                 "evt_slow",
-                "overflow",
-                Some("edit_message"),
+                "final answer",
+                Some("send_message"),
             ),
             &registry,
         )
@@ -2093,8 +2107,19 @@ mod acp_review_fixes {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .contains_key("acp_slow"),
-            "overflow must fail closed by removing the active sink"
+            "a terminal reply removes the completed sink"
         );
+
+        let mut saw_final = false;
+        let mut saw_done = false;
+        while let Ok(chunk) = rx.try_recv() {
+            match chunk {
+                ReplyChunk::Text(text) if text == "final answer" => saw_final = true,
+                ReplyChunk::Done => saw_done = true,
+                _ => {}
+            }
+        }
+        assert!(saw_final && saw_done, "terminal Text + Done must survive saturation");
     }
 
     // R17-F1 — keyless-mode browser `Origin` gating. A WS handshake bypasses the browser
