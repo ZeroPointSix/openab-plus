@@ -26,6 +26,8 @@ export interface SessionSnapshot {
   profile_name?: string;
   profile_status?: 'active' | 'deleted';
   model?: string;
+  reasoning_effort?: string;
+  metadata_source?: 'acp' | 'configured';
   status: SessionStatus;
   last_error?: string;
   profile_config_errors?: ProfileConfigError[];
