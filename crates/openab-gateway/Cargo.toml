@@ -1,6 +1,6 @@
 [package]
 name = "openab-gateway"
-version = "0.5.9"
+version = "0.5.10"
 edition = "2021"
 license = "MIT"
 
@@ -49,3 +49,4 @@ feishu = []
 googlechat = []
 wecom = []
 teams = []
+acp = []
