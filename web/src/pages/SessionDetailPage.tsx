@@ -75,11 +75,17 @@ export function SessionDetailPage() {
 
   const session = sessionQuery.data;
   const timeline = timelineQuery.data || [];
+  const metadataSourceLabel =
+    session.metadata_source === 'acp'
+      ? 'ACP 运行时'
+      : session.metadata_source === 'configured'
+        ? '配置值'
+        : '未报告';
 
   return (
     <PageContainer
       title={session.session_id}
-      subTitle={session.agent}
+      subTitle={session.agent || 'Agent 未报告'}
       className="page-container"
       extra={[
         <Button
@@ -184,7 +190,7 @@ export function SessionDetailPage() {
           </div>
           <Descriptions column={1} size="small" colon={false}>
             <Descriptions.Item label="Agent">
-              {session.agent || '-'}
+              {session.agent || '未报告'}
             </Descriptions.Item>
             <Descriptions.Item label="平台">
               {session.source.platform || '-'}
@@ -208,7 +214,13 @@ export function SessionDetailPage() {
               </Space>
             </Descriptions.Item>
             <Descriptions.Item label="模型">
-              {session.model || '-'}
+              {session.model || '未报告'}
+            </Descriptions.Item>
+            <Descriptions.Item label="Thinking">
+              {session.reasoning_effort || '未报告'}
+            </Descriptions.Item>
+            <Descriptions.Item label="元数据来源">
+              {metadataSourceLabel}
             </Descriptions.Item>
             <Descriptions.Item label="创建时间">
               {formatDateTime(session.created_at)}
