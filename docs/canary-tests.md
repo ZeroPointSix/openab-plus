@@ -150,11 +150,12 @@ For an ACP adapter change, use a minimal bidirectional JSON-RPC client to exerci
 
 ### WebSocket transport (`/acp`)
 
-OpenAB also serves ACP over a WebSocket (`GET /acp`, feature `acp` + `OPENAB_ACP_ENABLED`) — the upstream client↔gateway hop, distinct from the downstream stdio hop below. `scripts/acp-ws-smoke.py` is a ready-to-run **conformance suite** for it that prints an item-by-item report (paste it into the PR as evidence), in three groups:
+OpenAB also serves ACP over a WebSocket (`GET /acp`, feature `acp` + `OPENAB_ACP_ENABLED`) — the upstream client↔gateway hop, distinct from the downstream stdio hop below. `scripts/acp-ws-smoke.py` is a ready-to-run **conformance suite** for it that prints an item-by-item report (paste it into the PR as evidence), in four groups:
 
 - **Transport / Auth** — a transport token is required off loopback: no-token and wrong-token connections are rejected, the valid token is accepted.
 - **Protocol compliance** — JSON-RPC envelope + ACP wire shapes: initialize negotiation, `session/new` / `session/prompt` (streamed `session/update` `agent_message_chunk` + snake_case `stopReason`) / `session/resume`.
 - **Protocol edge cases** — version negotiation & rejects (`-32602`), required-param validation, not-initialized (`-32002`), bad JSON-RPC version (`-32600`), content-block policy (`resource_link` accepted, gated `image` rejected), notification silence, oversized-reply whole delivery, and Unicode/emoji stream integrity.
+- **Lifecycle / transport** — header authentication, the 1 MiB transport limit, exclusive cross-connection resume ownership plus release after disconnect, and prompt cancellation.
 
 It needs a live deployment (prompt turns hit the real model) and a transport token.
 
@@ -164,7 +165,7 @@ It needs a live deployment (prompt turns hit the real model) and a transport tok
 OPENAB_ACP_AUTH_KEY=<key> uv run scripts/acp-ws-smoke.py ws://<host>:8080/acp
 ```
 
-Exits non-zero unless every check passes. For the in-repo `cargo test` counterpart (offline wire-conformance + handler-level + streaming tests), see the `acp_conformance`, `acp_handlers`, and `acp_streaming` modules in `crates/openab-gateway/src/adapters/acp_server.rs`.
+Exits non-zero unless every check passes. For the in-repo `cargo test` counterpart (offline wire-conformance + handler-level + streaming tests), see the `acp_conformance`, `acp_handlers`, `acp_streaming`, and `acp_review_fixes` modules in `crates/openab-gateway/src/adapters/acp_server.rs`. The review-fix tests pin cross-connection owner fencing, backend-slot retention after cancel, and bounded slow-consumer queues.
 
 ### Transport Method
 
