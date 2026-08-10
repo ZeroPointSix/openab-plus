@@ -142,7 +142,7 @@ fn has_unified_platform(cfg: &config::Config) -> bool {
         // must start the embedded HTTP server that hosts /acp.
         || (cfg!(feature = "acp")
             && std::env::var("OPENAB_ACP_ENABLED")
-                .map(|v| v == "true" || v == "1")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false))
 }
 
@@ -925,7 +925,7 @@ async fn main() -> anyhow::Result<()> {
         // core connects to directly) are configured.
         let acp_enabled = cfg!(feature = "acp")
             && std::env::var("OPENAB_ACP_ENABLED")
-                .map(|v| v == "true" || v == "1")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
         if unified_platform_enabled || cfg.telegram.is_some() || acp_enabled {
             let listen_addr =
@@ -1148,7 +1148,7 @@ async fn main() -> anyhow::Result<()> {
             // (not just the standalone gateway binary) serves ACP over WebSocket.
             #[cfg(feature = "acp")]
             if std::env::var("OPENAB_ACP_ENABLED")
-                .map(|v| v == "true" || v == "1")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false)
             {
                 // Fail-open (no transport key) is only allowed on a loopback bind; a
