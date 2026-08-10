@@ -10,9 +10,7 @@ on:
     branches:
       - main
     types:
-      - opened
       - synchronize
-      - reopened
 
 permissions:
   contents: write
@@ -63,17 +61,132 @@ jobs:
             docs/canary-tests.md \
             scripts/acp-ws-smoke.py \
             src/main.rs src/unified_adapter.rs > /tmp/zer-579.patch
-          git apply --3way --index /tmp/zer-579.patch
+          if ! git apply --3way --index /tmp/zer-579.patch; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [[ "$conflicts" != "crates/openab-core/src/adapter.rs" ]]; then
+              printf 'Unexpected conflicts:\n%s\n' "$conflicts"
+              exit 1
+            fi
+            git checkout --ours -- crates/openab-core/src/adapter.rs
+            git add crates/openab-core/src/adapter.rs
+            ruby <<'RUBY'
+          path = 'crates/openab-core/src/adapter.rs'
+          text = File.read(path)
+          def replace_exact(text, old, new_text, expected = 1)
+            actual = text.scan(old).length
+            raise "expected #{expected} matches, got #{actual}: #{old.lines.first}" unless actual == expected
+            expected.times { text.sub!(old, new_text) }
+            text
+          end
+          reply_limit = <<'RUST'
+          /// Chunk limit for delivering a reply on `platform`. ACP is a WebSocket transport with
+          /// no small per-message limit, and its reply route closes after the first delivered
+          /// message. Deliver ACP replies whole so long responses are not truncated.
+          fn reply_message_limit(platform: &str, adapter_limit: usize) -> usize {
+              if platform == "acp" {
+                  usize::MAX
+              } else {
+                  adapter_limit
+              }
+          }
+          RUST
+          anchor = "}\n\n/// Parse `[[key:value]]` directives from the beginning of agent output."
+          text = replace_exact(text, anchor, "}\n\n#{reply_limit}\n/// Parse `[[key:value]]` directives from the beginning of agent output.")
+          old = <<'RUST'
+                  let message_limit = adapter.message_limit();
+                  let exposes_intermediate_text = adapter.exposes_intermediate_text();
+                  // A strict privacy-boundary adapter (Slack) never publishes raw agent
+                  // chunks while a turn is running. It keeps the status/progress message,
+                  // then sends only the finalized answer.
+                  let streaming =
+                      adapter.use_streaming(other_bot_present) && exposes_intermediate_text;
+          RUST
+          new_text = <<'RUST'
+                  let message_limit =
+                      reply_message_limit(&thread_channel.platform, adapter.message_limit());
+                  let exposes_intermediate_text = adapter.exposes_intermediate_text();
+                  // A strict privacy-boundary adapter (Slack) never publishes raw agent
+                  // chunks while a turn is running. ACP uses snapshot edits to produce
+                  // append-only agent_message_chunk updates, independent of Telegram streaming.
+                  let streaming = if thread_channel.platform == "acp" {
+                      false
+                  } else {
+                      adapter.use_streaming(other_bot_present) && exposes_intermediate_text
+                  };
+          RUST
+          text = replace_exact(text, old, new_text)
+          old = <<'RUST'
+                  let reply_tool_display = if tool_progress_enabled {
+                      ToolDisplay::None
+                  } else {
+                      tool_display
+                  };
+          RUST
+          new_text = old + <<'RUST'
+                  // ACP chunks are append-only; do not re-render tool prefixes into text deltas.
+                  let platform_is_acp = thread_channel.platform == "acp";
+          RUST
+          text = replace_exact(text, old, new_text)
+          text = replace_exact(
+            text,
+            "tx.send(compose_display(\n",
+            "tx.send(display_for(\n                                            platform_is_acp,\n",
+            3
+          )
+          text = replace_exact(
+            text,
+            "compose_display(&tool_lines, &text_buf, false, reply_tool_display);",
+            "display_for(\n                            platform_is_acp,\n                            &tool_lines,\n                            &text_buf,\n                            false,\n                            reply_tool_display,\n                        );"
+          )
+          display_for = <<'RUST'
+          /// Select content for a reply. ACP receives raw append-only answer text; other
+          /// platforms retain their existing tool-merged display.
+          fn display_for(
+              platform_is_acp: bool,
+              tool_lines: &[ToolEntry],
+              text: &str,
+              streaming: bool,
+              tool_display: ToolDisplay,
+          ) -> String {
+              if platform_is_acp {
+                  text.to_string()
+              } else {
+                  compose_display(tool_lines, text, streaming, tool_display)
+              }
+          }
+          RUST
+          text = replace_exact(text, "fn compose_display(\n", "#{display_for}\nfn compose_display(\n")
+          test = <<'RUST'
+              #[test]
+              fn acp_reply_limit_is_unbounded_others_use_adapter_limit() {
+                  assert_eq!(reply_message_limit("acp", 4096), usize::MAX);
+                  assert_eq!(reply_message_limit("discord", 2000), 2000);
+                  assert_eq!(reply_message_limit("slack", 4096), 4096);
+                  let long = "x".repeat(50_000);
+                  assert_eq!(
+                      crate::format::split_message(&long, reply_message_limit("acp", 4096)).len(),
+                      1
+                  );
+              }
+          RUST
+          text = replace_exact(text, "mod tests {\n    use super::*;\n", "mod tests {\n    use super::*;\n\n#{test}")
+          File.write(path, text)
+          RUBY
+            git add crates/openab-core/src/adapter.rs
+          fi
           perl -0pi -e 's/(\[package\]\nname = "openab"\nversion = )"0\.9\.9"/${1}"0.9.10"/' Cargo.toml
           perl -0pi -e 's/(\[package\]\nname = "openab-core"\nversion = )"0\.8\.13"/${1}"0.8.14"/' crates/openab-core/Cargo.toml
           perl -0pi -e 's/(\[package\]\nname = "openab-gateway"\nversion = )"0\.5\.9"/${1}"0.5.10"/' crates/openab-gateway/Cargo.toml
           cargo metadata --format-version 1 --no-deps > /dev/null
           git rm .github/workflows/codex-zer-579-port.yml
           git add .
+          git diff --cached --check
           git commit -m "feat: port ACP WebSocket server (ZER-579)"
           git push origin HEAD:codex/zer-579-acp-websocket
-      - name: Mark port success
-        if: success()
+      - name: Mark port result
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }} -f state=success -f context='ZER-579 port' -f description='Upstream ACP WebSocket change applied'
+        run: |
+          if [[ '${{ job.status }}' == 'success' ]]; then state=success; desc='Upstream ACP WebSocket change applied'; else state=failure; desc='ACP port failed; inspect workflow logs'; fi
+          gh api repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha || github.sha }} -f state="$state" -f context='ZER-579 port' -f description="$desc"
