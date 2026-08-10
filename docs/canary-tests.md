@@ -160,8 +160,8 @@ It needs a live deployment (prompt turns hit the real model) and a transport tok
 
 ```bash
 # WS_URL defaults to ws://localhost:8080/acp; pass another URL as $1.
-# OPENAB_ACP_TOKEN is MANDATORY — the endpoint requires a transport key off loopback.
-OPENAB_ACP_TOKEN=<key> uv run scripts/acp-ws-smoke.py ws://<host>:8080/acp
+# OPENAB_ACP_AUTH_KEY is MANDATORY — the endpoint requires a transport key off loopback.
+OPENAB_ACP_AUTH_KEY=<key> uv run scripts/acp-ws-smoke.py ws://<host>:8080/acp
 ```
 
 Exits non-zero unless every check passes. For the in-repo `cargo test` counterpart (offline wire-conformance + handler-level + streaming tests), see the `acp_conformance`, `acp_handlers`, and `acp_streaming` modules in `crates/openab-gateway/src/adapters/acp_server.rs`.
