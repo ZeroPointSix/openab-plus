@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, OwnedSemaphorePermit, Semaphore};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -30,11 +30,11 @@ use uuid::Uuid;
 /// Tracks the official schema — see `docs/acp-official-methods.md`.
 const ACP_PROTOCOL_VERSION: u32 = 1;
 
-/// Lightweight per-connection resource caps: turn unbounded client-driven growth into
-/// a deterministic overload error. Full backpressure (bounded outbound channel), idle
-/// eviction, and global connection/worker limits are a follow-up (review F6, roadmap).
+/// Resource caps turn client-driven growth into deterministic overload errors.
 const MAX_SESSIONS_PER_CONNECTION: usize = 128;
 const MAX_INFLIGHT_PROMPTS: usize = 32;
+const MAX_OUTBOUND_FRAMES: usize = 64;
+const MAX_REPLY_CHUNKS: usize = 32;
 const MAX_FRAME_BYTES: usize = 1 << 20; // 1 MiB per inbound JSON-RPC frame
 /// JSON-RPC implementation-defined server error for a hit resource cap.
 const ACP_OVERLOADED: i32 = -32000;
@@ -251,12 +251,13 @@ fn validate_params<T: serde::de::DeserializeOwned>(params: Option<&Value>) -> Re
 struct AcpSession {
     /// Channel ID used in GatewayEvent (maps replies back to this session)
     channel_id: String,
+    /// Connection that owns this session. Ownership is process-wide and exclusive.
+    owner_id: String,
     /// Whether a prompt is currently in-flight for this session
     busy: bool,
     /// Cancel signal for the in-flight prompt, if any. `session/cancel` fires
-    /// this so the streaming task stops gracefully and returns `stopReason:
-    /// "cancelled"` to the prompt's own request id (rather than hard-aborting
-    /// the task and orphaning that id).
+    /// this so the client gets `stopReason:"cancelled"`; the prompt task keeps
+    /// draining the backend until its terminal reply before it releases capacity.
     cancel: Option<Arc<tokio::sync::Notify>>,
 }
 
@@ -267,26 +268,117 @@ pub enum ReplyChunk {
     Done,
 }
 
-/// One active turn's reply sink plus the originating `GatewayEvent` id used to fence
-/// stale replies. After a prompt times out / is cancelled, the next prompt on the same
-/// session reuses the same deterministic `channel_id`; a late reply from the superseded
-/// turn carries that turn's `evt_<uuid>` in `GatewayReply.reply_to`, so matching it
-/// against `turn_id` drops it instead of mis-delivering into the new prompt's stream.
+/// One active turn's bounded reply sink plus ownership and stale-turn fences.
 pub struct ReplySink {
-    /// Originating `GatewayEvent.event_id` (`evt_<uuid>`), round-tripped as `reply_to`.
     pub turn_id: String,
-    pub tx: mpsc::UnboundedSender<ReplyChunk>,
+    pub owner_id: String,
+    pub tx: mpsc::Sender<ReplyChunk>,
 }
 
-/// Registry of active ACP sessions: channel_id → reply sink.
-/// Uses std::sync::Mutex because all operations are fast CPU-bound
-/// (insert/remove/get) and never hold the lock across .await.
-pub type AcpReplyRegistry = Arc<std::sync::Mutex<HashMap<String, ReplySink>>>;
+/// Process-wide ACP runtime state.
+pub struct AcpReplyState {
+    sinks: std::sync::Mutex<HashMap<String, ReplySink>>,
+    owners: std::sync::Mutex<HashMap<String, String>>,
+    backend_slots: Arc<Semaphore>,
+}
+
+pub type AcpReplyRegistry = Arc<AcpReplyState>;
+
+fn new_reply_registry_with_limit(max_backend_prompts: usize) -> AcpReplyRegistry {
+    Arc::new(AcpReplyState {
+        sinks: std::sync::Mutex::new(HashMap::new()),
+        owners: std::sync::Mutex::new(HashMap::new()),
+        backend_slots: Arc::new(Semaphore::new(max_backend_prompts)),
+    })
+}
 
 pub fn new_reply_registry() -> AcpReplyRegistry {
-    Arc::new(std::sync::Mutex::new(HashMap::new()))
+    new_reply_registry_with_limit(MAX_INFLIGHT_PROMPTS)
 }
 
+fn outbound_channel() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+    mpsc::channel(MAX_OUTBOUND_FRAMES)
+}
+
+fn reply_channel() -> (mpsc::Sender<ReplyChunk>, mpsc::Receiver<ReplyChunk>) {
+    mpsc::channel(MAX_REPLY_CHUNKS)
+}
+
+fn claim_session_owner(registry: &AcpReplyRegistry, channel_id: &str, owner_id: &str) -> bool {
+    let mut owners = registry.owners.lock().unwrap_or_else(|e| e.into_inner());
+    match owners.get(channel_id) {
+        Some(current) if current != owner_id => false,
+        Some(_) => true,
+        None => {
+            owners.insert(channel_id.to_string(), owner_id.to_string());
+            true
+        }
+    }
+}
+
+fn session_owner_matches(registry: &AcpReplyRegistry, channel_id: &str, owner_id: &str) -> bool {
+    registry
+        .owners
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(channel_id)
+        .is_some_and(|current| current == owner_id)
+}
+
+fn register_reply_sink(
+    registry: &AcpReplyRegistry,
+    channel_id: &str,
+    sink: ReplySink,
+) -> bool {
+    // Lock in the same owners -> sinks order as connection cleanup so ownership
+    // cannot be released between validation and sink insertion.
+    let owners = registry.owners.lock().unwrap_or_else(|e| e.into_inner());
+    if !owners
+        .get(channel_id)
+        .is_some_and(|current| current == &sink.owner_id)
+    {
+        return false;
+    }
+    let mut sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
+    if sinks.contains_key(channel_id) {
+        return false;
+    }
+    sinks.insert(channel_id.to_string(), sink);
+    true
+}
+
+fn remove_reply_sink_if_matches(
+    registry: &AcpReplyRegistry,
+    channel_id: &str,
+    owner_id: &str,
+    turn_id: &str,
+) {
+    let mut sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
+    if sinks
+        .get(channel_id)
+        .is_some_and(|sink| sink.owner_id == owner_id && sink.turn_id == turn_id)
+    {
+        sinks.remove(channel_id);
+    }
+}
+
+/// Release connection-owned sinks before owners while holding the owner lock. A
+/// reconnect cannot claim the session between those two cleanup operations.
+fn release_connection_state(registry: &AcpReplyRegistry, sessions: &[(String, String)]) {
+    let mut owners = registry.owners.lock().unwrap_or_else(|e| e.into_inner());
+    let mut sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
+    for (channel_id, owner_id) in sessions {
+        if owners.get(channel_id).is_some_and(|current| current == owner_id) {
+            if sinks
+                .get(channel_id)
+                .is_some_and(|sink| sink.owner_id == *owner_id)
+            {
+                sinks.remove(channel_id);
+            }
+            owners.remove(channel_id);
+        }
+    }
+}
 // ---------------------------------------------------------------------------
 // JSON-RPC types (minimal subset for ACP)
 // ---------------------------------------------------------------------------
@@ -410,6 +502,10 @@ pub async fn ws_upgrade(
 // ---------------------------------------------------------------------------
 
 async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
+    let Some(registry) = state.acp_reply_registry.clone() else {
+        warn!("ACP connection rejected: runtime registry is not configured");
+        return;
+    };
     let (mut ws_tx, mut ws_rx) = socket.split();
     let connection_id = format!("acp_conn_{}", Uuid::new_v4());
 
@@ -423,11 +519,12 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let mut initialized = false;
 
-    // Track spawned prompt tasks so we can abort on disconnect
+    // Track spawned prompt tasks so disconnect cleanup can drain backend work
     let mut prompt_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
-    // Channel for sending messages back to the client
-    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    // Bounded channel for every frame sent to the client. A slow reader now applies
+    // backpressure instead of allowing unbounded String accumulation.
+    let (out_tx, mut out_rx) = outbound_channel();
 
     // Forward outbound messages to WebSocket. Single choke point for every outbound
     // frame, so trace here rather than at each send site.
@@ -472,7 +569,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
             Err(e) => {
                 let err_resp =
                     JsonRpcResponse::error(Value::Null, -32700, format!("Parse error: {e}"));
-                let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap());
+                let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap()).await;
                 continue;
             }
         };
@@ -492,7 +589,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     -32600,
                     "Invalid Request: id must be a string, number, or null",
                 );
-                let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap());
+                let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap()).await;
                 continue;
             }
         }
@@ -503,7 +600,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 if !is_notification {
                     let err_resp =
                         JsonRpcResponse::error(Value::Null, -32600, format!("Invalid Request: {e}"));
-                    let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap()).await;
                 }
                 continue;
             }
@@ -515,7 +612,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 let id = req.id.clone().unwrap_or(Value::Null);
                 let err_resp =
                     JsonRpcResponse::error(id, -32600, "Invalid Request: jsonrpc must be \"2.0\"");
-                let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap());
+                let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap()).await;
             }
             continue;
         }
@@ -541,7 +638,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 let resp = handle_initialize(&req);
                 // Only mark the connection initialized when negotiation succeeded.
                 let negotiated_ok = resp.error.is_none();
-                let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                 if negotiated_ok {
                     initialized = true;
                 }
@@ -549,7 +646,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
             "session/new" => {
                 if !initialized {
                     let resp = JsonRpcResponse::error(id, -32002, "Not initialized");
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
                 // Required params per schema: { cwd, mcpServers }.
@@ -557,7 +654,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     validate_params::<crate::adapters::acp_schema::NewSessionRequest>(req.params.as_ref())
                 {
                     let resp = JsonRpcResponse::error(id, -32602, msg);
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
                 // Cap sessions per connection (deterministic overload, not unbounded).
@@ -567,16 +664,17 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                         ACP_OVERLOADED,
                         format!("Too many sessions on this connection (max {MAX_SESSIONS_PER_CONNECTION})"),
                     );
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
-                let resp = handle_session_new(&sessions, id.clone()).await;
-                let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                let resp =
+                    handle_session_new(&sessions, &registry, &connection_id, id.clone()).await;
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
             }
             "session/resume" => {
                 if !initialized {
                     let resp = JsonRpcResponse::error(id, -32002, "Not initialized");
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
                 // Required params per schema: { sessionId, cwd, mcpServers? }. The
@@ -585,16 +683,23 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     validate_params::<crate::adapters::acp_schema::ResumeSessionRequest>(req.params.as_ref())
                 {
                     let resp = JsonRpcResponse::error(id, -32602, msg);
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
-                let resp = handle_session_resume(&sessions, id.clone(), req.params.as_ref()).await;
-                let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                let resp = handle_session_resume(
+                    &sessions,
+                    &registry,
+                    &connection_id,
+                    id.clone(),
+                    req.params.as_ref(),
+                )
+                .await;
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
             }
             "session/prompt" => {
                 if !initialized {
                     let resp = JsonRpcResponse::error(id, -32002, "Not initialized");
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
                 // Cap concurrent in-flight prompts per connection (drop finished first).
@@ -605,7 +710,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                         ACP_OVERLOADED,
                         format!("Too many in-flight prompts (max {MAX_INFLIGHT_PROMPTS})"),
                     );
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
                 }
                 // Reserve this prompt's cancel state SYNCHRONOUSLY here — before spawning the
@@ -623,7 +728,21 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     Some(s) => s.to_string(),
                     None => {
                         let resp = JsonRpcResponse::error(id, -32602, "Missing sessionId");
-                        let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                        let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+                        continue;
+                    }
+                };
+                let backend_permit = match registry.backend_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        let resp = JsonRpcResponse::error(
+                            id,
+                            ACP_OVERLOADED,
+                            format!(
+                                "Too many ACP backend prompts (max {MAX_INFLIGHT_PROMPTS})"
+                            ),
+                        );
+                        let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                         continue;
                     }
                 };
@@ -638,7 +757,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                                 -32602,
                                 format!("Unknown session: {session_id}"),
                             );
-                            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                            let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                             continue;
                         }
                         Some(s) if s.busy => {
@@ -648,7 +767,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                                 -32001,
                                 "Session busy: a prompt is already in progress",
                             );
-                            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                            let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                             continue;
                         }
                         Some(s) => {
@@ -661,16 +780,19 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 // session/prompt is async — spawn a task to handle streaming
                 let state_clone = state.clone();
                 let sessions_clone = sessions.clone();
+                let registry_clone = registry.clone();
                 let out_tx_clone = out_tx.clone();
                 let handle = tokio::spawn(async move {
                     handle_session_prompt(
                         &state_clone,
                         &sessions_clone,
+                        &registry_clone,
                         id,
                         req.params.as_ref(),
                         &out_tx_clone,
                         session_id,
                         cancel,
+                        backend_permit,
                     )
                     .await;
                 });
@@ -682,7 +804,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 if let Some(resp) =
                     handle_session_cancel(&sessions, id, req.params.as_ref(), is_notification).await
                 {
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                 }
             }
             _ => {
@@ -693,7 +815,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                         -32601,
                         format!("Method not found: {}", req.method),
                     );
-                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                    let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                 }
             }
         }
@@ -703,35 +825,49 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
     }
 
     // --- Disconnect cleanup ---
-    // Abort any in-flight prompt tasks to prevent registry leaks
-    for handle in prompt_tasks {
-        handle.abort();
+    // Stop the socket writer first so bounded sends fail promptly. Signal every active
+    // prompt, then let its task keep draining the backend. This retains the global slot
+    // and session owner until the backend emits a terminal reply.
+    send_task.abort();
+    let active_cancels: Vec<Arc<tokio::sync::Notify>> = sessions
+        .lock()
+        .await
+        .values()
+        .filter_map(|session| session.cancel.clone())
+        .collect();
+    for cancel in active_cancels {
+        cancel.notify_one();
     }
 
-    // Remove all sessions for this connection from the reply registry
-    if let Some(ref registry) = state.acp_reply_registry {
-        let sessions_guard = sessions.lock().await;
-        let channel_ids: Vec<String> = sessions_guard
-            .values()
-            .map(|s| s.channel_id.clone())
-            .collect();
-        drop(sessions_guard);
-
-        let mut reg = registry.lock().unwrap_or_else(|e| e.into_inner());
-        for cid in &channel_ids {
-            reg.remove(cid);
+    let has_prompt_tasks = !prompt_tasks.is_empty();
+    let cleanup_registry = registry.clone();
+    let cleanup_sessions = sessions.clone();
+    let cleanup_connection = connection_id.clone();
+    let cleanup = async move {
+        for handle in prompt_tasks {
+            let _ = handle.await;
         }
+        let owned_sessions: Vec<(String, String)> = cleanup_sessions
+            .lock()
+            .await
+            .values()
+            .map(|session| (session.channel_id.clone(), session.owner_id.clone()))
+            .collect();
+        release_connection_state(&cleanup_registry, &owned_sessions);
         debug!(
-            connection = %connection_id,
-            sessions_cleaned = channel_ids.len(),
+            connection = %cleanup_connection,
+            sessions_cleaned = owned_sessions.len(),
             "ACP connection cleanup complete"
         );
+    };
+    if has_prompt_tasks {
+        tokio::spawn(cleanup);
+    } else {
+        cleanup.await;
     }
 
-    send_task.abort();
-    info!(connection = %connection_id, "ACP client disconnected");
+    info!(connection = %connection_id, draining = has_prompt_tasks, "ACP client disconnected");
 }
-
 // ---------------------------------------------------------------------------
 // Method handlers
 // ---------------------------------------------------------------------------
@@ -788,47 +924,37 @@ fn handle_initialize(req: &JsonRpcRequest) -> JsonRpcResponse {
 
 async fn handle_session_new(
     sessions: &Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
+    registry: &AcpReplyRegistry,
+    owner_id: &str,
     id: Value,
 ) -> JsonRpcResponse {
-    // sessionId and channel_id share one uuid so channel_id is always
-    // re-derivable from a persisted sessionId (see session/resume).
     let uuid = Uuid::new_v4();
     let session_id = format!("sess_{uuid}");
     let channel_id = format!("acp_{uuid}");
 
+    if !claim_session_owner(registry, &channel_id, owner_id) {
+        return JsonRpcResponse::error(id, -32001, "Session ownership collision");
+    }
     sessions.lock().await.insert(
         session_id.clone(),
         AcpSession {
             channel_id,
+            owner_id: owner_id.to_string(),
             busy: false,
             cancel: None,
         },
     );
 
-    // Downgraded from info! — sessionId is a resume capability; keep it out of normal logs (F12).
     debug!(session = %session_id, "ACP session created");
-
-    // ACP session/new response is just { sessionId }.
     JsonRpcResponse::success(id, json!({ "sessionId": session_id }))
 }
 
-/// `session/resume` — re-attach to a session the client persisted, WITHOUT
-/// replaying history (per ACP: the agent MUST NOT replay via session/update).
-///
-/// The client re-presents its `sessionId`; we derive the same deterministic
-/// `channel_id`, so the next prompt's GatewayEvent maps to the same core
-/// `session_key` (`acp:<channel_id>`) and the existing conversation continues.
-/// The core recovers the underlying agent session via its own persisted mapping
-/// plus a downstream `session/load` (survives process restart within the agent's
-/// retention / `session_ttl_hours`). Whether that succeeds is not observable
-/// here — an expired session simply starts fresh, and the core prefixes its
-/// first reply with a "Session expired" notice the client can surface.
-///
-/// Security: `sessionId` is a server-minted, high-entropy capability;
-/// `derive_channel_id` requires a well-formed `sess_<uuid>`, keeping the channel
-/// inside the `acp_` namespace and rejecting forged ids.
+/// `session/resume` re-attaches without replay. A session has exactly one live
+/// connection owner; a concurrent reconnect must retry after the old owner drains.
 async fn handle_session_resume(
     sessions: &Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
+    registry: &AcpReplyRegistry,
+    owner_id: &str,
     id: Value,
     params: Option<&Value>,
 ) -> JsonRpcResponse {
@@ -849,9 +975,6 @@ async fn handle_session_resume(
     };
 
     let mut guard = sessions.lock().await;
-    // Same per-connection cap as session/new: resume must not be an unbounded insert
-    // path (a client can mint unlimited valid `sess_<uuid>`). An already-present key is
-    // exempt so re-resuming an existing session stays idempotent.
     if !guard.contains_key(&session_id) && guard.len() >= MAX_SESSIONS_PER_CONNECTION {
         return JsonRpcResponse::error(
             id,
@@ -859,11 +982,6 @@ async fn handle_session_resume(
             format!("Too many sessions on this connection (max {MAX_SESSIONS_PER_CONNECTION})"),
         );
     }
-    // R16-F2: refuse to resume a session that currently has a prompt in flight. The insert
-    // below unconditionally rewrites AcpSession{busy:false,cancel:None}, which would drop the
-    // active turn's cancel handle — and then that turn's cleanup would clobber the resumed
-    // state / registry entry, losing its replies. A busy session is already live on this
-    // connection, so reject deterministically instead of stomping it.
     if guard.get(&session_id).is_some_and(|s| s.busy) {
         return JsonRpcResponse::error(
             id,
@@ -871,22 +989,27 @@ async fn handle_session_resume(
             "Session busy: a prompt is in progress; cannot resume",
         );
     }
+    if !claim_session_owner(registry, &channel_id, owner_id) {
+        return JsonRpcResponse::error(
+            id,
+            -32001,
+            "Session is active on another connection; retry after it disconnects",
+        );
+    }
     guard.insert(
         session_id.clone(),
         AcpSession {
             channel_id,
+            owner_id: owner_id.to_string(),
             busy: false,
             cancel: None,
         },
     );
     drop(guard);
 
-    debug!(session = %session_id, "ACP session resumed");
-
-    // ACP session/resume response is an empty object (no history replay).
+    debug!(session = %session_id, owner = owner_id, "ACP session resumed");
     JsonRpcResponse::success(id, json!({}))
 }
-
 /// Handle `session/cancel`. Per ACP it is a one-way NOTIFICATION: the notification form
 /// (no `id`) fires the session's cancel signal — the in-flight prompt observes it, cleans
 /// up, and returns `stopReason:"cancelled"` to the prompt's own request id — and produces
@@ -941,39 +1064,45 @@ async fn release_prompt(
 async fn handle_session_prompt(
     state: &Arc<crate::AppState>,
     sessions: &Arc<tokio::sync::Mutex<HashMap<String, AcpSession>>>,
+    registry: &AcpReplyRegistry,
     id: Value,
     params: Option<&Value>,
-    out_tx: &mpsc::UnboundedSender<String>,
-    // The caller (read loop) already reserved this session SYNCHRONOUSLY: `busy = true` and
-    // `cancel` installed under the session lock (R16-F1). This task owns releasing it on return.
+    out_tx: &mpsc::Sender<String>,
     session_id: String,
     cancel: Arc<tokio::sync::Notify>,
+    _backend_permit: OwnedSemaphorePermit,
 ) {
-    // sessionId was validated + reserved by the caller; only the prompt body can still be bad.
     let prompt_text = match extract_prompt_params(params) {
         Ok((_sid, text)) => text,
         Err(e) => {
             let resp = JsonRpcResponse::error(id, -32602, e);
-            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+            let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
             release_prompt(sessions, &session_id).await;
             return;
         }
     };
 
-    // The session was reserved a moment ago under the lock; just read its channel_id.
-    let channel_id = match sessions.lock().await.get(&session_id) {
-        Some(s) => s.channel_id.clone(),
+    let (channel_id, owner_id) = match sessions.lock().await.get(&session_id) {
+        Some(session) => (session.channel_id.clone(), session.owner_id.clone()),
         None => {
             let resp =
                 JsonRpcResponse::error(id, -32602, format!("Unknown session: {session_id}"));
-            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+            let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
             release_prompt(sessions, &session_id).await;
             return;
         }
     };
+    if !session_owner_matches(registry, &channel_id, &owner_id) {
+        let resp = JsonRpcResponse::error(
+            id,
+            -32001,
+            "Session ownership moved to another connection",
+        );
+        let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+        release_prompt(sessions, &session_id).await;
+        return;
+    }
 
-    // Convert to GatewayEvent and dispatch. Build it first so its `event_id` can fence
-    // this turn's replies (round-tripped as `GatewayReply.reply_to`).
     let event = GatewayEvent::new(
         "acp",
         ChannelInfo {
@@ -993,40 +1122,43 @@ async fn handle_session_prompt(
     );
     let turn_id = event.event_id.clone();
 
-    // Create reply channel for this prompt and register it, keyed by channel_id with the
-    // turn's event id so `handle_reply` can drop a stale reply after timeout/cancel reuse.
-    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<ReplyChunk>();
-    if let Some(ref registry) = state.acp_reply_registry {
-        registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(channel_id.clone(), ReplySink { turn_id, tx: reply_tx });
+    let (reply_tx, mut reply_rx) = reply_channel();
+    if !register_reply_sink(
+        registry,
+        &channel_id,
+        ReplySink {
+            turn_id: turn_id.clone(),
+            owner_id: owner_id.clone(),
+            tx: reply_tx,
+        },
+    ) {
+        let resp = JsonRpcResponse::error(
+            id,
+            -32001,
+            "Session already has active backend work",
+        );
+        let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+        release_prompt(sessions, &session_id).await;
+        return;
     }
 
-    // Send event through the broadcast channel
     match serde_json::to_string(&event) {
         Ok(json) => {
             if state.event_tx.send(json).is_err() {
-                // No receivers — agent/core not connected
-                warn!("ACP: event_tx send failed — no agent connected");
-                let resp = JsonRpcResponse::error(
-                    id,
-                    -32603,
-                    "No agent backend connected",
-                );
-                let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+                warn!("ACP: event_tx send failed - no agent connected");
+                let resp =
+                    JsonRpcResponse::error(id, -32603, "No agent backend connected");
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+                remove_reply_sink_if_matches(registry, &channel_id, &owner_id, &turn_id);
                 release_prompt(sessions, &session_id).await;
-                // Cleanup registry
-                if let Some(ref registry) = state.acp_reply_registry {
-                    registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&channel_id);
-                }
                 return;
             }
         }
         Err(e) => {
             warn!("ACP: failed to serialize event: {e}");
             let resp = JsonRpcResponse::error(id, -32603, "Internal error");
-            let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+            let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+            remove_reply_sink_if_matches(registry, &channel_id, &owner_id, &turn_id);
             release_prompt(sessions, &session_id).await;
             return;
         }
@@ -1034,30 +1166,32 @@ async fn handle_session_prompt(
 
     debug!(session = %session_id, channel = %channel_id, "ACP: prompt dispatched");
 
-    // Stream replies back as ACP `session/update` notifications.
     let mut sent_len = 0usize;
     let timeout = tokio::time::Duration::from_secs(180);
-    let mut stop_reason = "end_turn";
-    let mut timed_out = false;
+    let mut client_response_sent = false;
+    let mut backend_channel_closed = false;
 
     loop {
         tokio::select! {
-            // session/cancel fired — stop gracefully.
-            _ = cancel.notified() => {
-                stop_reason = "cancelled";
-                break;
+            _ = cancel.notified(), if !client_response_sent => {
+                let resp = JsonRpcResponse::success(
+                    id.clone(),
+                    json!({ "stopReason": "cancelled" }),
+                );
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+                client_response_sent = true;
             }
-            recv = tokio::time::timeout(timeout, reply_rx.recv()) => {
+            recv = reply_rx.recv() => {
                 match recv {
-                    Ok(Some(ReplyChunk::Text(full_text))) => {
-                        // Emit new text as an `agent_message_chunk` update. See
-                        // `stream_delta` for the char-boundary safety guarantee.
+                    Some(ReplyChunk::Text(full_text)) => {
+                        if client_response_sent {
+                            continue;
+                        }
                         let delta = match stream_delta(sent_len, &full_text) {
-                            Some(d) => d,
+                            Some(delta) => delta,
                             None => continue,
                         };
                         sent_len = full_text.len();
-
                         let notification = JsonRpcNotification {
                             jsonrpc: "2.0",
                             method: "session/update".into(),
@@ -1069,44 +1203,39 @@ async fn handle_session_prompt(
                                 }
                             }),
                         };
-                        let _ = out_tx.send(serde_json::to_string(&notification).unwrap());
+                        let _ = out_tx
+                            .send(serde_json::to_string(&notification).unwrap())
+                            .await;
                     }
-                    Ok(Some(ReplyChunk::Done)) | Ok(None) => break,
-                    Err(_) => {
-                        warn!(session = %session_id, "ACP: prompt timed out waiting for reply");
-                        timed_out = true;
+                    Some(ReplyChunk::Done) => break,
+                    None => {
+                        backend_channel_closed = true;
                         break;
                     }
                 }
             }
+            _ = tokio::time::sleep(timeout), if !client_response_sent => {
+                warn!(session = %session_id, "ACP: prompt timed out waiting for reply");
+                let resp =
+                    JsonRpcResponse::error(id.clone(), -32603, "Timed out waiting for agent backend");
+                let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+                client_response_sent = true;
+            }
         }
     }
 
-    // Cleanup: remove from registry, release busy flag, clear cancel signal.
-    // INVARIANT (R16-F1/F2): this unconditional remove/reset is safe ONLY because no newer
-    // turn can exist on this `session_id` while this one runs — both entry points that would
-    // start one are busy-gated (`session/prompt` and `session/resume` reject with -32001 when
-    // `s.busy`). If that gating is ever relaxed (e.g. multi-turn-per-session), this must become
-    // turn/owner-aware (compare the active `turn_id` before `remove`) or it will clobber the
-    // newer turn's sink. Cross-connection same-session races remain an accepted residual (F5).
-    if let Some(ref registry) = state.acp_reply_registry {
-        registry.lock().unwrap_or_else(|e| e.into_inner()).remove(&channel_id);
-    }
-    if let Some(s) = sessions.lock().await.get_mut(&session_id) {
-        s.busy = false;
-        s.cancel = None;
-    }
+    remove_reply_sink_if_matches(registry, &channel_id, &owner_id, &turn_id);
+    release_prompt(sessions, &session_id).await;
 
-    // Final response. A backend timeout has no ACP stopReason, so it is an error;
-    // otherwise return the turn's PromptResponse { stopReason }.
-    let resp = if timed_out {
-        JsonRpcResponse::error(id, -32603, "Timed out waiting for agent backend")
-    } else {
-        JsonRpcResponse::success(id, json!({ "stopReason": stop_reason }))
-    };
-    let _ = out_tx.send(serde_json::to_string(&resp).unwrap());
+    if !client_response_sent {
+        let resp = if backend_channel_closed {
+            JsonRpcResponse::error(id, -32603, "Agent backend reply channel closed")
+        } else {
+            JsonRpcResponse::success(id, json!({ "stopReason": "end_turn" }))
+        };
+        let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
+    }
 }
-
 fn extract_prompt_params(params: Option<&Value>) -> Result<(String, String), String> {
     let params = params.ok_or("Missing params")?;
     let session_id = params
@@ -1190,21 +1319,18 @@ pub async fn handle_reply(reply: &GatewayReply, registry: &AcpReplyRegistry) {
     }
 
     let full_text = reply.content.text.clone();
-    // Skip placeholder/draft messages
     if full_text == "…" || full_text == "draft" {
         return;
     }
 
-    let tx = {
-        let map = registry.lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(key) {
-            // Fence stale replies: after a timeout/cancel the channel_id is reused by the
-            // next turn. A late reply carries the previous turn's `evt_<uuid>` in
-            // `reply_to`; deliver only when it matches the active turn. Empty `reply_to`
-            // (no origin id) fails open so legit traffic is never dropped.
-            Some(sink) if reply.reply_to.is_empty() || reply.reply_to == sink.turn_id => {
-                sink.tx.clone()
-            }
+    let (tx, owner_id, turn_id) = {
+        let sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
+        match sinks.get(key) {
+            Some(sink) if reply.reply_to.is_empty() || reply.reply_to == sink.turn_id => (
+                sink.tx.clone(),
+                sink.owner_id.clone(),
+                sink.turn_id.clone(),
+            ),
             Some(_) => {
                 debug!(channel = key, "ACP dropping stale reply from a superseded turn");
                 return;
@@ -1215,25 +1341,23 @@ pub async fn handle_reply(reply: &GatewayReply, registry: &AcpReplyRegistry) {
 
     match reply.command.as_deref() {
         Some("edit_message") => {
-            // Streaming update — send as text snapshot
-            if tx.send(ReplyChunk::Text(full_text)).is_err() {
-                debug!(channel = key, "ACP reply send failed (client likely disconnected)");
-                registry.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+            if tx.try_send(ReplyChunk::Text(full_text)).is_err() {
+                warn!(channel = key, "ACP reply queue full or closed; dropping active sink");
+                remove_reply_sink_if_matches(registry, key, &owner_id, &turn_id);
             }
         }
         None | Some("send_message") => {
-            // Final message
-            let _ = tx.send(ReplyChunk::Text(full_text));
-            let _ = tx.send(ReplyChunk::Done);
-            registry.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+            let text_sent = tx.try_send(ReplyChunk::Text(full_text)).is_ok();
+            let done_sent = text_sent && tx.try_send(ReplyChunk::Done).is_ok();
+            if !done_sent {
+                warn!(channel = key, "ACP final reply queue full or closed");
+            }
+            remove_reply_sink_if_matches(registry, key, &owner_id, &turn_id);
         }
-        Some("add_reaction") | Some("remove_reaction") => {
-            // Reactions are agent state indicators — could map to notifications later
-        }
+        Some("add_reaction") | Some("remove_reaction") => {}
         _ => {}
     }
 }
-
 // ---------------------------------------------------------------------------
 // Conformance guard — the wire this server hand-rolls MUST validate against the
 // generated ACP v1 types (`acp_schema`). Any casing / field-name / shape drift
@@ -1591,7 +1715,8 @@ mod acp_streaming {
 #[cfg(test)]
 mod acp_handlers {
     use super::{
-        handle_initialize, handle_session_new, handle_session_resume, AcpSession, JsonRpcRequest,
+        handle_initialize, handle_session_new, handle_session_resume, new_reply_registry,
+        AcpSession, JsonRpcRequest,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1641,7 +1766,11 @@ mod acp_handlers {
     #[tokio::test]
     async fn session_new_mints_and_stores_a_session() {
         let sessions = new_sessions();
-        let v = serde_json::to_value(handle_session_new(&sessions, json!(2)).await).unwrap();
+        let registry = new_reply_registry();
+        let v = serde_json::to_value(
+            handle_session_new(&sessions, &registry, "conn_a", json!(2)).await,
+        )
+        .unwrap();
         let sid = v["result"]["sessionId"].as_str().unwrap();
         assert!(sid.starts_with("sess_"), "sessionId must be sess_<uuid>: {sid}");
         assert!(sessions.lock().await.contains_key(sid), "session must be stored");
@@ -1650,21 +1779,33 @@ mod acp_handlers {
     #[tokio::test]
     async fn session_resume_valid_stores_and_invalid_errors() {
         let sessions = new_sessions();
+        let registry = new_reply_registry();
         // valid sess_<uuid> → {} and the session is (re)stored
         let sid = format!("sess_{}", Uuid::new_v4());
         let params = json!({"sessionId": sid, "cwd": "/w", "mcpServers": []});
-        let v = serde_json::to_value(handle_session_resume(&sessions, json!(3), Some(&params)).await)
-            .unwrap();
+        let v = serde_json::to_value(
+            handle_session_resume(&sessions, &registry, "conn_a", json!(3), Some(&params)).await,
+        )
+        .unwrap();
         assert_eq!(v["result"], json!({}));
         assert!(sessions.lock().await.contains_key(&sid));
         // malformed sessionId shape → -32602
         let bad = json!({"sessionId": "not-a-session", "cwd": "/w", "mcpServers": []});
-        let v = serde_json::to_value(handle_session_resume(&sessions, json!(4), Some(&bad)).await)
-            .unwrap();
+        let v = serde_json::to_value(
+            handle_session_resume(&sessions, &registry, "conn_a", json!(4), Some(&bad)).await,
+        )
+        .unwrap();
         assert_eq!(v["error"]["code"], json!(-32602));
         // missing sessionId → -32602
         let v = serde_json::to_value(
-            handle_session_resume(&sessions, json!(5), Some(&json!({"cwd": "/w"}))).await,
+            handle_session_resume(
+                &sessions,
+                &registry,
+                "conn_a",
+                json!(5),
+                Some(&json!({"cwd": "/w"})),
+            )
+            .await,
         )
         .unwrap();
         assert_eq!(v["error"]["code"], json!(-32602));
@@ -1691,26 +1832,54 @@ mod acp_review_fixes {
     #[tokio::test]
     async fn resume_enforces_session_cap() {
         let sessions = sessions_map();
+        let registry = new_reply_registry();
+        let owner_id = "conn_a";
         let mut ids = Vec::new();
         for _ in 0..MAX_SESSIONS_PER_CONNECTION {
             let sid = format!("sess_{}", Uuid::new_v4());
             let p = json!({ "sessionId": sid });
-            let v = serde_json::to_value(handle_session_resume(&sessions, json!(1), Some(&p)).await)
-                .unwrap();
+            let v = serde_json::to_value(
+                handle_session_resume(
+                    &sessions,
+                    &registry,
+                    owner_id,
+                    json!(1),
+                    Some(&p),
+                )
+                .await,
+            )
+            .unwrap();
             assert_eq!(v["result"], json!({}), "resume under cap should succeed");
             ids.push(sid);
         }
         assert_eq!(sessions.lock().await.len(), MAX_SESSIONS_PER_CONNECTION);
         // A new distinct session over the cap is refused with ACP_OVERLOADED.
         let over = json!({ "sessionId": format!("sess_{}", Uuid::new_v4()) });
-        let v = serde_json::to_value(handle_session_resume(&sessions, json!(2), Some(&over)).await)
-            .unwrap();
+        let v = serde_json::to_value(
+            handle_session_resume(
+                &sessions,
+                &registry,
+                owner_id,
+                json!(2),
+                Some(&over),
+            )
+            .await,
+        )
+        .unwrap();
         assert_eq!(v["error"]["code"], json!(ACP_OVERLOADED), "over-cap resume must be refused");
         // Re-resuming an already-present session is exempt (idempotent).
         let existing = json!({ "sessionId": ids[0] });
-        let v =
-            serde_json::to_value(handle_session_resume(&sessions, json!(3), Some(&existing)).await)
-                .unwrap();
+        let v = serde_json::to_value(
+            handle_session_resume(
+                &sessions,
+                &registry,
+                owner_id,
+                json!(3),
+                Some(&existing),
+            )
+            .await,
+        )
+        .unwrap();
         assert_eq!(v["result"], json!({}), "re-resume of existing session must bypass the cap");
     }
 
@@ -1736,11 +1905,17 @@ mod acp_review_fixes {
     #[tokio::test]
     async fn handle_reply_fences_stale_turn() {
         let registry = new_reply_registry();
-        let (tx, mut rx) = mpsc::unbounded_channel::<ReplyChunk>();
-        registry
-            .lock()
-            .unwrap()
-            .insert("acp_chan".into(), ReplySink { turn_id: "evt_current".into(), tx });
+        assert!(claim_session_owner(&registry, "acp_chan", "conn_a"));
+        let (tx, mut rx) = reply_channel();
+        assert!(register_reply_sink(
+            &registry,
+            "acp_chan",
+            ReplySink {
+                turn_id: "evt_current".into(),
+                owner_id: "conn_a".into(),
+                tx,
+            },
+        ));
 
         // Stale reply (previous turn's event id) → dropped.
         handle_reply(&reply("acp_chan", "evt_stale", "leaked", Some("edit_message")), &registry)
@@ -1754,6 +1929,172 @@ mod acp_review_fixes {
             Ok(ReplyChunk::Text(t)) => assert_eq!(t, "hello"),
             _ => panic!("expected the matching reply to be delivered"),
         }
+    }
+
+    // R18-F1 — only one connection can own a resumed session. Cleanup from an
+    // earlier owner is fenced and cannot delete a replacement owner's state.
+    #[tokio::test]
+    async fn concurrent_resume_has_one_owner_and_stale_cleanup_is_fenced() {
+        let registry = new_reply_registry();
+        let sessions_a = sessions_map();
+        let sessions_b = sessions_map();
+        let sid = format!("sess_{}", Uuid::new_v4());
+        let channel_id = derive_channel_id(&sid).unwrap();
+        let params = json!({ "sessionId": sid });
+
+        let first = serde_json::to_value(
+            handle_session_resume(
+                &sessions_a,
+                &registry,
+                "conn_a",
+                json!(1),
+                Some(&params),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(first["result"], json!({}));
+
+        let concurrent = serde_json::to_value(
+            handle_session_resume(
+                &sessions_b,
+                &registry,
+                "conn_b",
+                json!(2),
+                Some(&params),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(
+            concurrent["error"]["code"],
+            json!(-32001),
+            "a concurrent resume must not steal the active owner"
+        );
+
+        release_connection_state(
+            &registry,
+            &[(channel_id.clone(), "conn_a".to_string())],
+        );
+        let replacement = serde_json::to_value(
+            handle_session_resume(
+                &sessions_b,
+                &registry,
+                "conn_b",
+                json!(3),
+                Some(&params),
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(replacement["result"], json!({}));
+
+        let (tx, _rx) = reply_channel();
+        assert!(register_reply_sink(
+            &registry,
+            &channel_id,
+            ReplySink {
+                turn_id: "evt_new".into(),
+                owner_id: "conn_b".into(),
+                tx,
+            },
+        ));
+
+        // Delayed prompt completion and disconnect cleanup from conn_a must not
+        // remove conn_b's ownership or its active reply sink.
+        remove_reply_sink_if_matches(
+            &registry,
+            &channel_id,
+            "conn_a",
+            "evt_old",
+        );
+        release_connection_state(
+            &registry,
+            &[(channel_id.clone(), "conn_a".to_string())],
+        );
+        assert!(session_owner_matches(&registry, &channel_id, "conn_b"));
+        assert!(
+            registry
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&channel_id)
+                .is_some_and(|sink| {
+                    sink.owner_id == "conn_b" && sink.turn_id == "evt_new"
+                }),
+            "stale cleanup must not remove the replacement owner's sink"
+        );
+    }
+
+    // R18-F3 — both transport queues are bounded. A slow client cannot grow
+    // an unbounded backlog, and an overflowing backend stream drops its sink.
+    #[tokio::test]
+    async fn outbound_queue_is_bounded() {
+        let (tx, mut rx) = outbound_channel();
+        for i in 0..MAX_OUTBOUND_FRAMES {
+            tx.try_send(format!("frame-{i}")).unwrap();
+        }
+        assert!(
+            tx.try_send("overflow".into()).is_err(),
+            "the client frame queue must reject capacity + 1"
+        );
+        assert_eq!(rx.recv().await.as_deref(), Some("frame-0"));
+        assert!(tx.try_send("replacement".into()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn overflowing_reply_queue_removes_active_sink() {
+        let registry = new_reply_registry();
+        assert!(claim_session_owner(&registry, "acp_slow", "conn_a"));
+        let (tx, _rx) = reply_channel();
+        assert!(register_reply_sink(
+            &registry,
+            "acp_slow",
+            ReplySink {
+                turn_id: "evt_slow".into(),
+                owner_id: "conn_a".into(),
+                tx,
+            },
+        ));
+
+        for i in 0..MAX_REPLY_CHUNKS {
+            handle_reply(
+                &reply(
+                    "acp_slow",
+                    "evt_slow",
+                    &format!("snapshot-{i}"),
+                    Some("edit_message"),
+                ),
+                &registry,
+            )
+            .await;
+        }
+        assert!(
+            registry
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key("acp_slow")
+        );
+
+        handle_reply(
+            &reply(
+                "acp_slow",
+                "evt_slow",
+                "overflow",
+                Some("edit_message"),
+            ),
+            &registry,
+        )
+        .await;
+        assert!(
+            !registry
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key("acp_slow"),
+            "overflow must fail closed by removing the active sink"
+        );
     }
 
     // R17-F1 — keyless-mode browser `Origin` gating. A WS handshake bypasses the browser
@@ -1812,56 +2153,137 @@ mod acp_review_fixes {
         }
     }
 
-    // R16-F1 — the read loop now reserves the prompt's cancel state SYNCHRONOUSLY (busy + a
-    // cancel Notify installed under the session lock) before spawning the handler. So a
-    // `session/cancel` arriving before the handler reaches its stream `select!` still cancels
-    // the turn: `tokio::Notify` stores one permit, so a pre-fired cancel is consumed by
-    // `cancel.notified()` (stopReason "cancelled") rather than lost. Before the fix the cancel
-    // installed inside the spawned task, so an immediate cancel read `s.cancel == None`.
+    // R18-F2 — cancellation ends the client request immediately but the backend
+    // slot and session reservation stay held until a terminal backend reply arrives.
+    // This prevents prompt/cancel loops from bypassing the process-wide cap.
     #[tokio::test]
-    async fn prompt_cancel_race_before_first_update_cancels() {
+    async fn cancel_keeps_backend_slot_until_terminal_reply() {
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<String>(16);
+        let registry = new_reply_registry_with_limit(1);
         let mut st = crate::AppState::test_default(event_tx);
-        st.acp_reply_registry = Some(new_reply_registry());
+        st.acp_reply_registry = Some(registry.clone());
         let state = Arc::new(st);
 
         let sessions = sessions_map();
         let sid = format!("sess_{}", Uuid::new_v4());
+        let channel_id = format!("acp_{}", Uuid::new_v4());
+        let owner_id = "conn_a";
+        assert!(claim_session_owner(&registry, &channel_id, owner_id));
         let cancel = Arc::new(tokio::sync::Notify::new());
         sessions.lock().await.insert(
             sid.clone(),
             AcpSession {
-                channel_id: format!("acp_{}", Uuid::new_v4()),
+                channel_id: channel_id.clone(),
+                owner_id: owner_id.into(),
                 busy: true,
                 cancel: Some(cancel.clone()),
             },
         );
-        // Cancel arrives before the handler's stream loop (reserved-then-immediate-cancel).
-        cancel.notify_one();
 
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
-        let params = json!({"sessionId": sid, "prompt": [{"type": "text", "text": "hi"}]});
-        handle_session_prompt(&state, &sessions, json!(7), Some(&params), &out_tx, sid.clone(), cancel)
+        let backend_permit = registry
+            .backend_slots
+            .clone()
+            .try_acquire_owned()
+            .expect("the only backend slot should be available");
+        let (out_tx, mut out_rx) = outbound_channel();
+        let st2 = state.clone();
+        let sessions2 = sessions.clone();
+        let registry2 = registry.clone();
+        let sid2 = sid.clone();
+        let cancel2 = cancel.clone();
+        let handle = tokio::spawn(async move {
+            let params =
+                json!({"sessionId": sid2, "prompt": [{"type": "text", "text": "hi"}]});
+            handle_session_prompt(
+                &st2,
+                &sessions2,
+                &registry2,
+                json!(7),
+                Some(&params),
+                &out_tx,
+                sid2.clone(),
+                cancel2,
+                backend_permit,
+            )
             .await;
+        });
 
-        // The final response (matching our request id) must carry stopReason "cancelled".
-        let mut final_resp = None;
-        while let Ok(s) = out_rx.try_recv() {
-            let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-            if v.get("id") == Some(&json!(7)) {
-                final_resp = Some(v);
+        let mut turn_id = None;
+        for _ in 0..10_000 {
+            if let Some(turn) = registry
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&channel_id)
+                .map(|sink| sink.turn_id.clone())
+            {
+                turn_id = Some(turn);
+                break;
             }
+            tokio::task::yield_now().await;
         }
-        let resp = final_resp.expect("prompt must produce a final response");
-        assert_eq!(
-            resp["result"]["stopReason"],
-            json!("cancelled"),
-            "an immediate cancel must cancel the turn, not be dropped"
+        let turn_id = turn_id.expect("handler must register a reply sink");
+
+        cancel.notify_one();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            async {
+                loop {
+                    let frame = out_rx.recv().await.expect("client response channel closed");
+                    let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                    if value.get("id") == Some(&json!(7)) {
+                        break value;
+                    }
+                }
+            },
+        )
+        .await
+        .expect("cancelled response must be immediate");
+        assert_eq!(cancelled["result"]["stopReason"], json!("cancelled"));
+        assert!(
+            registry
+                .backend_slots
+                .clone()
+                .try_acquire_owned()
+                .is_err(),
+            "cancel must not recycle the backend slot before terminal completion"
         );
-        // And the reservation is released.
-        let g = sessions.lock().await;
-        let s = g.get(&sid).unwrap();
-        assert!(!s.busy && s.cancel.is_none(), "cancel must release busy + cancel handle");
+        assert!(
+            sessions.lock().await.get(&sid).unwrap().busy,
+            "cancel must keep the session reserved while backend work drains"
+        );
+
+        handle_reply(
+            &reply(
+                &channel_id,
+                &turn_id,
+                "late backend result",
+                Some("send_message"),
+            ),
+            &registry,
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), handle)
+            .await
+            .expect("terminal reply must finish the draining task")
+            .unwrap();
+
+        let _released = registry
+            .backend_slots
+            .clone()
+            .try_acquire_owned()
+            .expect("terminal completion must release the backend slot");
+        let session = sessions.lock().await;
+        let session = session.get(&sid).unwrap();
+        assert!(!session.busy && session.cancel.is_none());
+        while let Ok(frame) = out_rx.try_recv() {
+            let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_ne!(
+                value.get("method"),
+                Some(&json!("session/update")),
+                "backend text after cancellation must not leak to the client"
+            );
+        }
     }
 
     // R16-F2 — session/resume on a session with a prompt in flight is rejected (busy), so the
@@ -1869,21 +2291,34 @@ mod acp_review_fixes {
     #[tokio::test]
     async fn resume_while_busy_is_rejected_and_preserves_state() {
         let sessions = sessions_map();
+        let registry = new_reply_registry();
         let sid = format!("sess_{}", Uuid::new_v4());
+        let channel_id = derive_channel_id(&sid).unwrap();
+        let owner_id = "conn_a";
+        assert!(claim_session_owner(&registry, &channel_id, owner_id));
         let cancel = Arc::new(tokio::sync::Notify::new());
         sessions.lock().await.insert(
             sid.clone(),
             AcpSession {
-                channel_id: format!("acp_{}", Uuid::new_v4()),
+                channel_id,
+                owner_id: owner_id.into(),
                 busy: true,
                 cancel: Some(cancel.clone()),
             },
         );
 
         let params = json!({"sessionId": sid, "cwd": "/w", "mcpServers": []});
-        let v =
-            serde_json::to_value(handle_session_resume(&sessions, json!(9), Some(&params)).await)
-                .unwrap();
+        let v = serde_json::to_value(
+            handle_session_resume(
+                &sessions,
+                &registry,
+                owner_id,
+                json!(9),
+                Some(&params),
+            )
+            .await,
+        )
+        .unwrap();
         assert_eq!(v["error"]["code"], json!(-32001), "resume while busy must be rejected");
 
         // The in-flight turn's state survives untouched.
@@ -1907,26 +2342,55 @@ mod acp_review_fixes {
         let sessions = sessions_map();
         let sid = format!("sess_{}", Uuid::new_v4());
         let channel_id = format!("acp_{}", Uuid::new_v4());
+        let owner_id = "conn_a";
+        assert!(claim_session_owner(&registry, &channel_id, owner_id));
         let cancel = Arc::new(tokio::sync::Notify::new());
         sessions.lock().await.insert(
             sid.clone(),
-            AcpSession { channel_id: channel_id.clone(), busy: true, cancel: Some(cancel.clone()) },
+            AcpSession {
+                channel_id: channel_id.clone(),
+                owner_id: owner_id.into(),
+                busy: true,
+                cancel: Some(cancel.clone()),
+            },
         );
 
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+        let backend_permit = registry
+            .backend_slots
+            .clone()
+            .try_acquire_owned()
+            .expect("backend slot should be available");
+        let (out_tx, mut out_rx) = outbound_channel();
         let st2 = state.clone();
         let sessions2 = sessions.clone();
+        let registry2 = registry.clone();
         let sid2 = sid.clone();
         let handle = tokio::spawn(async move {
             let params = json!({"sessionId": sid2, "prompt": [{"type": "text", "text": "hi"}]});
-            handle_session_prompt(&st2, &sessions2, json!(11), Some(&params), &out_tx, sid2.clone(), cancel)
-                .await;
+            handle_session_prompt(
+                &st2,
+                &sessions2,
+                &registry2,
+                json!(11),
+                Some(&params),
+                &out_tx,
+                sid2.clone(),
+                cancel,
+                backend_permit,
+            )
+            .await;
         });
 
         // Wait for the handler to register its reply sink, then feed one final reply.
         let mut turn_id = None;
         for _ in 0..10_000 {
-            if let Some(t) = registry.lock().unwrap().get(&channel_id).map(|s| s.turn_id.clone()) {
+            if let Some(t) = registry
+                .sinks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&channel_id)
+                .map(|sink| sink.turn_id.clone())
+            {
                 turn_id = Some(t);
                 break;
             }
@@ -1984,6 +2448,7 @@ mod acp_review_fixes {
             sid.clone(),
             AcpSession {
                 channel_id: format!("acp_{}", Uuid::new_v4()),
+                owner_id: "conn_a".into(),
                 busy: true,
                 cancel: Some(cancel.clone()),
             },
