@@ -119,7 +119,7 @@ impl AcpConfig {
                  token set (RFC 6455) — a browser passing it via `Sec-WebSocket-Protocol: \
                  openab.bearer.<token>` may fail the handshake (base64 `/` and `=` padding \
                  are the usual offenders). Prefer a key in [A-Za-z0-9._~+-]; the \
-                 `Authorization: Bearer` and `?token=` paths are unaffected"
+                 `Authorization: Bearer` path is unaffected"
             ),
             Some(_) => {}
         }
@@ -1115,9 +1115,9 @@ fn extract_prompt_params(params: Option<&Value>) -> Result<(String, String), Str
 
     // Per the ACP schema the generated `PromptRequest.prompt` is `[ContentBlock]`; a plain
     // string (or any non-array) is non-conformant and rejected below (-32602), never
-    // leniently coerced. The base is text-only: an unsupported block type (image / audio /
-    // resource / resource_link) is rejected explicitly rather than silently dropped, so the
-    // client knows its content was not delivered.
+    // leniently coerced. The base accepts text and SSRF-safe resource_link references;
+    // capability-gated blocks (image / audio / embedded resource) are rejected explicitly
+    // rather than silently dropped, so the client knows its content was not delivered.
     let text = if let Some(arr) = prompt.as_array() {
         let mut parts: Vec<String> = Vec::with_capacity(arr.len());
         for block in arr {
