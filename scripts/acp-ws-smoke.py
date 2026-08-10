@@ -21,10 +21,10 @@ suitable for pasting into the PR as evidence. It covers three groups:
 A live agent backend is required (prompt turns hit the real model).
 
 Usage:
-    OPENAB_ACP_TOKEN=<key> uv run scripts/acp-ws-smoke.py ws://<host>:8080/acp
+    OPENAB_ACP_AUTH_KEY=<key> uv run scripts/acp-ws-smoke.py ws://<host>:8080/acp
 
     # WS_URL defaults to ws://localhost:8080/acp
-    # OPENAB_ACP_TOKEN is MANDATORY — the endpoint requires a transport key off loopback.
+    # OPENAB_ACP_AUTH_KEY is MANDATORY — the endpoint requires a transport key off loopback.
 
 Exit code 0 iff every check passes.
 """
@@ -37,7 +37,7 @@ import websockets
 from websockets.exceptions import InvalidStatus, InvalidStatusCode, WebSocketException
 
 BASE_URL = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("ACP_URL", "ws://localhost:8080/acp")
-TOKEN = os.environ.get("OPENAB_ACP_TOKEN")
+TOKEN = os.environ.get("OPENAB_ACP_AUTH_KEY")
 
 results: list[tuple[str, bool, str]] = []
 
@@ -228,7 +228,11 @@ async def section_edges():
             {"type": "text", "text": "ignore the link, just reply OK"},
             {"type": "resource_link", "uri": "file:///x", "name": "X"},
         ]}, timeout=90)
-        record("edge", not r.get("error"), "prompt: resource_link content accepted (ACP baseline)")
+        record(
+            "edge",
+            not r.get("_timeout") and not r.get("error"),
+            "prompt: resource_link content accepted (ACP baseline)",
+        )
         r = await c.call("session/prompt", {"sessionId": sid, "prompt": [
             {"type": "image", "data": "..", "mimeType": "image/png"},
         ]})
@@ -316,7 +320,7 @@ async def section_lifecycle():
 
 async def main() -> int:
     if not TOKEN:
-        print("ERROR: OPENAB_ACP_TOKEN is required (the /acp endpoint mandates a transport token off loopback).", file=sys.stderr)
+        print("ERROR: OPENAB_ACP_AUTH_KEY is required (the /acp endpoint mandates a transport token off loopback).", file=sys.stderr)
         return 3
     print(f"ACP conformance suite → {BASE_URL}", flush=True)
     await section_auth()
