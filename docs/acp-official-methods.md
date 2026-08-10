@@ -87,14 +87,12 @@ The chat subset is **wire-conformant** with ACP Schema v1.19.0:
   `session/update` `agent_message_chunk` → `{stopReason}`) drives a real backend
   (cursor-agent) and streams replies to a WebSocket client (a Chrome side-panel
   extension + a raw `ws` client). `scripts/acp-ws-smoke.py` reproduces this.
-- **Known limits (verified 2026-07-18; tracked follow-ups, not yet fixed)** —
-  - **Long replies truncate.** A reply larger than the adapter's message limit is
-    split into several messages, but the ACP reply route is closed after the first
-    one, so overflow chunks are dropped (a 900-line reply arrived as ~413 lines).
-    Review F2.
-  - **Cancel does not stop the backend.** `session/cancel` returns
-    `stopReason:"cancelled"` to the waiter, but the downstream model/tool work
-    continues. Review F3.
+- **Long replies (fixed in ZER-579)** — ACP now keeps the reply route open until
+  it delivers the complete response. `scripts/acp-ws-smoke.py` verifies an
+  oversized reply and fails when content is missing.
+- **Known limit (verified 2026-07-18; tracked follow-up)** — `session/cancel`
+  returns `stopReason:"cancelled"` to the waiter, but the downstream model or
+  tool work continues. Review F3.
 - **Still unverified** — field-level exactness of `agentCapabilities` /
   `clientCapabilities` sub-objects against a *third-party* ACP client (e.g. Zed), and
   `ContentBlock` variants beyond `text` (image / audio / resource).
