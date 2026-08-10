@@ -974,6 +974,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_update_clears_stale_runtime_model_and_thinking() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            String::new(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.replace_runtime_metadata(SessionRuntimeMetadata::acp(
+            Some("Codex ACP".into()),
+            Some("gpt-5".into()),
+            Some("high".into()),
+        ));
+        outer.seed_session_snapshot_for_test(snapshot).await;
+
+        outer.record_session_config_update("slack:thread", &[]).await;
+
+        let snapshot = outer
+            .session_snapshot("slack:thread")
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.agent, "Codex ACP");
+        assert_eq!(snapshot.model, None);
+        assert_eq!(snapshot.reasoning_effort, None);
+        assert_eq!(snapshot.metadata_source, Some(SessionMetadataSource::Acp));
+    }
+
+    #[tokio::test]
     async fn recovered_session_records_profile_config_errors() {
         let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
         let mut snapshot = SessionSnapshot::new(
