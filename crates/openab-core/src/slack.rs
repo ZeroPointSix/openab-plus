@@ -425,6 +425,44 @@ fn enforce_cache_bounds(
     }
 }
 
+/// Convert a Slack message ts (`"1754987654.123456"`) to the `p…` fragment
+/// used in permalinks: the dot is removed and the fractional part is
+/// right-padded to 6 digits. Returns None for malformed timestamps.
+fn slack_ts_permalink_fragment(ts: &str) -> Option<String> {
+    let (secs, frac) = ts.split_once('.')?;
+    if secs.is_empty() || !secs.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let frac: String = frac.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if frac.is_empty() {
+        return None;
+    }
+    let mut frac = frac;
+    while frac.len() < 6 {
+        frac.push('0');
+    }
+    frac.truncate(6);
+    Some(format!("p{secs}{frac}"))
+}
+
+/// Build the Slack client permalink for a session's source thread without any
+/// extra API call: `app.slack.com/client/{team}/{channel}/p{ts}` opens the
+/// thread parent, and the `thread_ts` query opens the thread pane itself.
+/// Returns None when the team or thread ts is unknown (e.g. channel-level
+/// sessions), in which case the console simply hides the source button.
+fn slack_thread_permalink(team_id: &str, channel: &ChannelRef) -> Option<String> {
+    let team_id = team_id.trim();
+    if team_id.is_empty() || channel.channel_id.is_empty() {
+        return None;
+    }
+    let thread_ts = channel.thread_id.as_deref()?;
+    let fragment = slack_ts_permalink_fragment(thread_ts)?;
+    let channel_id = &channel.channel_id;
+    Some(format!(
+        "https://app.slack.com/client/{team_id}/{channel_id}/{fragment}?thread_ts={thread_ts}&cid={channel_id}"
+    ))
+}
+
 #[async_trait]
 impl ChatAdapter for SlackAdapter {
     fn platform(&self) -> &'static str {
@@ -1807,6 +1845,17 @@ async fn handle_message(
         .thread_id
         .as_deref()
         .unwrap_or(&thread_channel.channel_id);
+
+    // Backfill the session's source permalink so the admin console can link
+    // back to the originating Slack thread (ZER-669). Idempotent — the pool
+    // skips the write when the value is unchanged.
+    if let Some(permalink) = slack_thread_permalink(team_id, &thread_channel) {
+        router
+            .pool()
+            .record_session_source_permalink(&format!("slack:{thread_id}"), permalink)
+            .await;
+    }
+
     let thread_key = dispatcher.key("slack", thread_id, &sender.sender_id);
     let estimated_tokens = crate::dispatch::estimate_tokens(&prompt, &extra_blocks);
     let buf_msg = crate::dispatch::BufferedMessage {
@@ -2616,6 +2665,44 @@ mod tests {
         let ttl = std::time::Duration::from_secs(300);
         let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Mentions, true, crate::multibot_cache::MultibotCache::load("/dev/null".into()), true);
         assert!(adapter.renders_native_tables("slack"));
+    }
+    // --- Source thread permalink (ZER-669) ---
+
+    #[test]
+    fn slack_ts_permalink_fragment_pads_fraction_to_six_digits() {
+        assert_eq!(
+            slack_ts_permalink_fragment("1754987654.123456"),
+            Some("p1754987654123456".to_string())
+        );
+        assert_eq!(
+            slack_ts_permalink_fragment("1754987654.1"),
+            Some("p1754987654100000".to_string())
+        );
+        assert_eq!(slack_ts_permalink_fragment("no-dot"), None);
+        assert_eq!(slack_ts_permalink_fragment("abc.def"), None);
+    }
+
+    #[test]
+    fn slack_thread_permalink_links_thread_pane() {
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C123".into(),
+            thread_id: Some("1754987654.123456".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let url = slack_thread_permalink("T123", &channel).expect("permalink");
+        assert_eq!(
+            url,
+            "https://app.slack.com/client/T123/C123/p1754987654123456?thread_ts=1754987654.123456&cid=C123"
+        );
+        // Channel-level session (no thread ts) or unknown team → no permalink.
+        let channel_level = ChannelRef {
+            thread_id: None,
+            ..channel
+        };
+        assert!(slack_thread_permalink("T123", &channel_level).is_none());
+        assert!(slack_thread_permalink("", &channel_level).is_none());
     }
 }
 

@@ -671,7 +671,7 @@ fn configured_model(
         .or_else(|| model_from_agent_env(config))
 }
 
-fn model_from_agent_env(config: &AgentConfig, key: &str) -> Option<String> {
+fn model_from_agent_env(config: &AgentConfig) -> Option<String> {
     for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "CLAUDE_MODEL"] {
         if let Some(value) = agent_env_value(config, key) {
             return Some(value);
