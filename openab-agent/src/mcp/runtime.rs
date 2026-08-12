@@ -1533,8 +1533,7 @@ impl McpRuntimeManager {
                     super::redact_secrets(&format!("{e:#}"))
                 );
                 handle.status = ServerStatus::Failed(super::concise_error_message(&e));
-                self.breaker
-                    .record_failure_if_current(name, failure_epoch);
+                self.breaker.record_failure_if_current(name, failure_epoch);
                 Err(anyhow!(super::concise_error_message(&e)))
             }
         }
@@ -1573,8 +1572,7 @@ impl McpRuntimeManager {
         if ok {
             self.breaker.record_success(name);
         } else {
-            self.breaker
-                .record_failure_if_current(name, failure_epoch);
+            self.breaker.record_failure_if_current(name, failure_epoch);
         }
     }
 

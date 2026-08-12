@@ -128,10 +128,7 @@ impl ServerBreaker {
     /// state receive the same epoch, so only their first failure is counted.
     pub fn failure_epoch(&self, server: &str) -> u64 {
         let mut entries = self.entries.lock().expect("breaker mutex poisoned");
-        entries
-            .entry(server.to_string())
-            .or_default()
-            .failure_epoch
+        entries.entry(server.to_string()).or_default().failure_epoch
     }
 
     /// Record a transport-level failure for `server`. When the count
