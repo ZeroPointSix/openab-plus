@@ -93,7 +93,7 @@ export function SessionMainPanel({
                 target="_blank"
                 rel="noreferrer"
               >
-                打开来源
+                打开会话链接
               </Button>
             ) : null}
             {inspectorToggle}
