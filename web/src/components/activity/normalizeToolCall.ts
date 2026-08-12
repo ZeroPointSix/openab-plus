@@ -134,6 +134,16 @@ function diffFromContent(content: unknown): FileDiffPayload | undefined {
   return undefined;
 }
 
+function diffsFromContent(content: unknown): FileDiffPayload[] {
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => diffFromContent(item))
+      .filter((diff): diff is FileDiffPayload => diff !== undefined);
+  }
+  const diff = diffFromContent(content);
+  return diff ? [diff] : [];
+}
+
 function terminalFromContent(content: unknown): TerminalOutputPayload | undefined {
   const record = asRecord(content);
   if (!record || typeof record.command !== 'string') return undefined;
@@ -168,7 +178,7 @@ export function normalizeToolCall(message: ToolCallLike): NormalizedToolCall | u
   const rawInput = message.rawInput ?? message.raw_input ?? message.args;
   const contentRecord = asRecord(message.content);
   const terminal = terminalFromContent(contentRecord) ?? terminalFromContent(message.output);
-  const diff = diffFromContent(contentRecord) ?? diffFromContent(message.output);
+  const diffs = [...diffsFromContent(message.content), ...diffsFromContent(message.output)];
   const kind = message.kind || message.name;
   const key = message.call_id || message.id;
   if (!key) return undefined;
@@ -183,7 +193,8 @@ export function normalizeToolCall(message: ToolCallLike): NormalizedToolCall | u
     output: formatToolValue(message.output) ?? outputFromContent(message.content),
     duration_ms: message.duration_ms ?? message.durationMs,
     truncated: message.truncated === true || message._compact?.truncated === true,
-    diff,
+    diff: diffs[0],
+    diffs: diffs.length ? diffs : undefined,
     terminal,
   };
 }

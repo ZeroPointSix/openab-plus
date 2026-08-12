@@ -82,7 +82,10 @@ export interface NormalizedToolCall {
   output?: string;
   duration_ms?: number;
   truncated?: boolean;
+  /** @deprecated Use diffs; retained for one-diff snapshot compatibility. */
   diff?: FileDiffPayload;
+  /** All file changes reported by a tool call, including ACP update.content arrays. */
+  diffs?: FileDiffPayload[];
   terminal?: TerminalOutputPayload;
 }
 

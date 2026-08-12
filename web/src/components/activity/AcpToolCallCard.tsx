@@ -49,7 +49,8 @@ export function AcpToolCallCard({ tool }: { tool: NormalizedToolCall }) {
   const status = statusMeta(tool.status);
   const summary = tool.description || tool.kind || '无参数摘要';
   const duration = durationText(tool.duration_ms);
-  const hasDetails = Boolean(tool.input || tool.output || tool.diff || tool.terminal);
+  const diffs = tool.diffs || (tool.diff ? [tool.diff] : []);
+  const hasDetails = Boolean(tool.input || tool.output || diffs.length || tool.terminal);
 
   return (
     <Card size="small" className={`activity-tool-card ${tool.status}`}>
@@ -93,7 +94,9 @@ export function AcpToolCallCard({ tool }: { tool: NormalizedToolCall }) {
                     <Typography.Text type="warning">结果已截断，仅显示安全预览。</Typography.Text>
                   ) : null}
                   {tool.terminal ? <TerminalOutput terminal={tool.terminal} /> : null}
-                  {tool.diff ? <FileDiff diff={tool.diff} /> : null}
+                  {diffs.map((diff, index) => (
+                    <FileDiff diff={diff} key={`${diff.path}-${index}`} />
+                  ))}
                 </div>
               ),
             },
