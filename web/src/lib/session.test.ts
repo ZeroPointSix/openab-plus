@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
+  initialTimeline,
   parseSessionEventPayload,
   sessionMetrics,
   timelineItemFromEvent,
+  visibleTimelineItems,
 } from './session';
 import { SessionSnapshot } from '../types';
 
@@ -89,5 +91,20 @@ describe('session helpers', () => {
     expect(previous?.id).toBe('generation-a:1:status_changed');
     expect(restarted?.id).toBe('generation-b:1:status_changed');
     expect(previous?.id).not.toBe(restarted?.id);
+  });
+
+  it('drops seed timeline entries once replayed stream events arrive', () => {
+    const seeds = initialTimeline(sessions[0]);
+    expect(seeds.length).toBeGreaterThan(0);
+    // 只有种子条目时原样展示（SSE 尚未补齐历史时的兜底）。
+    expect(visibleTimelineItems(seeds)).toEqual(seeds);
+
+    const replayed = timelineItemFromEvent(
+      { sequence: 7, event: 'session.created', snapshot: sessions[0] },
+      'gen:7',
+    );
+    expect(replayed).not.toBeNull();
+    // 真实的流事件（带 sequence）到达后，种子条目被过滤，避免重复。
+    expect(visibleTimelineItems([...seeds, replayed!])).toEqual([replayed]);
   });
 });
