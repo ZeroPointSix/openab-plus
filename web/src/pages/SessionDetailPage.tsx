@@ -13,6 +13,7 @@ import {
   Button,
   Descriptions,
   Empty,
+  message,
   Space,
   Spin,
   Timeline,
@@ -24,7 +25,11 @@ import {
 } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { adminApi } from '../lib/api';
-import { eventLabel, formatDateTime } from '../lib/format';
+import {
+  eventLabel,
+  formatDateTime,
+  sessionStatusDisplay,
+} from '../lib/format';
 import { initialTimeline } from '../lib/session';
 import { SessionTimelineItem } from '../types';
 import { StatusTag } from '../components/StatusTag';
@@ -75,6 +80,21 @@ export function SessionDetailPage() {
 
   const session = sessionQuery.data;
   const timeline = timelineQuery.data || [];
+  const sourcePlatformLabel =
+    session.source.platform === 'slack'
+      ? 'Slack'
+      : session.source.platform === 'discord'
+        ? 'Discord'
+        : session.source.platform;
+  const copySessionLink = async () => {
+    if (!session.external_url) return;
+    try {
+      await navigator.clipboard.writeText(session.external_url);
+      message.success('会话链接已复制');
+    } catch {
+      message.error('复制会话链接失败');
+    }
+  };
   const metadataSourceLabel =
     session.metadata_source === 'acp'
       ? 'ACP 运行时'
@@ -97,14 +117,23 @@ export function SessionDetailPage() {
         </Button>,
         session.external_url ? (
           <Button
-            key="external"
+            key="copy-session-link"
             type="primary"
             icon={<LinkOutlined />}
-            href={session.external_url}
+            onClick={() => void copySessionLink()}
+          >
+            复制会话链接
+          </Button>
+        ) : null,
+        session.source.permalink ? (
+          <Button
+            key="source-permalink"
+            icon={<LinkOutlined />}
+            href={session.source.permalink}
             target="_blank"
             rel="noreferrer"
           >
-            打开来源
+            回到 {sourcePlatformLabel}
           </Button>
         ) : null,
       ]}
@@ -137,11 +166,8 @@ export function SessionDetailPage() {
             <Timeline
               items={[...timeline].reverse().map((item) => ({
                 color:
-                  item.status === 'error'
-                    ? 'red'
-                    : item.status === 'running'
-                      ? 'green'
-                      : 'blue',
+                  (sessionStatusDisplay[item.status] || sessionStatusDisplay.unknown)
+                    .timelineColor,
                 dot:
                   item.status === 'error' ? (
                     <ExclamationCircleFilled />

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
+  mergeTimelineItem,
   parseSessionEventPayload,
   sessionMetrics,
   timelineItemFromEvent,
@@ -74,6 +75,26 @@ describe('session helpers', () => {
         JSON.stringify({ error: 'event history unavailable' }),
       ),
     ).toBeNull();
+  });
+
+  it('replaces temporary detail seeds when real history arrives', () => {
+    const initial = [
+      {
+        id: 'initial:created',
+        event: 'session.created',
+        status: 'idle' as const,
+        at: sessions[0].created_at,
+      },
+    ];
+    const historical = {
+      id: 'generation-a:1:session.created',
+      event: 'session.created',
+      status: 'idle' as const,
+      at: sessions[0].created_at,
+    };
+
+    expect(mergeTimelineItem(initial, historical)).toEqual([historical]);
+    expect(mergeTimelineItem([historical], historical)).toEqual([historical]);
   });
 
   it('uses the full SSE id to disambiguate timeline events across restarts', () => {

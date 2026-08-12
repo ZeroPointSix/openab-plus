@@ -85,6 +85,19 @@ export function applySessionEvent(
   return sortSessions(sessions);
 }
 
+export function mergeTimelineItem(
+  current: SessionTimelineItem[] | undefined,
+  timelineItem: SessionTimelineItem,
+): SessionTimelineItem[] {
+  const timeline = (current || []).filter(
+    (item) => !item.id.startsWith('initial:'),
+  );
+  if (timeline.some((item) => item.id === timelineItem.id)) {
+    return timeline;
+  }
+  return [...timeline, timelineItem].slice(-60);
+}
+
 export function timelineItemFromEvent(
   event: SessionEventPayload,
   streamEventId?: string,
@@ -106,7 +119,7 @@ export function initialTimeline(
 ): SessionTimelineItem[] {
   const items: SessionTimelineItem[] = [
     {
-      id: 'created',
+      id: 'initial:created',
       event: 'session.created',
       status: 'idle',
       at: session.created_at,
@@ -117,7 +130,7 @@ export function initialTimeline(
     session.status !== 'idle'
   ) {
     items.push({
-      id: 'current',
+      id: 'initial:current',
       event: 'current',
       status: session.status,
       at: session.updated_at,
