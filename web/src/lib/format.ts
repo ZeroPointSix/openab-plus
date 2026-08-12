@@ -1,3 +1,17 @@
+import {
+  SESSION_STATUS_DISPLAY,
+  SESSION_STATUS_FILTER_OPTIONS,
+} from './sessionStatus';
+
+export const statusLabels: Record<string, string> = Object.fromEntries(
+  Object.entries(SESSION_STATUS_DISPLAY).map(([status, display]) => [
+    status,
+    display.label,
+  ]),
+);
+
+export const sessionStatusOptions = SESSION_STATUS_FILTER_OPTIONS;
+
 /**
  * 平台标识 → 展示名称。用于「回到 Slack / Discord」等来源跳转文案。
  */

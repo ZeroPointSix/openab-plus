@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Conversations } from '@ant-design/x';
-import type { Conversation } from '@ant-design/x';
+import type { ConversationsProps } from '@ant-design/x';
 import {
   FilterOutlined,
   PlusOutlined,
@@ -70,7 +70,7 @@ export function SessionSidebar({
     );
   }, [keyword, sessions, status]);
 
-  const items = useMemo<Conversation[]>(
+  const items = useMemo<NonNullable<ConversationsProps['items']>>(
     () =>
       visibleSessions.map((session) => ({
         key: session.session_id,
