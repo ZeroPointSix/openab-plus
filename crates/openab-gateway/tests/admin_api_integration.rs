@@ -11,9 +11,7 @@ use openab_core::acp::SessionPool;
 use openab_core::agent_profile::AgentProfile;
 use openab_core::config::AgentConfig;
 use openab_core::session_event::SessionEventKind;
-use openab_core::session_snapshot::{
-    SessionRuntimeMetadata, SessionSnapshot, SessionStatus,
-};
+use openab_core::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -734,4 +732,136 @@ async fn unified_router_mounts_session_and_profile_admin_routes() {
             "{path} should be mounted on the unified admin router"
         );
     }
+}
+
+#[tokio::test]
+async fn transcript_snapshot_supports_full_and_after_replay() {
+    let env = AdminTestEnv::new().await;
+    let pool = env.pool();
+    let session_id = "slack:transcript-thread";
+    pool.seed_session_snapshot_for_test(SessionSnapshot::new(
+        session_id.into(),
+        "codex".into(),
+        "/workspace".into(),
+        None,
+        None,
+        None,
+        None,
+    ))
+    .await;
+
+    let transcripts = pool.transcript_store();
+    let user = transcripts.record_user_text(session_id, "Summarize this change");
+    transcripts.append_assistant_text(session_id, "The change ");
+    transcripts.append_assistant_text(session_id, "adds transcript storage.");
+    transcripts.finish_assistant_turn(session_id);
+
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let encoded_id = urlencoding::encode(session_id);
+    let full = client
+        .get(format!(
+            "{}/api/v1/sessions/{encoded_id}/transcript",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get full transcript")
+        .json::<Value>()
+        .await
+        .expect("full transcript json");
+
+    assert_eq!(full["session_id"], session_id);
+    assert_eq!(full["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(full["entries"][0]["role"], "user");
+    assert_eq!(
+        full["entries"][1]["content"],
+        "The change adds transcript storage."
+    );
+    assert_eq!(full["entries"][1]["status"], "completed");
+
+    let incremental = client
+        .get(format!(
+            "{}/api/v1/sessions/{encoded_id}/transcript?after={}",
+            server.base_url, user.entry.sequence
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get incremental transcript")
+        .json::<Value>()
+        .await
+        .expect("incremental transcript json");
+    let entries = incremental["entries"]
+        .as_array()
+        .expect("incremental entries");
+    assert!(!entries.is_empty());
+    assert!(entries
+        .iter()
+        .all(|entry| entry["sequence"].as_u64().unwrap() > user.entry.sequence));
+    assert_eq!(incremental["overflowed"], false);
+
+    let missing = client
+        .get(format!(
+            "{}/api/v1/sessions/missing/transcript",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("missing transcript");
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn sse_emits_and_replays_transcript_events_with_shared_cursor() {
+    let env = AdminTestEnv::new().await;
+    let pool = env.pool();
+    let session_id = "slack:transcript-sse";
+    pool.seed_session_snapshot_for_test(SessionSnapshot::new(
+        session_id.into(),
+        "codex".into(),
+        "/workspace".into(),
+        None,
+        None,
+        None,
+        None,
+    ))
+    .await;
+
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let sse_url = format!("{}/api/v1/sessions/events", server.base_url);
+    let mut response = client
+        .get(&sse_url)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("open transcript sse");
+
+    let first = pool
+        .transcript_store()
+        .record_user_text(session_id, "first transcript event");
+    let (first_id, first_event) = read_sse_event(&mut response, "transcript").await;
+    let stream_bus = pool.session_stream_bus();
+    assert_eq!(first_id, Some(stream_bus.event_id(first.sequence)));
+    assert_eq!(first_event["session_id"], session_id);
+    assert_eq!(first_event["entry"]["role"], "user");
+    assert_eq!(first_event["entry"]["content"], "first transcript event");
+
+    let second = pool
+        .transcript_store()
+        .append_assistant_text(session_id, "second transcript event");
+    let mut replay = client
+        .get(&sse_url)
+        .bearer_auth(&env.token)
+        .header("Last-Event-ID", stream_bus.event_id(first.sequence))
+        .send()
+        .await
+        .expect("open transcript replay sse");
+    let (second_id, second_event) = read_sse_event(&mut replay, "transcript").await;
+    assert_eq!(second_id, Some(stream_bus.event_id(second.sequence)));
+    assert_eq!(second_event["session_id"], session_id);
+    assert_eq!(second_event["entry"]["content"], "second transcript event");
 }
