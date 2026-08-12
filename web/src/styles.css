@@ -741,6 +741,10 @@ select {
   max-width: 180px;
 }
 
+.workbench-sidebar-newchat-tooltip {
+  display: block;
+}
+
 .workbench-mobile-controls {
   display: none;
 }

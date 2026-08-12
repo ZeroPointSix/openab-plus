@@ -15,6 +15,17 @@ interface SessionInspectorProps {
   hasSelection: boolean;
 }
 
+type AlertItem = {
+  key: string;
+  type: 'error' | 'warning';
+  message: string;
+  description: string;
+};
+
+function isAlertItem(item: AlertItem | null): item is AlertItem {
+  return item !== null;
+}
+
 export function SessionInspector({
   session,
   timeline,
@@ -58,7 +69,7 @@ export function SessionInspector({
       message: 'Profile 配置告警 · ' + error.config_id,
       description: error.error,
     })),
-  ].filter(Boolean);
+  ].filter(isAlertItem);
 
   const tabItems = [
     {
@@ -126,18 +137,16 @@ export function SessionInspector({
       children: (
         <div className="inspector-tab-body">
           {alertItems.length ? (
-            alertItems.map((item) =>
-              item ? (
-                <Alert
-                  key={item.key}
-                  type={item.type}
-                  showIcon
-                  message={item.message}
-                  description={item.description}
-                  className="inspector-alert"
-                />
-              ) : null,
-            )
+            alertItems.map((item) => (
+              <Alert
+                key={item.key}
+                type={item.type}
+                showIcon
+                message={item.message}
+                description={item.description}
+                className="inspector-alert"
+              />
+            ))
           ) : (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}

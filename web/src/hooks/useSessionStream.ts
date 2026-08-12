@@ -77,12 +77,16 @@ export function useSessionStream(enabled: boolean): StreamStatus {
 
               const event = parseSessionEventPayload(message.data);
               if (!event) {
-                queryClient.setQueriesData<SessionTimelineItem[]>(
-                  { queryKey: ['sessionTimeline'] },
-                  [],
-                );
-                void queryClient.invalidateQueries({ queryKey: ['sessions'] });
-                void queryClient.invalidateQueries({ queryKey: ['session'] });
+                // Cursor reset and replay diagnostics contain no session snapshot.
+                // Re-sync the server state without discarding any timeline already
+                // displayed for another session.
+                if (
+                  message.event === 'cursor_reset' ||
+                  message.event === 'error'
+                ) {
+                  void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+                  void queryClient.invalidateQueries({ queryKey: ['session'] });
+                }
                 return;
               }
 

@@ -4,6 +4,7 @@ import {
   filterSessions,
   parseSessionEventPayload,
   sessionMetrics,
+  sortSessions,
   timelineItemFromEvent,
 } from './session';
 import { SessionSnapshot } from '../types';
@@ -46,6 +47,24 @@ describe('session helpers', () => {
       running: 1,
       failed: 1,
     });
+  });
+
+  it('sorts by the instant represented by timestamps across time zones', () => {
+    const [newest, oldest] = sortSessions([
+      {
+        ...sessions[0],
+        session_id: 'slack:newest',
+        updated_at: '2026-08-12T06:43:22Z',
+      },
+      {
+        ...sessions[1],
+        session_id: 'discord:oldest',
+        updated_at: '2026-08-12T14:42:22+08:00',
+      },
+    ]);
+
+    expect(newest.session_id).toBe('slack:newest');
+    expect(oldest.session_id).toBe('discord:oldest');
   });
 
   it('upserts a snapshot received from SSE', () => {

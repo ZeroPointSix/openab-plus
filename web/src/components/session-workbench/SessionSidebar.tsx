@@ -5,7 +5,16 @@ import {
   SearchOutlined,
 } from '@ant-design/icons';
 import { Conversations } from '@ant-design/x';
-import { Button, Empty, Input, Select, Space, Spin, Typography } from 'antd';
+import {
+  Button,
+  Empty,
+  Input,
+  Select,
+  Space,
+  Spin,
+  Tooltip,
+  Typography,
+} from 'antd';
 import { filterSessions } from '../../lib/session';
 import { formatRelativeTime } from '../../lib/format';
 import { SessionFilters, SessionSnapshot } from '../../types';
@@ -130,14 +139,13 @@ export function SessionSidebar({
       </div>
 
       <div className="workbench-sidebar-newchat">
-        <Button
-          block
-          disabled
-          icon={<PlusOutlined />}
-          title="会话创建将在后续版本开放"
-        >
-          New chat
-        </Button>
+        <Tooltip title="会话创建将在后续版本开放">
+          <span className="workbench-sidebar-newchat-tooltip">
+            <Button block disabled icon={<PlusOutlined />}>
+              New chat
+            </Button>
+          </span>
+        </Tooltip>
       </div>
 
       <div className="workbench-sidebar-filters">
