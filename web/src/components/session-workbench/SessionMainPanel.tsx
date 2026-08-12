@@ -79,7 +79,11 @@ export function SessionMainPanel({
             <Typography.Text type="secondary">
               模型 {session.model || '-'}
             </Typography.Text>
-            <Typography.Text type="secondary">
+            <Typography.Text
+              type="secondary"
+              className="workbench-status-workdir"
+              ellipsis={{ tooltip: session.workdir || '-' }}
+            >
               目录 <Typography.Text code>{session.workdir || '-'}</Typography.Text>
             </Typography.Text>
             <Typography.Text type="secondary">
