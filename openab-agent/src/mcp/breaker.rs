@@ -134,10 +134,12 @@ impl ServerBreaker {
     /// Record a transport-level failure for `server`. When the count
     /// reaches [`FAIL_THRESHOLD`], stamps the opened-at timestamp so the
     /// cooldown clock starts (or re-starts, for half-open probe failures).
+    #[cfg(test)]
     pub fn record_failure(&self, server: &str) {
         self.record_failure_at(server, Instant::now());
     }
 
+    #[cfg(test)]
     fn record_failure_at(&self, server: &str, now: Instant) {
         let mut entries = self.entries.lock().expect("breaker mutex poisoned");
         let entry = entries.entry(server.to_string()).or_default();
