@@ -3,8 +3,7 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-
 import { AdminLayout } from './components/AdminLayout';
 import { LoginPage } from './pages/LoginPage';
 import { OverviewPage } from './pages/OverviewPage';
-import { SessionsPage } from './pages/SessionsPage';
-import { SessionDetailPage } from './pages/SessionDetailPage';
+import { SessionWorkbenchPage } from './pages/SessionWorkbenchPage';
 import { ProfilesPage } from './pages/ProfilesPage';
 import { ConfigPage } from './pages/ConfigPage';
 import {
@@ -66,8 +65,8 @@ export function App() {
       >
         <Route index element={<Navigate to="/overview" replace />} />
         <Route path="/overview" element={<OverviewPage />} />
-        <Route path="/sessions" element={<SessionsPage />} />
-        <Route path="/sessions/:id" element={<SessionDetailPage />} />
+        <Route path="/sessions" element={<SessionWorkbenchPage />} />
+        <Route path="/sessions/:id" element={<SessionWorkbenchPage />} />
         <Route path="/profiles" element={<ProfilesPage />} />
         <Route path="/config" element={<ConfigPage />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />

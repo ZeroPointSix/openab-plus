@@ -1061,3 +1061,541 @@ select {
     flex-direction: column;
   }
 }
+
+
+/* ---------- Sessions Workbench ---------- */
+
+.session-workbench-page {
+  min-height: calc(100vh - 64px);
+  padding: 20px 24px 28px;
+  background: #f5f7fa;
+}
+
+.session-workbench-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+
+.session-workbench-title,
+.session-status-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.session-workbench-title .ant-typography,
+.session-status-title .ant-typography {
+  margin: 0;
+}
+
+.session-workbench-title h2.ant-typography {
+  font-size: 20px;
+}
+
+.session-workbench-grid {
+  display: grid;
+  grid-template-columns: minmax(230px, 276px) minmax(0, 1fr) minmax(280px, 344px);
+  gap: 14px;
+  min-height: calc(100vh - 174px);
+  align-items: stretch;
+}
+
+.session-workbench-sidebar,
+.session-main-panel,
+.session-workbench-inspector,
+.session-sidebar,
+.session-inspector {
+  min-width: 0;
+  min-height: 0;
+}
+
+.session-workbench-sidebar,
+.session-main-panel,
+.session-workbench-inspector {
+  border: 1px solid #e1e8f0;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
+}
+
+.session-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.session-sidebar-header,
+.session-inspector-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 18px 16px 14px;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.session-sidebar-header .ant-typography,
+.session-inspector-heading .ant-typography {
+  margin: 0;
+}
+
+.session-sidebar-header h4.ant-typography,
+.session-inspector-heading h4.ant-typography {
+  font-size: 15px;
+}
+
+.session-sidebar-header .ant-typography-secondary,
+.session-inspector-heading .ant-typography-secondary {
+  font-size: 12px;
+}
+
+.session-sidebar-filters {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.session-status-filter {
+  width: 100%;
+}
+
+.session-sidebar-list {
+  flex: 1;
+  min-height: 180px;
+  overflow: auto;
+  padding: 8px 6px 12px;
+}
+
+.session-sidebar-loading {
+  display: grid;
+  min-height: 160px;
+  place-items: center;
+}
+
+.session-conversations {
+  width: 100%;
+}
+
+.session-conversation-label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+}
+
+.session-conversation-title {
+  overflow: hidden;
+  color: #1b2430;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-conversation-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8593a3;
+  font-size: 11px;
+}
+
+.session-conversation-meta .status-tag {
+  min-width: auto;
+  padding-inline: 5px;
+  font-size: 10px;
+  line-height: 18px;
+}
+
+.session-group-title {
+  color: #8593a3;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.session-main-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.session-main-panel-empty {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.session-main-panel-empty .session-read-only-bar {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+.session-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 14px;
+}
+
+.session-status-title {
+  min-width: 0;
+}
+
+.session-status-title h3.ant-typography {
+  overflow: hidden;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-status-fields {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  padding: 0 20px 18px;
+}
+
+.session-status-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px 11px;
+  border: 1px solid #edf1f5;
+  border-radius: 9px;
+  background: #fbfcfe;
+}
+
+.session-status-field .ant-typography-secondary {
+  font-size: 11px;
+}
+
+.session-status-field > .ant-typography:not(.ant-typography-secondary) {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-status-value-code {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.session-link-field {
+  justify-content: center;
+}
+
+.session-link-field .ant-btn-link {
+  align-self: flex-start;
+  padding: 0;
+  font-size: 12px;
+}
+
+.session-main-divider {
+  margin: 0;
+}
+
+.session-event-stream {
+  flex: 1;
+  min-height: 220px;
+  overflow: auto;
+  padding: 18px 22px 70px;
+}
+
+.session-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.session-section-heading .ant-typography {
+  margin: 0;
+}
+
+.session-section-heading h4.ant-typography {
+  font-size: 15px;
+}
+
+.session-section-heading .ant-typography-secondary {
+  font-size: 12px;
+}
+
+.session-event-stream .ant-timeline {
+  padding: 4px 4px 0;
+}
+
+.session-event-entry {
+  padding-bottom: 14px;
+}
+
+.session-event-entry-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.session-event-entry .ant-typography {
+  margin-bottom: 0;
+}
+
+.session-read-only-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 46px;
+  padding: 10px 18px;
+  border-top: 1px solid #dbe5ef;
+  color: #5b6b7c;
+  background: #f7faff;
+  font-size: 12px;
+}
+
+.session-read-only-bar > .ant-space {
+  min-width: 0;
+}
+
+.session-read-only-bar .ant-typography-secondary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-stream-state {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  color: #667380;
+  white-space: nowrap;
+}
+
+.session-stream-state.is-live {
+  color: #16834b;
+}
+
+.session-stream-state.is-reconnecting,
+.session-stream-state.is-connecting {
+  color: #b26a00;
+}
+
+.session-stream-state.is-offline {
+  color: #9a3b3b;
+}
+
+.session-inspector {
+  height: 100%;
+  overflow: auto;
+}
+
+.session-inspector .ant-tabs {
+  padding: 0 14px 16px;
+}
+
+.session-inspector .ant-tabs-tab {
+  padding-block: 10px;
+  font-size: 12px;
+}
+
+.inspector-descriptions .ant-descriptions-item-label {
+  width: 76px;
+  color: #8593a3;
+}
+
+.inspector-descriptions .ant-descriptions-item-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.inspector-alerts {
+  display: grid;
+  gap: 10px;
+}
+
+.inspector-alerts .ant-alert {
+  padding: 10px 12px;
+}
+
+.inspector-timeline {
+  margin-top: 8px;
+  padding-inline: 4px;
+}
+
+.inspector-timeline .ant-typography {
+  margin-bottom: 0;
+  font-size: 12px;
+}
+
+.session-mobile-actions {
+  display: none;
+}
+
+.session-workbench-error {
+  display: block;
+  margin-top: 8px;
+}
+
+@media (max-width: 1280px) {
+  .session-workbench-grid {
+    grid-template-columns: minmax(220px, 250px) minmax(0, 1fr) minmax(250px, 300px);
+  }
+
+  .session-status-fields {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1050px) {
+  .session-workbench-grid {
+    grid-template-columns: minmax(210px, 240px) minmax(0, 1fr);
+  }
+
+  .session-workbench-inspector {
+    display: none;
+  }
+
+  .session-mobile-actions {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 768px) {
+  .session-workbench-page {
+    padding: 14px 12px 20px;
+  }
+
+  .session-workbench-header {
+    align-items: flex-start;
+    margin-bottom: 12px;
+  }
+
+  .session-workbench-grid {
+    display: block;
+    min-height: calc(100vh - 152px);
+  }
+
+  .session-workbench-sidebar {
+    display: none;
+  }
+
+  .session-main-panel {
+    min-height: calc(100vh - 152px);
+  }
+
+  .session-status-bar {
+    align-items: flex-start;
+    padding: 16px 14px 12px;
+  }
+
+  .session-status-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-inline: 14px;
+  }
+
+  .session-event-stream {
+    padding-inline: 14px;
+  }
+
+  .session-read-only-bar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    padding: 9px 14px;
+  }
+}
+
+@media (max-width: 390px) {
+  .session-workbench-title .panel-icon {
+    display: none;
+  }
+
+  .session-workbench-title h2.ant-typography {
+    font-size: 18px;
+  }
+
+  .session-mobile-actions .ant-btn {
+    padding-inline: 8px;
+    font-size: 12px;
+  }
+
+  .session-status-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .session-status-bar .status-tag {
+    flex: 0 0 auto;
+  }
+}
+
+
+/* ---------- 总览最近会话列表 ---------- */
+
+.recent-sessions-list {
+  border: 1px solid #e6edf4;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
+}
+
+.recent-sessions-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.recent-sessions-list-header .ant-typography {
+  margin: 0;
+}
+
+.recent-sessions-list-header h4.ant-typography {
+  font-size: 15px;
+}
+
+.recent-sessions-list .ant-list-item {
+  padding: 12px 18px;
+}
+
+.recent-sessions-list .ant-list-item:hover {
+  background: #f7faff;
+}
+
+.recent-sessions-list .ant-list-item-meta {
+  min-width: 0;
+}
+
+.recent-sessions-list .ant-list-item-meta-title {
+  margin-bottom: 3px;
+}
+
+.recent-sessions-list .ant-list-item-meta-description {
+  min-width: 0;
+}
+
+.recent-sessions-list .status-tag {
+  min-width: auto;
+  padding-inline: 7px;
+  font-size: 11px;
+}
+
+.recent-sessions-loading {
+  padding: 18px;
+}

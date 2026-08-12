@@ -223,7 +223,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       }}
     >
       <div className="app-content">
-        <Outlet />
+        <Outlet context={{ streamStatus }} />
       </div>
     </ProLayout>
   );
