@@ -331,7 +331,8 @@ impl SessionPool {
         } else {
             Some(
                 crate::agent_profile::AgentCapabilityResolver::config_schema_from_options(
-                    agent_type, &options,
+                    agent_type,
+                    &options,
                 ),
             )
         }
@@ -474,6 +475,20 @@ impl SessionPool {
             snapshot.update_runtime_config_metadata(runtime_metadata);
         })
         .await;
+    }
+
+    /// Backfill the session source permalink (e.g. a Slack/Discord thread URL)
+    /// resolved lazily by the originating adapter.
+    ///
+    /// The permalink is immutable source metadata, so unlike status changes
+    /// this only updates the stored snapshot — no timeline event is emitted.
+    /// REST reads and every subsequent event snapshot carry the value.
+    /// Idempotent: an unchanged permalink skips the write entirely.
+    pub async fn record_session_source_permalink(&self, thread_id: &str, permalink: String) {
+        let mut snapshots = self.snapshots.write().await;
+        if let Some(snapshot) = snapshots.get_mut(thread_id) {
+            let _ = snapshot.set_source_permalink(Some(permalink.as_str()));
+        }
     }
 
     pub async fn mark_profile_deleted(&self, profile_id: &str) {
@@ -1149,6 +1164,57 @@ mod tests {
         assert_eq!(snapshot.profile_id, profile_id);
         assert_eq!(snapshot.profile_name, profile_name);
         assert_eq!(snapshot.profile_status, Some(ProfileStatus::Deleted));
+    }
+
+    #[tokio::test]
+    async fn record_session_source_permalink_backfills_snapshot_source() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        outer
+            .seed_session_snapshot_for_test(SessionSnapshot::new(
+                "slack:thread".into(),
+                "codex".into(),
+                "/workspace".into(),
+                None,
+                None,
+                None,
+                None,
+            ))
+            .await;
+
+        outer
+            .record_session_source_permalink(
+                "slack:thread",
+                "https://acme.slack.com/archives/C1/p1700000000000100".into(),
+            )
+            .await;
+
+        let snapshot = outer
+            .session_snapshot("slack:thread")
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.source.permalink.as_deref(),
+            Some("https://acme.slack.com/archives/C1/p1700000000000100")
+        );
+
+        // Unknown sessions are ignored; an unchanged permalink skips the write.
+        outer
+            .record_session_source_permalink("slack:missing", "https://x".into())
+            .await;
+        outer
+            .record_session_source_permalink(
+                "slack:thread",
+                "https://acme.slack.com/archives/C1/p1700000000000100".into(),
+            )
+            .await;
+        let snapshot = outer
+            .session_snapshot("slack:thread")
+            .await
+            .expect("snapshot");
+        assert_eq!(
+            snapshot.source.permalink.as_deref(),
+            Some("https://acme.slack.com/archives/C1/p1700000000000100")
+        );
     }
 
     #[tokio::test]

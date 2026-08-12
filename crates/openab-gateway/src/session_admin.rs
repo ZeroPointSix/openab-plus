@@ -183,9 +183,12 @@ fn replay_events_sse(
             events.push(cursor_reset_event_sse(cursor, event_bus));
             return events;
         }
-        if replay.overflowed {
-            events.push(history_unavailable_event_sse(cursor.sequence, &replay));
-        }
+    }
+    if replay.overflowed {
+        events.push(history_unavailable_event_sse(
+            last_sequence.unwrap_or_default(),
+            &replay,
+        ));
     }
     events.extend(
         replay

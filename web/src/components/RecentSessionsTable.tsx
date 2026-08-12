@@ -13,11 +13,8 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { SessionFilters, SessionSnapshot } from '../types';
 import { filterSessions } from '../lib/session';
-import {
-  formatDateTime,
-  formatRelativeTime,
-  sessionStatusOptions,
-} from '../lib/format';
+import { formatDateTime, formatRelativeTime } from '../lib/format';
+import { SESSION_STATUS_VALUE_ENUM } from '../lib/sessionStatus';
 import { StatusTag } from './StatusTag';
 import { EntityMark } from './EntityMark';
 
@@ -74,9 +71,7 @@ export function RecentSessionsTable({
       dataIndex: 'status',
       width: 112,
       valueType: 'select',
-      valueEnum: Object.fromEntries(
-        sessionStatusOptions.map(({ value, label }) => [value, { text: label }]),
-      ),
+      valueEnum: SESSION_STATUS_VALUE_ENUM,
       render: (_, record) => <StatusTag status={record.status} />,
     },
     {
@@ -88,7 +83,9 @@ export function RecentSessionsTable({
       render: (_, record) => (
         <Space size={8} className="agent-cell">
           <EntityMark name={record.agent} />
-          <Typography.Text strong>{record.agent || '-'}</Typography.Text>
+          <Typography.Text strong>
+            {record.agent || '未报告'}
+          </Typography.Text>
         </Space>
       ),
     },

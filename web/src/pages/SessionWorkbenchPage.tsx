@@ -4,7 +4,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Drawer } from 'antd';
 import { adminApi } from '../lib/api';
-import { initialTimeline, sortSessions } from '../lib/session';
+import {
+  initialTimeline,
+  sortSessions,
+  visibleTimelineItems,
+} from '../lib/session';
 import { SessionTimelineItem } from '../types';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { SessionInspector } from '../components/session-workbench/SessionInspector';
@@ -74,7 +78,9 @@ export function SessionWorkbenchPage() {
     setSidebarOpen(false);
   };
 
-  const timeline = sessionId ? timelineQuery.data || [] : [];
+  const timeline = sessionId
+    ? visibleTimelineItems(timelineQuery.data || [])
+    : [];
 
   const sidebar = (
     <SessionSidebar

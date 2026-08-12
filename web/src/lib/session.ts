@@ -4,7 +4,7 @@ import {
   SessionSnapshot,
   SessionTimelineItem,
 } from '../types';
-import { sessionStatusDisplay } from './format';
+import { SESSION_STATUS_DISPLAY } from './sessionStatus';
 
 export function parseSessionEventPayload(
   data: string,
@@ -85,12 +85,12 @@ export function filterSessions(
 export function sessionMetrics(sessions: SessionSnapshot[]) {
   return {
     total: sessions.length,
-    active: sessions.filter((session) => sessionStatusDisplay[session.status].active)
+    active: sessions.filter((session) => SESSION_STATUS_DISPLAY[session.status].active)
       .length,
     running: sessions.filter(
-      (session) => sessionStatusDisplay[session.status].running,
+      (session) => SESSION_STATUS_DISPLAY[session.status].running,
     ).length,
-    failed: sessions.filter((session) => sessionStatusDisplay[session.status].failed)
+    failed: sessions.filter((session) => SESSION_STATUS_DISPLAY[session.status].failed)
       .length,
   };
 }
@@ -162,4 +162,18 @@ export function initialTimeline(
     });
   }
   return items;
+}
+
+/**
+ * 冷启动 / 刷新后，SSE 会从 0 补齐历史事件；一旦时间线里出现带 sequence
+ * 的真实流事件，就把 initialTimeline 种下的种子条目（created/current）
+ * 过滤掉，避免同一条「会话创建 / 当前状态」在时间线上重复出现。
+ */
+export function visibleTimelineItems(
+  items: SessionTimelineItem[],
+): SessionTimelineItem[] {
+  const hasStreamed = items.some((item) => typeof item.sequence === 'number');
+  return hasStreamed
+    ? items.filter((item) => typeof item.sequence === 'number')
+    : items;
 }

@@ -4,6 +4,7 @@ import {
 } from '@ant-design/icons';
 import { Empty, Timeline, Typography } from 'antd';
 import { eventLabel, formatDateTime } from '../../lib/format';
+import { sessionStatusDisplay } from '../../lib/sessionStatus';
 import { SessionTimelineItem } from '../../types';
 import { StatusTag } from '../StatusTag';
 
@@ -30,12 +31,7 @@ export function SessionEventTimeline({
     <Timeline
       className={compact ? 'session-timeline-compact' : undefined}
       items={[...timeline].reverse().map((item) => ({
-        color:
-          item.status === 'error'
-            ? 'red'
-            : item.status === 'running'
-              ? 'green'
-              : 'blue',
+        color: sessionStatusDisplay(item.status).timelineColor,
         dot:
           item.status === 'error' ? (
             <ExclamationCircleFilled />

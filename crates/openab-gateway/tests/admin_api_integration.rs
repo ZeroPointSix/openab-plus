@@ -266,7 +266,10 @@ async fn profiles_crud_default_and_validate() {
     assert_eq!(default_set["default_profile"], "codex-main");
 
     let default_get = client
-        .get(format!("{}/api/v1/agent-profiles/default", server.base_url))
+        .get(format!(
+            "{}/api/v1/agent-profiles/default",
+            server.base_url
+        ))
         .bearer_auth(&env.token)
         .send()
         .await
@@ -639,6 +642,93 @@ async fn sse_replays_missed_event_after_last_event_id() {
     assert_eq!(event["snapshot"]["session_id"], "slack:replay-thread");
     assert_eq!(event["snapshot"]["status"], "running");
     assert_eq!(event["sequence"], missed.sequence);
+}
+
+#[tokio::test]
+async fn sse_cold_start_without_last_event_id_replays_retained_history() {
+    let env = AdminTestEnv::new().await;
+    let pool = env.pool();
+    let event_bus = pool.session_event_bus();
+
+    // Two events already retained in the bus history before any client connects.
+    let created = event_bus.publish(
+        SessionEventKind::SessionCreated,
+        SessionSnapshot::new(
+            "slack:cold-thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        ),
+    );
+    let mut running = SessionSnapshot::new(
+        "slack:cold-thread".into(),
+        "codex".into(),
+        "/workspace".into(),
+        None,
+        None,
+        None,
+        None,
+    );
+    running.set_status(SessionStatus::Running);
+    let status = event_bus.publish(SessionEventKind::StatusChanged, running);
+
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    // No Last-Event-ID header: a cold-started client (deep link / refresh)
+    // must receive the retained history before live events, on the same
+    // single SSE connection.
+    let mut response = client
+        .get(format!("{}/api/v1/sessions/events", server.base_url))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("open cold-start sse");
+
+    // Collect chunks until both replayed events are in the buffer (they may
+    // arrive in a single chunk, so a one-shot read_sse_event per event would
+    // risk consuming both and losing the second).
+    let mut buffer = String::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut created_event = None;
+    let mut status_event = None;
+    while tokio::time::Instant::now() < deadline
+        && (created_event.is_none() || status_event.is_none())
+    {
+        if let Some(chunk) = response.chunk().await.expect("sse chunk") {
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            if created_event.is_none() {
+                created_event = common::parse_sse_event_with_id(&buffer, "session.created");
+            }
+            if status_event.is_none() {
+                status_event = common::parse_sse_event_with_id(&buffer, "status_changed");
+            }
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    // History replays oldest-first, before any live event.
+    let created_pos = buffer
+        .find("event:session.created")
+        .or_else(|| buffer.find("event: session.created"));
+    let status_pos = buffer
+        .find("event:status_changed")
+        .or_else(|| buffer.find("event: status_changed"));
+    assert!(created_pos.is_some() && status_pos.is_some());
+    assert!(
+        created_pos.unwrap() < status_pos.unwrap(),
+        "history must replay oldest first"
+    );
+
+    let (created_id, created_event) = created_event.expect("session.created replayed");
+    assert_eq!(created_id, Some(event_bus.event_id(created.sequence)));
+    assert_eq!(created_event["snapshot"]["session_id"], "slack:cold-thread");
+    let (status_id, status_event) = status_event.expect("status_changed replayed");
+    assert_eq!(status_id, Some(event_bus.event_id(status.sequence)));
+    assert_eq!(status_event["snapshot"]["status"], "running");
 }
 
 #[tokio::test]

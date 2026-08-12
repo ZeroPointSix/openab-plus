@@ -443,6 +443,38 @@ fn enforce_cache_bounds(
     }
 }
 
+/// Convert a Slack message timestamp to the permalink fragment used by the
+/// Slack client. The fractional part is normalized to six digits.
+fn slack_ts_permalink_fragment(ts: &str) -> Option<String> {
+    let (secs, frac) = ts.split_once('.')?;
+    if secs.is_empty() || !secs.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let frac: String = frac.chars().take_while(|value| value.is_ascii_digit()).collect();
+    if frac.is_empty() {
+        return None;
+    }
+    let mut frac = frac;
+    while frac.len() < 6 {
+        frac.push('0');
+    }
+    frac.truncate(6);
+    Some(format!("p{secs}{frac}"))
+}
+
+fn slack_thread_permalink(team_id: &str, channel: &ChannelRef) -> Option<String> {
+    let team_id = team_id.trim();
+    if team_id.is_empty() || channel.channel_id.is_empty() {
+        return None;
+    }
+    let thread_ts = channel.thread_id.as_deref()?;
+    let fragment = slack_ts_permalink_fragment(thread_ts)?;
+    let channel_id = &channel.channel_id;
+    Some(format!(
+        "https://app.slack.com/client/{team_id}/{channel_id}/{fragment}?thread_ts={thread_ts}&cid={channel_id}"
+    ))
+}
+
 #[async_trait]
 impl ChatAdapter for SlackAdapter {
     fn platform(&self) -> &'static str {
@@ -1826,6 +1858,19 @@ async fn handle_message(
         .as_deref()
         .unwrap_or(&thread_channel.channel_id);
     let source_permalink = adapter.message_permalink(&channel_id, thread_id).await;
+
+    // Backfill the session source for the admin console while preserving the
+    // adapter permalink carried with the buffered message.
+    if let Some(permalink) = slack_thread_permalink(team_id, &thread_channel) {
+        router
+            .pool()
+            .record_session_source_permalink(
+                &format!("slack:{thread_id}"),
+                permalink,
+            )
+            .await;
+    }
+
     let thread_key = dispatcher.key("slack", thread_id, &sender.sender_id);
     let estimated_tokens = crate::dispatch::estimate_tokens(&prompt, &extra_blocks);
     let buf_msg = crate::dispatch::BufferedMessage {
@@ -2636,6 +2681,42 @@ mod tests {
         let ttl = std::time::Duration::from_secs(300);
         let adapter = SlackAdapter::new("xoxb-test".into(), ttl, AllowBots::Mentions, true, crate::multibot_cache::MultibotCache::load("/dev/null".into()), true);
         assert!(adapter.renders_native_tables("slack"));
+    }
+
+    #[test]
+    fn slack_ts_permalink_fragment_pads_fraction_to_six_digits() {
+        assert_eq!(
+            slack_ts_permalink_fragment("1754987654.123456"),
+            Some("p1754987654123456".to_string())
+        );
+        assert_eq!(
+            slack_ts_permalink_fragment("1754987654.1"),
+            Some("p1754987654100000".to_string())
+        );
+        assert_eq!(slack_ts_permalink_fragment("no-dot"), None);
+        assert_eq!(slack_ts_permalink_fragment("abc.def"), None);
+    }
+
+    #[test]
+    fn slack_thread_permalink_links_thread_pane() {
+        let channel = ChannelRef {
+            platform: "slack".into(),
+            channel_id: "C123".into(),
+            thread_id: Some("1754987654.123456".into()),
+            parent_id: None,
+            origin_event_id: None,
+        };
+        let url = slack_thread_permalink("T123", &channel).expect("permalink");
+        assert_eq!(
+            url,
+            "https://app.slack.com/client/T123/C123/p1754987654123456?thread_ts=1754987654.123456&cid=C123"
+        );
+        let channel_level = ChannelRef {
+            thread_id: None,
+            ..channel
+        };
+        assert!(slack_thread_permalink("T123", &channel_level).is_none());
+        assert!(slack_thread_permalink("", &channel_level).is_none());
     }
 }
 

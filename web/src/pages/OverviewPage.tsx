@@ -18,6 +18,7 @@ import { Typography } from 'antd';
 import { SessionFilters } from '../types';
 import { adminApi } from '../lib/api';
 import { filterSessions, sessionMetrics } from '../lib/session';
+import { SESSION_STATUS_FILTER_OPTIONS } from '../lib/sessionStatus';
 import { RecentSessionsTable } from '../components/RecentSessionsTable';
 
 const { Statistic } = StatisticCard;
@@ -150,14 +151,7 @@ export function OverviewPage() {
             label="状态"
             allowClear
             width="sm"
-            options={[
-              { label: '启动中', value: 'starting' },
-              { label: '空闲', value: 'idle' },
-              { label: '运行中', value: 'running' },
-              { label: '已暂停', value: 'suspended' },
-              { label: '失败', value: 'error' },
-              { label: '已退出', value: 'exited' },
-            ]}
+            options={SESSION_STATUS_FILTER_OPTIONS}
           />
           <ProFormSelect
             name="profile"

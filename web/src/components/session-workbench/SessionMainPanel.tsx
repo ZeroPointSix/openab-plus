@@ -1,15 +1,20 @@
 import {
+  CopyOutlined,
   LinkOutlined,
   ProfileOutlined,
   ReadOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import { Button, Empty, Space, Spin, Typography } from 'antd';
+import { Button, Empty, Space, Spin, Typography, message } from 'antd';
 import {
   streamStatusLabels,
   useStreamStatus,
 } from '../../hooks/streamStatusContext';
-import { formatDateTime, formatRelativeTime } from '../../lib/format';
+import {
+  formatDateTime,
+  formatRelativeTime,
+  sourcePlatformLabel,
+} from '../../lib/format';
 import { SessionSnapshot } from '../../types';
 import { EntityMark } from '../EntityMark';
 import { StatusTag } from '../StatusTag';
@@ -32,6 +37,16 @@ export function SessionMainPanel({
   const streamStatus = useStreamStatus();
   const showSession = Boolean(hasSelection && session && !loading);
   const hasToggles = Boolean(onOpenSidebar || onOpenInspector);
+
+  const copySessionLink = async () => {
+    if (!session?.external_url) return;
+    try {
+      await navigator.clipboard.writeText(session.external_url);
+      message.success('会话链接已复制');
+    } catch {
+      message.error('复制失败，请检查浏览器剪贴板权限');
+    }
+  };
 
   const sidebarToggle = onOpenSidebar ? (
     <Button
@@ -89,15 +104,27 @@ export function SessionMainPanel({
             <Typography.Text type="secondary">
               更新 {formatRelativeTime(session.updated_at)}
             </Typography.Text>
-            {session.external_url ? (
+            {session.source?.permalink ? (
               <Button
                 size="small"
+                type="primary"
                 icon={<LinkOutlined />}
-                href={session.external_url}
+                href={session.source.permalink}
                 target="_blank"
                 rel="noreferrer"
               >
-                打开会话链接
+                {sourcePlatformLabel(session.source.platform)
+                  ? '回到 ' + sourcePlatformLabel(session.source.platform)
+                  : '打开来源'}
+              </Button>
+            ) : null}
+            {session.external_url ? (
+              <Button
+                size="small"
+                icon={<CopyOutlined />}
+                onClick={() => void copySessionLink()}
+              >
+                复制会话链接
               </Button>
             ) : null}
             {inspectorToggle}

@@ -57,6 +57,15 @@ fn truncate_for_discord(s: &str, max: usize) -> String {
     }
 }
 
+/// Discord web permalink for a channel or thread. Guild channels use
+/// `/channels/{guild}/{channel}`; DMs use `/channels/@me/{channel}`.
+fn discord_channel_permalink(guild_id: Option<u64>, channel_id: u64) -> String {
+    match guild_id {
+        Some(guild_id) => format!("https://discord.com/channels/{guild_id}/{channel_id}"),
+        None => format!("https://discord.com/channels/@me/{channel_id}"),
+    }
+}
+
 /// Avoid unbounded Discord history exports from very large threads.
 const THREAD_EXPORT_MESSAGE_LIMIT: usize = 5000;
 
@@ -1043,6 +1052,24 @@ impl EventHandler for Handler {
                 }
             }
         };
+
+        // Backfill the session's source permalink so the admin console can
+        // deep-link back to the originating Discord channel/thread (ZER-669).
+        // Idempotent — the pool skips the write when the value is unchanged.
+        {
+            let session_channel = DiscordAdapter::resolve_channel(&thread_channel);
+            if let Ok(ch_id) = session_channel.parse::<u64>() {
+                let permalink =
+                    discord_channel_permalink(msg.guild_id.map(|id| id.get()), ch_id);
+                self.router
+                    .pool()
+                    .record_session_source_permalink(
+                        &format!("discord:{session_channel}"),
+                        permalink,
+                    )
+                    .await;
+            }
+        }
 
         // Notify user if any images couldn't be processed.
         if !failed_image_files.is_empty() {
@@ -4644,4 +4671,23 @@ mod tests {
             false, false, false,
         ));
     }
+
+    // --- Source channel/thread permalink (ZER-669) ---
+
+    #[test]
+    fn discord_permalink_guild_channel() {
+        assert_eq!(
+            discord_channel_permalink(Some(42), 100),
+            "https://discord.com/channels/42/100"
+        );
+    }
+
+    #[test]
+    fn discord_permalink_dm_uses_me() {
+        assert_eq!(
+            discord_channel_permalink(None, 100),
+            "https://discord.com/channels/@me/100"
+        );
+    }
+
 }

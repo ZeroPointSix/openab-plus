@@ -2,15 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
+  initialTimeline,
   matchesSessionKeyword,
   mergeTimelineItem,
   parseSessionEventPayload,
   sessionMetrics,
   sortSessions,
   timelineItemFromEvent,
+  visibleTimelineItems,
 } from './session';
 import { SessionSnapshot } from '../types';
-import { sessionStatusDisplay, sessionStatusOptions } from './format';
+import {
+  SESSION_STATUS_DISPLAY,
+  SESSION_STATUS_FILTER_OPTIONS,
+} from './sessionStatus';
 
 const sessions: SessionSnapshot[] = [
   {
@@ -56,9 +61,9 @@ describe('session helpers', () => {
       status: 'exited',
     };
 
-    expect(sessionStatusDisplay.exited.label).toBe('已完成');
-    expect(sessionStatusOptions).toContainEqual({
-      label: '已完成',
+    expect(SESSION_STATUS_DISPLAY.exited.label).toBe('完成');
+    expect(SESSION_STATUS_FILTER_OPTIONS).toContainEqual({
+      label: '完成',
       value: 'exited',
     });
     expect(sessionMetrics([...sessions, completed])).toEqual({
@@ -148,5 +153,20 @@ describe('session helpers', () => {
     expect(previous?.id).toBe('generation-a:1:status_changed');
     expect(restarted?.id).toBe('generation-b:1:status_changed');
     expect(previous?.id).not.toBe(restarted?.id);
+  });
+
+  it('drops seed timeline entries once replayed stream events arrive', () => {
+    const seeds = initialTimeline(sessions[0]);
+    expect(seeds.length).toBeGreaterThan(0);
+    // 只有种子条目时原样展示（SSE 尚未补齐历史时的兜底）。
+    expect(visibleTimelineItems(seeds)).toEqual(seeds);
+
+    const replayed = timelineItemFromEvent(
+      { sequence: 7, event: 'session.created', snapshot: sessions[0] },
+      'gen:7',
+    );
+    expect(replayed).not.toBeNull();
+    // 真实的流事件（带 sequence）到达后，种子条目被过滤，避免重复。
+    expect(visibleTimelineItems([...seeds, replayed!])).toEqual([replayed]);
   });
 });
