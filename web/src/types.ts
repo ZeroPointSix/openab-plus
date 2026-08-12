@@ -10,6 +10,7 @@ export type SessionStatus =
 export interface SessionSource {
   platform: string;
   thread_id: string;
+  permalink?: string;
 }
 
 export interface ProfileConfigError {

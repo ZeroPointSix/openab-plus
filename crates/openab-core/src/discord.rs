@@ -1062,6 +1062,7 @@ impl EventHandler for Handler {
         }
 
         let trigger_msg = discord_msg_ref(&msg);
+        let source_permalink = msg.link();
 
         // Per-thread streaming: check if another bot is present in this thread
         let other_bot_present_flag = {
@@ -1132,6 +1133,7 @@ impl EventHandler for Handler {
                 prompt,
                 extra_blocks,
                 trigger_msg,
+                source_permalink: Some(source_permalink),
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present: other_bot_present_flag,
@@ -1373,6 +1375,7 @@ impl EventHandler for Handler {
                 prompt,
                 extra_blocks: Vec::new(),
                 trigger_msg,
+                source_permalink: None,
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present,

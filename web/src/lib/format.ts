@@ -1,13 +1,16 @@
 import { SessionStatus } from '../types';
 
-export const statusLabels: Record<SessionStatus, string> = {
-  starting: '启动中',
-  idle: '空闲',
-  running: '运行中',
-  suspended: '已暂停',
-  error: '失败',
-  exited: '已退出',
-  unknown: '未知',
+export const sessionStatusDisplay: Record<
+  SessionStatus,
+  { label: string; tagColor: string; timelineColor: string }
+> = {
+  starting: { label: '启动中', tagColor: 'processing', timelineColor: 'blue' },
+  idle: { label: '等待中', tagColor: 'default', timelineColor: 'gray' },
+  running: { label: '运行中', tagColor: 'success', timelineColor: 'green' },
+  suspended: { label: '已暂停', tagColor: 'warning', timelineColor: 'orange' },
+  error: { label: '失败', tagColor: 'error', timelineColor: 'red' },
+  exited: { label: '已完成', tagColor: 'default', timelineColor: 'gray' },
+  unknown: { label: '未知', tagColor: 'default', timelineColor: 'gray' },
 };
 
 export function formatDateTime(value?: string): string {
@@ -44,6 +47,7 @@ export function eventLabel(event: string): string {
     status_changed: '状态变更',
     model_changed: '模型变更',
     profile_changed: 'Profile 变更',
+    source_changed: '来源链接已更新',
     profile_deleted: 'Profile 已删除',
     session_error: '会话异常',
     current: '当前状态',

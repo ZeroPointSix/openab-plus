@@ -17,6 +17,7 @@ pub enum SessionEventKind {
     ConfigChanged,
     Error,
     ProfileChanged,
+    SourceChanged,
     Exited,
 }
 
@@ -28,6 +29,7 @@ impl SessionEventKind {
             Self::ConfigChanged => "config_changed",
             Self::Error => "error",
             Self::ProfileChanged => "profile_changed",
+            Self::SourceChanged => "source_changed",
             Self::Exited => "exited",
         }
     }
@@ -200,6 +202,10 @@ mod tests {
         assert_eq!(
             SessionEventKind::ProfileChanged.as_sse_event(),
             "profile_changed"
+        );
+        assert_eq!(
+            SessionEventKind::SourceChanged.as_sse_event(),
+            "source_changed"
         );
         assert_eq!(SessionEventKind::Exited.as_sse_event(), "exited");
     }
