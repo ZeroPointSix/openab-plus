@@ -230,9 +230,15 @@ pub fn parse_turn_result(result: &Value) -> TurnResult {
         .and_then(|v| v.as_str())
         .map(String::from);
     let usage = result.get("usage");
-    let input_tokens = usage.and_then(|u| u.get("inputTokens")).and_then(|v| v.as_u64());
-    let output_tokens = usage.and_then(|u| u.get("outputTokens")).and_then(|v| v.as_u64());
-    let total_tokens = usage.and_then(|u| u.get("totalTokens")).and_then(|v| v.as_u64());
+    let input_tokens = usage
+        .and_then(|u| u.get("inputTokens"))
+        .and_then(|v| v.as_u64());
+    let output_tokens = usage
+        .and_then(|u| u.get("outputTokens"))
+        .and_then(|v| v.as_u64());
+    let total_tokens = usage
+        .and_then(|u| u.get("totalTokens"))
+        .and_then(|v| v.as_u64());
     TurnResult {
         stop_reason,
         input_tokens,
@@ -281,7 +287,11 @@ pub struct UsageReport {
 /// Returns `None` when `success` is not true or the data shape is missing —
 /// callers should treat that as "usage not supported by this agent".
 pub fn parse_usage_report(result: &Value) -> Option<UsageReport> {
-    if !result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !result
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return None;
     }
     let data = result.get("data")?;
@@ -307,9 +317,7 @@ pub fn parse_usage_report(result: &Value) -> Option<UsageReport> {
                     let has_limit = b
                         .get("hasLimit")
                         .and_then(|v| v.as_bool())
-                        .unwrap_or_else(|| {
-                            b.get("limit").and_then(|v| v.as_f64()).is_some()
-                        });
+                        .unwrap_or_else(|| b.get("limit").and_then(|v| v.as_f64()).is_some());
                     Some(UsageBreakdown {
                         display_name: b.get("displayName")?.as_str()?.to_string(),
                         used: b.get("used")?.as_f64()?,
@@ -339,20 +347,29 @@ pub fn parse_usage_report(result: &Value) -> Option<UsageReport> {
 #[derive(Debug)]
 pub enum AcpEvent {
     Text(String),
-    Thinking,
+    Thinking {
+        content: String,
+    },
     ToolStart {
         id: String,
         title: String,
+        /// Complete ACP update, retained for transcript consumers that need
+        /// tool input, output, terminal data, or file-diff details.
+        payload: Value,
     },
     ToolDone {
         id: String,
         title: String,
         status: String,
+        /// Complete ACP update; tool_call_update payloads vary by agent.
+        payload: Value,
     },
     ConfigUpdate {
         options: Vec<ConfigOption>,
     },
-    Status,
+    Plan {
+        content: String,
+    },
 }
 
 pub fn classify_notification(msg: &JsonRpcMessage) -> Option<AcpEvent> {
@@ -378,14 +395,26 @@ pub fn classify_notification(msg: &JsonRpcMessage) -> Option<AcpEvent> {
             let text = update.get("content")?.get("text")?.as_str()?;
             Some(AcpEvent::Text(text.to_string()))
         }
-        "agent_thought_chunk" => Some(AcpEvent::Thinking),
+        "agent_thought_chunk" => {
+            let content = update
+                .get("content")
+                .and_then(|content| content.get("text").or(Some(content)))
+                .and_then(|content| content.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| update.to_string());
+            Some(AcpEvent::Thinking { content })
+        }
         "tool_call" => {
             let title = update
                 .get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(AcpEvent::ToolStart { id: tool_id, title })
+            Some(AcpEvent::ToolStart {
+                id: tool_id,
+                title,
+                payload: update.clone(),
+            })
         }
         "tool_call_update" => {
             let title = update
@@ -403,12 +432,25 @@ pub fn classify_notification(msg: &JsonRpcMessage) -> Option<AcpEvent> {
                     id: tool_id,
                     title,
                     status,
+                    payload: update.clone(),
                 })
             } else {
-                Some(AcpEvent::ToolStart { id: tool_id, title })
+                Some(AcpEvent::ToolStart {
+                    id: tool_id,
+                    title,
+                    payload: update.clone(),
+                })
             }
         }
-        "plan" => Some(AcpEvent::Status),
+        "plan" => {
+            let content = update
+                .get("content")
+                .and_then(|content| content.get("text").or(Some(content)))
+                .and_then(|content| content.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| update.to_string());
+            Some(AcpEvent::Plan { content })
+        }
         "config_option_update" => {
             let options = parse_config_options(update);
             Some(AcpEvent::ConfigUpdate { options })
