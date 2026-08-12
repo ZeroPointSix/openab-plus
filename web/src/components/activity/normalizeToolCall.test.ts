@@ -75,3 +75,51 @@ describe('activity tool-call normalization', () => {
     });
   });
 });
+
+
+describe('ACP file diff normalization', () => {
+  it('preserves every diff item reported through update.content', () => {
+    const tool = normalizeAcpToolCall({
+      content: {
+        update: {
+          tool_call_id: 'acp-diff-1',
+          title: '编辑会话活动流',
+          kind: 'edit',
+          status: 'completed',
+          raw_input: { file_path: 'web/src/pages/SessionDetailPage.tsx' },
+          content: [
+            {
+              type: 'diff',
+              path: 'web/src/pages/SessionDetailPage.tsx',
+              old_text: 'return <Timeline />;',
+              new_text: 'return <SessionActivityFeed />;',
+            },
+            {
+              type: 'diff',
+              path: 'web/src/styles.css',
+              old_text: '.timeline {}',
+              new_text: '.activity-feed {}',
+            },
+          ],
+        },
+      },
+    });
+
+    expect(tool?.diff).toMatchObject({
+      path: 'web/src/pages/SessionDetailPage.tsx',
+      new_text: 'return <SessionActivityFeed />;',
+    });
+    expect(tool?.diffs).toEqual([
+      {
+        path: 'web/src/pages/SessionDetailPage.tsx',
+        old_text: 'return <Timeline />;',
+        new_text: 'return <SessionActivityFeed />;',
+      },
+      {
+        path: 'web/src/styles.css',
+        old_text: '.timeline {}',
+        new_text: '.activity-feed {}',
+      },
+    ]);
+  });
+});

@@ -1509,3 +1509,21 @@ select {
     justify-content: flex-start;
   }
 }
+
+.activity-diff-line.omitted {
+  grid-template-columns: 1fr;
+  min-width: 0;
+  color: #7b8798;
+  background: #f3f6f8;
+  font-style: italic;
+}
+
+.activity-diff-line.omitted .activity-diff-number,
+.activity-diff-line.omitted .activity-diff-marker {
+  display: none;
+}
+
+.activity-diff-line.omitted code {
+  color: inherit;
+  white-space: normal;
+}
