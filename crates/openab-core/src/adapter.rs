@@ -37,6 +37,25 @@ fn reply_message_limit(platform: &str, adapter_limit: usize) -> usize {
     }
 }
 
+/// Keep the visible user text in the transcript while deliberately excluding
+/// OpenAB's internal `<sender_context>` envelope from the read-only UI.
+fn record_prompt_transcript(pool: &SessionPool, session_id: &str, blocks: &[ContentBlock]) {
+    let content = blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } if !text.starts_with("<sender_context>\n") => {
+                (!text.trim().is_empty()).then_some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !content.is_empty() {
+        pool.transcript_store()
+            .record_user_text(session_id, content);
+    }
+}
+
 /// Parse `[[key:value]]` directives from the beginning of agent output.
 /// Returns parsed directives and the remaining content (directives stripped).
 pub fn parse_output_directives(content: &str) -> (OutputDirectives, String) {
@@ -818,8 +837,7 @@ impl AdapterRouter {
     ) -> Result<()> {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
-        let message_limit =
-            reply_message_limit(&thread_channel.platform, adapter.message_limit());
+        let message_limit = reply_message_limit(&thread_channel.platform, adapter.message_limit());
         let exposes_intermediate_text = adapter.exposes_intermediate_text();
         // A strict privacy-boundary adapter (Slack) never publishes raw agent
         // chunks while a turn is running. ACP uses snapshot edits to produce
@@ -831,8 +849,8 @@ impl AdapterRouter {
         };
         // Intermediate narration is never retained across a strict privacy
         // boundary, even if the shared narration_display setting is enabled.
-        let keep_full_text = exposes_intermediate_text
-            && (streaming || self.reactions_config.narration_display);
+        let keep_full_text =
+            exposes_intermediate_text && (streaming || self.reactions_config.narration_display);
         let native = streaming && adapter.uses_native_streaming(other_bot_present);
         let assistant_status = adapter.uses_assistant_status();
         // Platforms that render Markdown tables natively (e.g. Slack Block Kit
@@ -882,6 +900,7 @@ impl AdapterRouter {
                     session_pool
                         .mark_session_status(&session_key, SessionStatus::Running)
                         .await;
+                    record_prompt_transcript(&session_pool, &session_key, &content_blocks);
                     let (mut rx, request_id) = match conn.session_prompt(content_blocks).await {
                         Ok(value) => value,
                         Err(err) => {
@@ -1112,6 +1131,9 @@ impl AdapterRouter {
                         if let Some(event) = classify_notification(&notification) {
                             match event {
                                 AcpEvent::Text(t) => {
+                                    session_pool
+                                        .transcript_store()
+                                        .append_assistant_text(&session_key, &t);
                                     text_buf.push_str(&t);
                                     // Tool-progress adapters seed the session receipt on the
                                     // first text. A turn that never calls a tool would otherwise
@@ -1161,7 +1183,10 @@ impl AdapterRouter {
                                         ));
                                     }
                                 }
-                                AcpEvent::Thinking => {
+                                AcpEvent::Thinking { content } => {
+                                    session_pool
+                                        .transcript_store()
+                                        .append_thinking(&session_key, content);
                                     if assistant_status {
                                         let _ = adapter
                                             .set_status(&thread_channel, "Thinking…")
@@ -1170,7 +1195,20 @@ impl AdapterRouter {
                                         reactions.set_thinking().await;
                                     }
                                 }
-                                AcpEvent::ToolStart { id, title } if !title.is_empty() => {
+                                AcpEvent::ToolStart { id, title } => {
+                                    session_pool
+                                        .transcript_store()
+                                        .finish_assistant_turn(&session_key);
+                                    session_pool.transcript_store().upsert_tool_call(
+                                        &session_key,
+                                        &id,
+                                        &title,
+                                        "running",
+                                        false,
+                                    );
+                                    if title.is_empty() {
+                                        continue;
+                                    }
                                     // Live indicator: assistant status line vs emoji reaction.
                                     if assistant_status {
                                         let status = assistant_tool_status(
@@ -1223,6 +1261,13 @@ impl AdapterRouter {
                                     }
                                 }
                                 AcpEvent::ToolDone { id, title, status } => {
+                                    session_pool.transcript_store().upsert_tool_call(
+                                        &session_key,
+                                        &id,
+                                        &title,
+                                        &status,
+                                        true,
+                                    );
                                     // The final answer block is whatever text the agent
                                     // emits AFTER its last tool. Advancing this on every
                                     // completion leaves it pointing just past the last
@@ -1275,12 +1320,19 @@ impl AdapterRouter {
                                         .await;
                                     conn.replace_config_options_from_acp(options);
                                 }
-                                _ => {}
+                                AcpEvent::Plan { content } => {
+                                    session_pool
+                                        .transcript_store()
+                                        .record_system_text(&session_key, content, "plan");
+                                }
                             }
                         }
                     }
 
                     conn.prompt_done().await;
+                    session_pool
+                        .transcript_store()
+                        .finish_assistant_turn(&session_key);
                     // Stop the cosmetic edit loop before the finalize write path
                     // issues its authoritative edit. Dropping buf_tx closes the watch
                     // channel so the loop breaks on its next check, but it may be
@@ -1953,15 +2005,15 @@ fn append_observability_footer(
     label: Option<&str>,
 ) -> String {
     let mut fields = Vec::with_capacity(4);
-    if let Some((url, label)) =
-        snapshot.and_then(|value| value.external_url.as_deref()).zip(label)
+    if let Some((url, label)) = snapshot
+        .and_then(|value| value.external_url.as_deref())
+        .zip(label)
     {
         fields.push(format!("[{label}]({url})"));
     }
 
-    let runtime_snapshot = snapshot.filter(|value| {
-        value.metadata_source == Some(SessionMetadataSource::Acp)
-    });
+    let runtime_snapshot =
+        snapshot.filter(|value| value.metadata_source == Some(SessionMetadataSource::Acp));
     let agent = runtime_snapshot
         .and_then(|value| non_empty(Some(value.agent.as_str())))
         .unwrap_or("not reported");
@@ -1973,10 +2025,7 @@ fn append_observability_footer(
         .unwrap_or("not reported");
     fields.push(format!("Agent: `{}`", inline_metadata(agent)));
     fields.push(format!("Model: `{}`", inline_metadata(model)));
-    fields.push(format!(
-        "Thinking: `{}`",
-        inline_metadata(reasoning_effort)
-    ));
+    fields.push(format!("Thinking: `{}`", inline_metadata(reasoning_effort)));
 
     let footer = fields.join(" · ");
     let content = content.trim_end();
@@ -2097,9 +2146,7 @@ fn find_matching_tag_end(content: &str, tag: &str, from: usize) -> Option<usize>
         let next_open = find_opening_tag(content, tag, cursor);
         let next_close = find_ascii_case_insensitive(content, &close, cursor);
         match (next_open, next_close) {
-            (Some((open_start, body_start)), Some(close_start))
-                if open_start < close_start =>
-            {
+            (Some((open_start, body_start)), Some(close_start)) if open_start < close_start => {
                 depth += 1;
                 cursor = body_start;
             }
@@ -2121,9 +2168,7 @@ fn strip_delimited_blocks(content: &str, start_marker: &str, end_marker: &str) -
     while let Some(start) = find_ascii_case_insensitive(content, start_marker, cursor) {
         visible.push_str(&content[cursor..start]);
         let body_start = start + start_marker.len();
-        if let Some(end_start) =
-            find_ascii_case_insensitive(content, end_marker, body_start)
-        {
+        if let Some(end_start) = find_ascii_case_insensitive(content, end_marker, body_start) {
             cursor = end_start + end_marker.len();
         } else {
             cursor = content.len();
@@ -2186,8 +2231,10 @@ fn find_opening_tag(content: &str, tag: &str, from: usize) -> Option<(usize, usi
     while let Some(start) = find_ascii_case_insensitive(content, &needle, cursor) {
         let after_name = start + needle.len();
         let delimiter = content.as_bytes().get(after_name).copied();
-        if matches!(delimiter, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n'))
-        {
+        if matches!(
+            delimiter,
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
             let body_start = content[after_name..].find('>')? + after_name + 1;
             return Some((start, body_start));
         }
@@ -2985,11 +3032,7 @@ mod tests {
         {
             let sends = adapter.sends.lock().unwrap();
             assert_eq!(sends.len(), 1, "receipt must create exactly one message");
-            assert!(
-                sends[0].contains("OpenAB · 正在处理"),
-                "got: {}",
-                sends[0]
-            );
+            assert!(sends[0].contains("OpenAB · 正在处理"), "got: {}", sends[0]);
             assert!(
                 sends[0].contains("[Open in OpenAB Plus]("),
                 "got: {}",
@@ -3004,11 +3047,7 @@ mod tests {
             1,
             "no-tool finish must close the receipt with one edit"
         );
-        assert!(
-            edits[0].contains("OpenAB · 已完成"),
-            "got: {}",
-            edits[0]
-        );
+        assert!(edits[0].contains("OpenAB · 已完成"), "got: {}", edits[0]);
         assert!(
             edits[0].contains("[Open in OpenAB Plus]("),
             "got: {}",
@@ -3018,11 +3057,7 @@ mod tests {
         progress.finish(&[], true).await;
         let edits = adapter.edits.lock().unwrap();
         assert_eq!(edits.len(), 2, "failed finish must edit the same receipt");
-        assert!(
-            edits[1].contains("OpenAB · 处理失败"),
-            "got: {}",
-            edits[1]
-        );
+        assert!(edits[1].contains("OpenAB · 处理失败"), "got: {}", edits[1]);
         assert!(!edits[1].contains("已完成"), "got: {}", edits[1]);
     }
 
@@ -3165,8 +3200,7 @@ mod tests {
 
     #[test]
     fn privacy_filter_removes_nested_hidden_blocks() {
-        let input =
-            "before<analysis>outer<ANALYSIS>nested secret</ANALYSIS>tail</analysis>after";
+        let input = "before<analysis>outer<ANALYSIS>nested secret</ANALYSIS>tail</analysis>after";
         assert_eq!(sanitize_user_visible_text(input), "beforeafter");
     }
 
@@ -3220,9 +3254,8 @@ mod tests {
 
     #[test]
     fn public_error_never_echoes_raw_details() {
-        let output = format_public_error(
-            "<system>private prompt</system> tool schema at /srv/secrets",
-        );
+        let output =
+            format_public_error("<system>private prompt</system> tool schema at /srv/secrets");
         assert!(output.contains("任务执行失败"));
         assert!(!output.contains("private prompt"));
         assert!(!output.contains("/srv/secrets"));
@@ -3256,13 +3289,11 @@ mod tests {
             None,
             Some("https://openab.example"),
         );
-        snapshot.replace_runtime_metadata(
-            crate::session_snapshot::SessionRuntimeMetadata::acp(
-                Some("codex-acp".into()),
-                Some("gpt-5".into()),
-                Some("high".into()),
-            ),
-        );
+        snapshot.replace_runtime_metadata(crate::session_snapshot::SessionRuntimeMetadata::acp(
+            Some("codex-acp".into()),
+            Some("gpt-5".into()),
+            Some("high".into()),
+        ));
         let output =
             append_observability_footer("完成", Some(&snapshot), Some("Open in OpenAB Plus"));
         assert!(output.contains("[Open in OpenAB Plus](https://openab.example/#/sessions/"));

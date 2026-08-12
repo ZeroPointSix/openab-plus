@@ -1,7 +1,7 @@
 use crate::session_snapshot::SessionSnapshot;
+use crate::transcript::TranscriptEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -40,6 +40,29 @@ pub struct SessionEvent {
     pub snapshot: SessionSnapshot,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum SessionStreamEvent {
+    Session(SessionEvent),
+    Transcript(TranscriptEvent),
+}
+
+impl SessionStreamEvent {
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Self::Session(event) => event.sequence,
+            Self::Transcript(event) => event.sequence,
+        }
+    }
+
+    pub fn as_sse_event(&self) -> &'static str {
+        match self {
+            Self::Session(event) => event.event.as_sse_event(),
+            Self::Transcript(_) => "transcript",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionEventReplay {
     pub events: Vec<SessionEvent>,
@@ -51,6 +74,19 @@ pub struct SessionEventReplay {
 pub struct SessionEventSubscription {
     pub receiver: broadcast::Receiver<SessionEvent>,
     pub replay: SessionEventReplay,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionStreamReplay {
+    pub events: Vec<SessionStreamEvent>,
+    pub overflowed: bool,
+    pub oldest_sequence: Option<u64>,
+    pub next_sequence: u64,
+}
+
+pub struct SessionStreamSubscription {
+    pub receiver: broadcast::Receiver<SessionStreamEvent>,
+    pub replay: SessionStreamReplay,
 }
 
 #[derive(Debug)]
@@ -96,28 +132,71 @@ impl SessionEventHistory {
     }
 }
 
-#[derive(Clone)]
-pub struct SessionEventBus {
-    tx: broadcast::Sender<SessionEvent>,
-    generation: Arc<str>,
-    next_sequence: Arc<AtomicU64>,
-    history: Arc<Mutex<SessionEventHistory>>,
+#[derive(Debug)]
+struct SessionStreamHistory {
+    capacity: usize,
+    next_sequence: u64,
+    events: VecDeque<SessionStreamEvent>,
 }
 
-impl Default for SessionEventBus {
-    fn default() -> Self {
-        Self::new(DEFAULT_HISTORY_CAPACITY)
+impl SessionStreamHistory {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            next_sequence: 1,
+            events: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, event: SessionStreamEvent) {
+        while self.events.len() >= self.capacity {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+    }
+
+    fn replay_after(&self, last_sequence: u64) -> SessionStreamReplay {
+        let oldest_sequence = self.events.front().map(SessionStreamEvent::sequence);
+        let overflowed = match oldest_sequence {
+            Some(oldest_sequence) => last_sequence < oldest_sequence.saturating_sub(1),
+            None => false,
+        };
+        let events = self
+            .events
+            .iter()
+            .filter(|event| event.sequence() > last_sequence)
+            .cloned()
+            .collect();
+
+        SessionStreamReplay {
+            events,
+            overflowed,
+            oldest_sequence,
+            next_sequence: self.next_sequence,
+        }
     }
 }
 
-impl SessionEventBus {
+/// A unified, read-only event stream used by the session SSE endpoint.
+///
+/// Lifecycle events still retain their dedicated [`SessionEventBus`] so high-rate
+/// transcript activity never becomes lifecycle-bus traffic. This bus only assigns
+/// a common generation and monotonically increasing sequence to the already
+/// separate lifecycle and transcript producers.
+#[derive(Clone)]
+pub struct SessionStreamBus {
+    tx: broadcast::Sender<SessionStreamEvent>,
+    generation: Arc<str>,
+    history: Arc<Mutex<SessionStreamHistory>>,
+}
+
+impl SessionStreamBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity.max(1));
         Self {
             tx,
             generation: Uuid::new_v4().simple().to_string().into(),
-            next_sequence: Arc::new(AtomicU64::new(1)),
-            history: Arc::new(Mutex::new(SessionEventHistory::new(capacity))),
+            history: Arc::new(Mutex::new(SessionStreamHistory::new(capacity))),
         }
     }
 
@@ -129,6 +208,106 @@ impl SessionEventBus {
         format!("{}:{sequence}", self.generation())
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<SessionStreamEvent> {
+        self.tx.subscribe()
+    }
+
+    pub fn subscribe_after(&self, last_sequence: Option<u64>) -> SessionStreamSubscription {
+        let history = self.history.lock().expect("session stream history lock");
+        let replay = last_sequence
+            .map(|last_sequence| history.replay_after(last_sequence))
+            .unwrap_or_default();
+        let receiver = self.tx.subscribe();
+        SessionStreamSubscription { receiver, replay }
+    }
+
+    pub fn replay_after(&self, last_sequence: u64) -> SessionStreamReplay {
+        self.history
+            .lock()
+            .expect("session stream history lock")
+            .replay_after(last_sequence)
+    }
+
+    pub(crate) fn publish_session(
+        &self,
+        event: SessionEventKind,
+        snapshot: SessionSnapshot,
+    ) -> SessionEvent {
+        let mut history = self.history.lock().expect("session stream history lock");
+        let published = SessionEvent {
+            sequence: history.next_sequence,
+            event,
+            snapshot,
+        };
+        history.next_sequence += 1;
+        let stream_event = SessionStreamEvent::Session(published.clone());
+        history.push(stream_event.clone());
+        let _ = self.tx.send(stream_event);
+        published
+    }
+
+    /// Serialize a transcript mutation with global stream sequence allocation.
+    /// The closure may update the per-session transcript ring buffer before the
+    /// event is put into this stream's replay history.
+    pub(crate) fn publish_transcript<F>(&self, build: F) -> TranscriptEvent
+    where
+        F: FnOnce(u64) -> TranscriptEvent,
+    {
+        let mut history = self.history.lock().expect("session stream history lock");
+        let sequence = history.next_sequence;
+        history.next_sequence += 1;
+        let published = build(sequence);
+        // `published.sequence` is global to the SSE stream, while
+        // `published.entry.sequence` is local to its session's snapshot API.
+        let stream_event = SessionStreamEvent::Transcript(published.clone());
+        history.push(stream_event.clone());
+        let _ = self.tx.send(stream_event);
+        published
+    }
+
+    fn next_sequence(&self) -> u64 {
+        self.history
+            .lock()
+            .expect("session stream history lock")
+            .next_sequence
+    }
+}
+
+#[derive(Clone)]
+pub struct SessionEventBus {
+    tx: broadcast::Sender<SessionEvent>,
+    stream: SessionStreamBus,
+    history: Arc<Mutex<SessionEventHistory>>,
+}
+
+impl Default for SessionEventBus {
+    fn default() -> Self {
+        Self::new(DEFAULT_HISTORY_CAPACITY)
+    }
+}
+
+impl SessionEventBus {
+    pub fn new(capacity: usize) -> Self {
+        Self::new_with_stream(capacity, SessionStreamBus::new(capacity))
+    }
+
+    pub(crate) fn new_with_stream(capacity: usize, stream: SessionStreamBus) -> Self {
+        let (tx, _) = broadcast::channel(capacity.max(1));
+        Self {
+            tx,
+            stream,
+            history: Arc::new(Mutex::new(SessionEventHistory::new(capacity))),
+        }
+    }
+
+    pub fn generation(&self) -> &str {
+        self.stream.generation()
+    }
+
+    pub fn event_id(&self, sequence: u64) -> String {
+        self.stream.event_id(sequence)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.tx.subscribe()
     }
@@ -136,9 +315,7 @@ impl SessionEventBus {
     pub fn subscribe_after(&self, last_sequence: Option<u64>) -> SessionEventSubscription {
         let history = self.history.lock().expect("session event history lock");
         let replay = last_sequence
-            .map(|last_sequence| {
-                history.replay_after(last_sequence, self.next_sequence.load(Ordering::Relaxed))
-            })
+            .map(|last_sequence| history.replay_after(last_sequence, self.stream.next_sequence()))
             .unwrap_or_default();
         let receiver = self.tx.subscribe();
 
@@ -149,17 +326,15 @@ impl SessionEventBus {
         self.history
             .lock()
             .expect("session event history lock")
-            .replay_after(last_sequence, self.next_sequence.load(Ordering::Relaxed))
+            .replay_after(last_sequence, self.stream.next_sequence())
     }
 
     pub fn publish(&self, event: SessionEventKind, snapshot: SessionSnapshot) -> SessionEvent {
-        let mut history = self.history.lock().expect("session event history lock");
-        let published = SessionEvent {
-            sequence: self.next_sequence.fetch_add(1, Ordering::Relaxed),
-            event,
-            snapshot,
-        };
-        history.push(published.clone());
+        let published = self.stream.publish_session(event, snapshot);
+        self.history
+            .lock()
+            .expect("session event history lock")
+            .push(published.clone());
         let _ = self.tx.send(published.clone());
         published
     }

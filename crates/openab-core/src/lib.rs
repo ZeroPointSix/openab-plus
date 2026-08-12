@@ -21,12 +21,13 @@ pub mod profile_store;
 pub mod reactions;
 #[cfg(feature = "discord")]
 pub mod remind;
+pub mod secrets;
 pub mod session_event;
 pub mod session_snapshot;
-pub mod secrets;
 pub mod setup;
 pub mod stt;
 pub mod timestamp;
+pub mod transcript;
 pub mod trust;
 
 #[cfg(feature = "discord")]
