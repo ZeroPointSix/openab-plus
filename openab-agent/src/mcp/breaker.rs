@@ -43,6 +43,12 @@ pub enum Verdict {
 struct Entry {
     consecutive_failures: u32,
     opened_at: Option<Instant>,
+    /// Monotonic ticket generation for transport attempts. Callers capture
+    /// this immediately before sending a request. The first failure for a
+    /// generation advances it; sibling failures from requests that were
+    /// already in flight carry the stale generation and are ignored. This
+    /// keeps one parallel outage wave from consuming the whole threshold.
+    failure_epoch: u64,
     /// When the in-flight half-open probe was handed out, if any. Replaces a
     /// bare `bool` so a probe whose caller never records an outcome (panicked
     /// or dropped mid-dial) can be aged out: once it is older than [`COOLDOWN`]
@@ -106,10 +112,26 @@ impl ServerBreaker {
 
     /// Reset the breaker for `server` — clears failure count and opened-at
     /// timestamp. Call on any unambiguous success (successful tool call,
-    /// successful connect).
+    /// successful connect). Advancing the epoch also invalidates failures
+    /// from older parallel requests that complete after this success.
     pub fn record_success(&self, server: &str) {
         let mut entries = self.entries.lock().expect("breaker mutex poisoned");
-        entries.remove(server);
+        let entry = entries.entry(server.to_string()).or_default();
+        entry.consecutive_failures = 0;
+        entry.opened_at = None;
+        entry.probe_started_at = None;
+        entry.failure_epoch = entry.failure_epoch.wrapping_add(1);
+    }
+
+    /// Capture the current failure epoch immediately before a transport
+    /// request is sent. Parallel requests that start from the same healthy
+    /// state receive the same epoch, so only their first failure is counted.
+    pub fn failure_epoch(&self, server: &str) -> u64 {
+        let mut entries = self.entries.lock().expect("breaker mutex poisoned");
+        entries
+            .entry(server.to_string())
+            .or_default()
+            .failure_epoch
     }
 
     /// Record a transport-level failure for `server`. When the count
@@ -122,8 +144,30 @@ impl ServerBreaker {
     fn record_failure_at(&self, server: &str, now: Instant) {
         let mut entries = self.entries.lock().expect("breaker mutex poisoned");
         let entry = entries.entry(server.to_string()).or_default();
+        let epoch = entry.failure_epoch;
+        Self::record_failure_for_epoch(entry, epoch, now);
+    }
+
+    /// Record a failure only if `epoch` is still current. Returns `true` when
+    /// this call advanced the consecutive-failure counter and `false` when a
+    /// sibling request already recorded the same parallel failure wave.
+    pub fn record_failure_if_current(&self, server: &str, epoch: u64) -> bool {
+        self.record_failure_at_if_current(server, epoch, Instant::now())
+    }
+
+    fn record_failure_at_if_current(&self, server: &str, epoch: u64, now: Instant) -> bool {
+        let mut entries = self.entries.lock().expect("breaker mutex poisoned");
+        let entry = entries.entry(server.to_string()).or_default();
+        Self::record_failure_for_epoch(entry, epoch, now)
+    }
+
+    fn record_failure_for_epoch(entry: &mut Entry, epoch: u64, now: Instant) -> bool {
+        if entry.failure_epoch != epoch {
+            return false;
+        }
         let was_probe = entry.probe_started_at.is_some();
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+        entry.failure_epoch = entry.failure_epoch.wrapping_add(1);
         entry.probe_started_at = None;
         if entry.consecutive_failures >= FAIL_THRESHOLD {
             // Stamp `opened_at` only on the Closed→Open transition (no
@@ -136,6 +180,7 @@ impl ServerBreaker {
                 entry.opened_at = Some(now);
             }
         }
+        true
     }
 
     /// True while the breaker has tripped for `server` — it has reached
@@ -193,6 +238,46 @@ mod tests {
         b.record_failure("foo");
         b.record_success("foo");
         b.record_failure("foo");
+        assert_eq!(b.check("foo"), Verdict::Allow);
+    }
+
+    #[test]
+    fn parallel_failures_with_the_same_epoch_count_once() {
+        let b = ServerBreaker::new();
+        let parallel_epoch = b.failure_epoch("foo");
+
+        assert!(b.record_failure_if_current("foo", parallel_epoch));
+        assert!(!b.record_failure_if_current("foo", parallel_epoch));
+        assert!(!b.record_failure_if_current("foo", parallel_epoch));
+        assert_eq!(
+            b.entries.lock().unwrap()["foo"].consecutive_failures,
+            1,
+            "one parallel outage wave counts as one consecutive failure"
+        );
+        assert_eq!(b.check("foo"), Verdict::Allow);
+
+        // Fresh retries capture fresh epochs and therefore still advance the
+        // streak one at a time until the configured threshold is reached.
+        for expected in 2..=FAIL_THRESHOLD {
+            let retry_epoch = b.failure_epoch("foo");
+            assert!(b.record_failure_if_current("foo", retry_epoch));
+            assert_eq!(
+                b.entries.lock().unwrap()["foo"].consecutive_failures,
+                expected
+            );
+        }
+        assert!(matches!(b.check("foo"), Verdict::Reject { .. }));
+    }
+
+    #[test]
+    fn success_invalidates_late_parallel_failures() {
+        let b = ServerBreaker::new();
+        let stale_epoch = b.failure_epoch("foo");
+        assert!(b.record_failure_if_current("foo", stale_epoch));
+
+        b.record_success("foo");
+        assert!(!b.record_failure_if_current("foo", stale_epoch));
+        assert_eq!(b.entries.lock().unwrap()["foo"].consecutive_failures, 0);
         assert_eq!(b.check("foo"), Verdict::Allow);
     }
 

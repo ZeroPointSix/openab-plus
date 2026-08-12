@@ -236,6 +236,7 @@ async fn call_tool(
     let request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
     let mut options = PeerRequestOptions::no_options();
     options.timeout = Some(timeout);
+    let failure_epoch = manager.failure_epoch(server);
     // Wire-level Err = transport failure → trips the breaker; wire-level
     // Ok (even with `isError: true`) resets it. See ADR §5.9 / #966 Q2.
     // On timeout rmcp auto-emits notifications/cancelled (reason "request
@@ -249,11 +250,14 @@ async fn call_tool(
     .await;
     let result = match send_result {
         Ok(ServerResult::CallToolResult(r)) => {
-            manager.record_tool_call_outcome(server, true);
+            manager.record_tool_call_outcome(server, failure_epoch, true);
             r
         }
         Ok(_) => {
-            manager.record_tool_call_outcome(server, false);
+            // The response shape is invalid for this request, but receiving a
+            // wire-level response proves the transport is healthy. Keep the
+            // caller-facing error without poisoning the transport breaker.
+            manager.record_tool_call_outcome(server, failure_epoch, true);
             tracing::info!(
                 target: "mcp.audit",
                 server,
@@ -301,7 +305,7 @@ async fn call_tool(
             // It must not trip the breaker or tear down the live client. Mirror
             // the Ok-reset semantics above (ADR §5.9 error model).
             if matches!(e, ServiceError::McpError(_)) {
-                manager.record_tool_call_outcome(server, true);
+                manager.record_tool_call_outcome(server, failure_epoch, true);
                 tracing::info!(
                     target: "mcp.audit",
                     server,
@@ -315,7 +319,7 @@ async fn call_tool(
                 return Err(anyhow::Error::new(e))
                     .with_context(|| format!("call_tool {tool:?} on {server:?}"));
             }
-            manager.record_tool_call_outcome(server, false);
+            manager.record_tool_call_outcome(server, failure_epoch, false);
             // Transport fault: the installed client is dead. Tear it down so the
             // next connect() redials instead of reusing a dead handle via the
             // Connected fast-path (#959 F1). Best-effort — teardown failure must
@@ -383,6 +387,7 @@ async fn fetch_tools(manager: &McpRuntimeManager, server: &str) -> Result<Vec<rm
         ));
         let mut options = PeerRequestOptions::no_options();
         options.timeout = Some(timeout);
+        let failure_epoch = manager.failure_epoch(server);
         let page = async {
             peer.send_request_with_option(request, options)
                 .await?
@@ -392,7 +397,7 @@ async fn fetch_tools(manager: &McpRuntimeManager, server: &str) -> Result<Vec<rm
         .await;
         match page {
             Ok(ServerResult::ListToolsResult(result)) => {
-                manager.record_tool_call_outcome(server, true);
+                manager.record_tool_call_outcome(server, failure_epoch, true);
                 tools.extend(result.tools);
                 cursor = result.next_cursor;
                 if cursor.is_none() {
@@ -400,7 +405,9 @@ async fn fetch_tools(manager: &McpRuntimeManager, server: &str) -> Result<Vec<rm
                 }
             }
             Ok(_) => {
-                manager.record_tool_call_outcome(server, false);
+                // Unexpected result variant is a protocol-shape error, not a
+                // transport fault: the server did answer on the wire.
+                manager.record_tool_call_outcome(server, failure_epoch, true);
                 return Err(anyhow!("list_tools on {server:?}: unexpected response"));
             }
             Err(e) => {
@@ -422,11 +429,11 @@ async fn fetch_tools(manager: &McpRuntimeManager, server: &str) -> Result<Vec<rm
                 // JSON-RPC error reply (McpError) = wire-level response, not a
                 // transport fault — don't trip the breaker (ADR §5.9).
                 if matches!(e, ServiceError::McpError(_)) {
-                    manager.record_tool_call_outcome(server, true);
+                    manager.record_tool_call_outcome(server, failure_epoch, true);
                     return Err(anyhow::Error::new(e))
                         .with_context(|| format!("list_tools on {server:?}"));
                 }
-                manager.record_tool_call_outcome(server, false);
+                manager.record_tool_call_outcome(server, failure_epoch, false);
                 return Err(anyhow::Error::new(e))
                     .with_context(|| format!("list_tools on {server:?}"));
             }
