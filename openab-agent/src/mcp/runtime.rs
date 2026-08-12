@@ -1568,12 +1568,7 @@ impl McpRuntimeManager {
     /// Wire-level `Err` is a transport-level failure and increments the
     /// counter — matching the single-counter / transport-only model from
     /// the #966 design decisions.
-    pub fn record_tool_call_outcome(
-        &self,
-        name: &str,
-        failure_epoch: u64,
-        ok: bool,
-    ) -> bool {
+    pub fn record_tool_call_outcome(&self, name: &str, failure_epoch: u64, ok: bool) -> bool {
         if ok {
             self.breaker.record_success(name);
             true

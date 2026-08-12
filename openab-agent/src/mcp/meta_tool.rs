@@ -319,8 +319,7 @@ async fn call_tool(
                 return Err(anyhow::Error::new(e))
                     .with_context(|| format!("call_tool {tool:?} on {server:?}"));
             }
-            let current_failure =
-                manager.record_tool_call_outcome(server, failure_epoch, false);
+            let current_failure = manager.record_tool_call_outcome(server, failure_epoch, false);
             // Only the first failure from the current transport epoch may tear
             // down the installed client. A successful sibling request advances
             // the epoch, so a late stale failure must not disconnect a connection
