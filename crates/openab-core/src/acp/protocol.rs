@@ -353,11 +353,16 @@ pub enum AcpEvent {
     ToolStart {
         id: String,
         title: String,
+        /// Complete ACP update, retained for transcript consumers that need
+        /// tool input, output, terminal data, or file-diff details.
+        payload: Value,
     },
     ToolDone {
         id: String,
         title: String,
         status: String,
+        /// Complete ACP update; tool_call_update payloads vary by agent.
+        payload: Value,
     },
     ConfigUpdate {
         options: Vec<ConfigOption>,
@@ -405,7 +410,11 @@ pub fn classify_notification(msg: &JsonRpcMessage) -> Option<AcpEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(AcpEvent::ToolStart { id: tool_id, title })
+            Some(AcpEvent::ToolStart {
+                id: tool_id,
+                title,
+                payload: update.clone(),
+            })
         }
         "tool_call_update" => {
             let title = update
@@ -423,9 +432,14 @@ pub fn classify_notification(msg: &JsonRpcMessage) -> Option<AcpEvent> {
                     id: tool_id,
                     title,
                     status,
+                    payload: update.clone(),
                 })
             } else {
-                Some(AcpEvent::ToolStart { id: tool_id, title })
+                Some(AcpEvent::ToolStart {
+                    id: tool_id,
+                    title,
+                    payload: update.clone(),
+                })
             }
         }
         "plan" => {

@@ -58,9 +58,11 @@ impl SessionPool {
         pools.insert("system".to_string(), system_pool);
         let external_base_url = session_external_base_url_from_env();
         let transcript_capacity = SessionTranscriptStore::capacity_from_env();
-        let session_stream = SessionStreamBus::new(transcript_capacity);
-        let session_events =
-            SessionEventBus::new_with_stream(transcript_capacity, session_stream.clone());
+        // Transcript retention is configurable independently from the existing
+        // lifecycle event history. Keep the lifecycle/SSE replay buffer at its
+        // established default rather than changing it with transcript tuning.
+        let session_stream = SessionStreamBus::default();
+        let session_events = SessionEventBus::new_with_stream(session_stream.clone());
         let transcripts = SessionTranscriptStore::new(transcript_capacity, session_stream.clone());
         Self {
             base_config: config,

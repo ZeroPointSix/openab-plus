@@ -15,6 +15,7 @@ use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
 use crate::session_snapshot::{SessionMetadataSource, SessionSnapshot, SessionStatus};
+use crate::transcript::{SessionTranscriptStore, ToolTranscriptUpdate};
 
 // --- Output directive parsing ---
 
@@ -53,6 +54,54 @@ fn record_prompt_transcript(pool: &SessionPool, session_id: &str, blocks: &[Cont
     if !content.is_empty() {
         pool.transcript_store()
             .record_user_text(session_id, content);
+    }
+}
+
+/// Persist the complete ACP event before its presentation-specific handling.
+/// The transcript is a read-only observability feed, so it retains raw tool
+/// updates while the channel UI continues to use the existing title/status view.
+fn record_acp_event_transcript(store: &SessionTranscriptStore, session_id: &str, event: &AcpEvent) {
+    match event {
+        AcpEvent::Text(content) => {
+            store.append_assistant_text(session_id, content);
+        }
+        AcpEvent::Thinking { content } => {
+            store.append_thinking(session_id, content);
+        }
+        AcpEvent::ToolStart { id, title, payload } => {
+            store.finish_assistant_turn(session_id);
+            store.upsert_tool_call(
+                session_id,
+                ToolTranscriptUpdate {
+                    tool_call_id: id.clone(),
+                    title: title.clone(),
+                    status: "running".to_string(),
+                    completed: false,
+                    payload: payload.clone(),
+                },
+            );
+        }
+        AcpEvent::ToolDone {
+            id,
+            title,
+            status,
+            payload,
+        } => {
+            store.upsert_tool_call(
+                session_id,
+                ToolTranscriptUpdate {
+                    tool_call_id: id.clone(),
+                    title: title.clone(),
+                    status: status.clone(),
+                    completed: true,
+                    payload: payload.clone(),
+                },
+            );
+        }
+        AcpEvent::Plan { content } => {
+            store.record_system_text(session_id, content, "plan");
+        }
+        AcpEvent::ConfigUpdate { .. } => {}
     }
 }
 
@@ -1129,11 +1178,10 @@ impl AdapterRouter {
                         }
 
                         if let Some(event) = classify_notification(&notification) {
+                            let transcript_store = session_pool.transcript_store();
+                            record_acp_event_transcript(&transcript_store, &session_key, &event);
                             match event {
                                 AcpEvent::Text(t) => {
-                                    session_pool
-                                        .transcript_store()
-                                        .append_assistant_text(&session_key, &t);
                                     text_buf.push_str(&t);
                                     // Tool-progress adapters seed the session receipt on the
                                     // first text. A turn that never calls a tool would otherwise
@@ -1183,10 +1231,7 @@ impl AdapterRouter {
                                         ));
                                     }
                                 }
-                                AcpEvent::Thinking { content } => {
-                                    session_pool
-                                        .transcript_store()
-                                        .append_thinking(&session_key, content);
+                                AcpEvent::Thinking { .. } => {
                                     if assistant_status {
                                         let _ = adapter
                                             .set_status(&thread_channel, "Thinking…")
@@ -1195,17 +1240,7 @@ impl AdapterRouter {
                                         reactions.set_thinking().await;
                                     }
                                 }
-                                AcpEvent::ToolStart { id, title } => {
-                                    session_pool
-                                        .transcript_store()
-                                        .finish_assistant_turn(&session_key);
-                                    session_pool.transcript_store().upsert_tool_call(
-                                        &session_key,
-                                        &id,
-                                        &title,
-                                        "running",
-                                        false,
-                                    );
+                                AcpEvent::ToolStart { id, title, .. } => {
                                     if title.is_empty() {
                                         continue;
                                     }
@@ -1260,14 +1295,9 @@ impl AdapterRouter {
                                         ));
                                     }
                                 }
-                                AcpEvent::ToolDone { id, title, status } => {
-                                    session_pool.transcript_store().upsert_tool_call(
-                                        &session_key,
-                                        &id,
-                                        &title,
-                                        &status,
-                                        true,
-                                    );
+                                AcpEvent::ToolDone {
+                                    id, title, status, ..
+                                } => {
                                     // The final answer block is whatever text the agent
                                     // emits AFTER its last tool. Advancing this on every
                                     // completion leaves it pointing just past the last
@@ -1320,11 +1350,7 @@ impl AdapterRouter {
                                         .await;
                                     conn.replace_config_options_from_acp(options);
                                 }
-                                AcpEvent::Plan { content } => {
-                                    session_pool
-                                        .transcript_store()
-                                        .record_system_text(&session_key, content, "plan");
-                                }
+                                AcpEvent::Plan { .. } => {}
                             }
                         }
                     }
@@ -2575,6 +2601,64 @@ fn propagate_mentions_to_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::protocol::JsonRpcMessage;
+    use crate::session_event::SessionStreamBus;
+    use crate::transcript::SessionTranscriptStore;
+    use serde_json::json;
+
+    #[test]
+    fn acp_tool_notifications_retain_full_payload_in_transcript() {
+        let store = SessionTranscriptStore::new(8, SessionStreamBus::new(8));
+        let tool_call = JsonRpcMessage {
+            id: None,
+            method: Some("session/update".into()),
+            result: None,
+            error: None,
+            params: Some(json!({
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tool-42",
+                    "title": "Terminal",
+                    "rawInput": {"command": "git status"}
+                }
+            })),
+        };
+        let tool_done = JsonRpcMessage {
+            id: None,
+            method: Some("session/update".into()),
+            result: None,
+            error: None,
+            params: Some(json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tool-42",
+                    "status": "completed",
+                    "content": [{"type": "text", "text": "working tree clean"}],
+                    "diff": {"path": "src/lib.rs", "after": "new"}
+                }
+            })),
+        };
+
+        let start = classify_notification(&tool_call).expect("classify tool call");
+        record_acp_event_transcript(&store, "session", &start);
+        let done = classify_notification(&tool_done).expect("classify tool completion");
+        record_acp_event_transcript(&store, "session", &done);
+
+        let snapshot = store.snapshot("session", None);
+        assert_eq!(snapshot.entries.len(), 1);
+        let entry = &snapshot.entries[0];
+        assert_eq!(entry.tool_call_id.as_deref(), Some("tool-42"));
+        assert_eq!(entry.status.as_deref(), Some("completed"));
+        assert_eq!(
+            entry.tool_call.as_ref().unwrap()["rawInput"]["command"],
+            "git status"
+        );
+        assert_eq!(
+            entry.tool_result.as_ref().unwrap()["content"][0]["text"],
+            "working tree clean"
+        );
+        assert_eq!(entry.tool_result.as_ref().unwrap()["diff"]["after"], "new");
+    }
 
     #[test]
     fn acp_reply_limit_is_unbounded_others_use_adapter_limit() {
