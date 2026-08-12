@@ -319,12 +319,16 @@ async fn call_tool(
                 return Err(anyhow::Error::new(e))
                     .with_context(|| format!("call_tool {tool:?} on {server:?}"));
             }
-            manager.record_tool_call_outcome(server, failure_epoch, false);
-            // Transport fault: the installed client is dead. Tear it down so the
-            // next connect() redials instead of reusing a dead handle via the
-            // Connected fast-path (#959 F1). Best-effort — teardown failure must
-            // not mask the original transport error returned below.
-            let _ = manager.disconnect(server).await;
+            let current_failure =
+                manager.record_tool_call_outcome(server, failure_epoch, false);
+            // Only the first failure from the current transport epoch may tear
+            // down the installed client. A successful sibling request advances
+            // the epoch, so a late stale failure must not disconnect a connection
+            // that has already proved healthy. Best-effort — teardown failure
+            // must not mask the original transport error returned below.
+            if current_failure {
+                let _ = manager.disconnect(server).await;
+            }
             tracing::info!(
                 target: "mcp.audit",
                 server,

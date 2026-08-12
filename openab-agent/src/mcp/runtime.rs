@@ -1568,11 +1568,17 @@ impl McpRuntimeManager {
     /// Wire-level `Err` is a transport-level failure and increments the
     /// counter — matching the single-counter / transport-only model from
     /// the #966 design decisions.
-    pub fn record_tool_call_outcome(&self, name: &str, failure_epoch: u64, ok: bool) {
+    pub fn record_tool_call_outcome(
+        &self,
+        name: &str,
+        failure_epoch: u64,
+        ok: bool,
+    ) -> bool {
         if ok {
             self.breaker.record_success(name);
+            true
         } else {
-            self.breaker.record_failure_if_current(name, failure_epoch);
+            self.breaker.record_failure_if_current(name, failure_epoch)
         }
     }
 
@@ -2153,6 +2159,18 @@ mod tests {
         assert!(mgr.is_empty().await);
         assert!(mgr.statuses().await.is_empty());
         assert!(mgr.catalog().is_empty());
+    }
+
+    #[test]
+    fn stale_tool_failure_is_not_actionable_after_success() {
+        let mgr = McpRuntimeManager::from_config(McpConfig::default());
+        let stale_epoch = mgr.failure_epoch("foo");
+
+        assert!(mgr.record_tool_call_outcome("foo", stale_epoch, true));
+        assert!(
+            !mgr.record_tool_call_outcome("foo", stale_epoch, false),
+            "a late failure from an older epoch must not trigger transport teardown"
+        );
     }
 
     #[test]
