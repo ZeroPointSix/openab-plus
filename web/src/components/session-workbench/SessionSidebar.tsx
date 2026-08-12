@@ -39,6 +39,12 @@ function sessionTitle(session: SessionSnapshot): string {
   return platform + ' · ' + session.session_id.slice(0, 12);
 }
 
+function agentGroup(session: SessionSnapshot): string {
+  const agent = session.agent || '未知 Agent';
+  const profile = session.profile_name || session.profile_id;
+  return profile ? profile + ' · ' + agent : agent;
+}
+
 export function SessionSidebar({
   sessions,
   loading,
@@ -85,7 +91,7 @@ export function SessionSidebar({
     () =>
       filteredSessions.map((session) => ({
         key: session.session_id,
-        group: session.agent || '未知 Agent',
+        group: agentGroup(session),
         timestamp: new Date(session.updated_at || session.created_at).getTime(),
         icon: <EntityMark name={session.agent} size={22} />,
         label: (
@@ -109,7 +115,7 @@ export function SessionSidebar({
         <div>
           <Typography.Text strong>Agent 会话</Typography.Text>
           <Typography.Text type="secondary" className="workbench-panel-caption">
-            按 Agent 分组 · {filteredSessions.length} 条
+            按 Profile / Agent 分组 · {filteredSessions.length} 条
           </Typography.Text>
         </div>
         {onReload ? (
