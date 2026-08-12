@@ -510,7 +510,7 @@ impl SessionPool {
         let mut snapshots = self.snapshots.write().await;
         if let Some(snapshot) = snapshots.get_mut(thread_id) {
             if snapshot.source.permalink.as_deref() != Some(permalink.as_str()) {
-                snapshot.set_source_permalink(permalink);
+                snapshot.set_source_permalink(Some(&permalink));
             }
         }
     }

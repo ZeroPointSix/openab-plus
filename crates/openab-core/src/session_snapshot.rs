@@ -237,9 +237,14 @@ impl SessionSnapshot {
 
     /// Set the permalink to the session's source thread. Deliberately does
     /// NOT bump `updated_at`: the permalink is immutable source metadata,
-    /// not a session-activity signal.
-    pub fn set_source_permalink(&mut self, permalink: impl Into<String>) {
-        self.source.permalink = Some(permalink.into());
+    /// not a session-activity signal. Returns whether the source changed.
+    pub fn set_source_permalink(&mut self, permalink: Option<&str>) -> bool {
+        let permalink = permalink.map(str::to_owned);
+        if self.source.permalink == permalink {
+            return false;
+        }
+        self.source.permalink = permalink;
+        true
     }
 }
 
@@ -450,7 +455,8 @@ mod tests {
         let value = serde_json::to_value(&snapshot).expect("snapshot should serialize");
         assert!(value["source"].get("permalink").is_none());
 
-        snapshot.set_source_permalink("https://acme.slack.com/archives/C1/p1700000000000100");
+        assert!(snapshot
+            .set_source_permalink(Some("https://acme.slack.com/archives/C1/p1700000000000100",)));
         let value = serde_json::to_value(&snapshot).expect("snapshot should serialize");
         assert_eq!(
             value["source"]["permalink"],
