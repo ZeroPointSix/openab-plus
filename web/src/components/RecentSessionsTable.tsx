@@ -17,7 +17,7 @@ import { formatDateTime, formatRelativeTime } from '../lib/format';
 import { StatusTag } from './StatusTag';
 import { EntityMark } from './EntityMark';
 
-interface SessionTableProps {
+interface RecentSessionsTableProps {
   sessions: SessionSnapshot[];
   loading?: boolean;
   compact?: boolean;
@@ -35,7 +35,7 @@ interface SearchValues {
   updated_at?: [string, string];
 }
 
-export function SessionTable({
+export function RecentSessionsTable({
   sessions,
   loading,
   compact = false,
@@ -43,7 +43,7 @@ export function SessionTable({
   onReload,
   title = '会话',
   limit,
-}: SessionTableProps) {
+}: RecentSessionsTableProps) {
   const navigate = useNavigate();
   const [filters, setFilters] = useState<SessionFilters & { agent?: string }>(
     {},
