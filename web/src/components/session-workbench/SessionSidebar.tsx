@@ -1,5 +1,9 @@
 import { useMemo, useState } from 'react';
-import { ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import {
+  PlusOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+} from '@ant-design/icons';
 import { Conversations } from '@ant-design/x';
 import { Button, Empty, Input, Select, Space, Spin, Typography } from 'antd';
 import { filterSessions } from '../../lib/session';
@@ -117,6 +121,17 @@ export function SessionSidebar({
             onClick={onReload}
           />
         ) : null}
+      </div>
+
+      <div className="workbench-sidebar-newchat">
+        <Button
+          block
+          disabled
+          icon={<PlusOutlined />}
+          title="会话创建将在后续版本开放"
+        >
+          New chat
+        </Button>
       </div>
 
       <div className="workbench-sidebar-filters">

@@ -1,10 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { PageContainer } from '@ant-design/pro-components';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
+import { Drawer } from 'antd';
 import { adminApi } from '../lib/api';
 import { initialTimeline, sortSessions } from '../lib/session';
 import { SessionTimelineItem } from '../types';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { SessionInspector } from '../components/session-workbench/SessionInspector';
 import { SessionMainPanel } from '../components/session-workbench/SessionMainPanel';
 import { SessionSidebar } from '../components/session-workbench/SessionSidebar';
@@ -14,6 +16,9 @@ export function SessionWorkbenchPage() {
   const sessionId = params.id || '';
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const compact = useMediaQuery('(max-width: 1100px)');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   const sessionsQuery = useQuery({
     queryKey: ['sessions'],
@@ -66,9 +71,28 @@ export function SessionWorkbenchPage() {
 
   const selectSession = (nextSessionId: string) => {
     navigate('/sessions/' + encodeURIComponent(nextSessionId));
+    setSidebarOpen(false);
   };
 
   const timeline = sessionId ? timelineQuery.data || [] : [];
+
+  const sidebar = (
+    <SessionSidebar
+      sessions={sessions}
+      loading={sessionsQuery.isLoading}
+      activeSessionId={sessionId || undefined}
+      onSelect={selectSession}
+      onReload={() => void sessionsQuery.refetch()}
+    />
+  );
+
+  const inspector = (
+    <SessionInspector
+      session={sessionQuery.data}
+      timeline={timeline}
+      hasSelection={Boolean(sessionId)}
+    />
+  );
 
   return (
     <PageContainer
@@ -77,23 +101,41 @@ export function SessionWorkbenchPage() {
       className="page-container session-workbench-page"
     >
       <div className="session-workbench">
-        <SessionSidebar
-          sessions={sessions}
-          loading={sessionsQuery.isLoading}
-          activeSessionId={sessionId || undefined}
-          onSelect={selectSession}
-          onReload={() => void sessionsQuery.refetch()}
-        />
+        {compact ? (
+          <Drawer
+            className="workbench-drawer"
+            placement="left"
+            width={320}
+            open={sidebarOpen}
+            onClose={() => setSidebarOpen(false)}
+            title={null}
+          >
+            {sidebar}
+          </Drawer>
+        ) : (
+          sidebar
+        )}
         <SessionMainPanel
           session={sessionQuery.data}
           loading={Boolean(sessionId) && sessionQuery.isLoading}
           hasSelection={Boolean(sessionId)}
+          onOpenSidebar={compact ? () => setSidebarOpen(true) : undefined}
+          onOpenInspector={compact ? () => setInspectorOpen(true) : undefined}
         />
-        <SessionInspector
-          session={sessionQuery.data}
-          timeline={timeline}
-          hasSelection={Boolean(sessionId)}
-        />
+        {compact ? (
+          <Drawer
+            className="workbench-drawer"
+            placement="right"
+            width={340}
+            open={inspectorOpen}
+            onClose={() => setInspectorOpen(false)}
+            title={null}
+          >
+            {inspector}
+          </Drawer>
+        ) : (
+          inspector
+        )}
       </div>
     </PageContainer>
   );
