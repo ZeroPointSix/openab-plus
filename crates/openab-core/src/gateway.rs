@@ -1181,6 +1181,7 @@ pub async fn run_gateway_adapter(
                                             prompt,
                                             extra_blocks,
                                             trigger_msg,
+                                            source_permalink: None,
                                             arrived_at: std::time::Instant::now(),
                                             estimated_tokens,
                                             // TODO: implement gateway multibot detection
@@ -1632,6 +1633,7 @@ pub async fn process_gateway_event(
             prompt,
             extra_blocks,
             trigger_msg,
+            source_permalink: None,
             arrived_at: std::time::Instant::now(),
             estimated_tokens,
             other_bot_present: false,

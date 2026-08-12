@@ -125,13 +125,35 @@ impl SessionPool {
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
     ) -> Result<bool> {
+        self.get_or_create_with_profile_and_source(
+            thread_id,
+            working_dir_override,
+            profile_id,
+            overrides,
+            None,
+        )
+        .await
+    }
+
+    pub async fn get_or_create_with_profile_and_source(
+        &self,
+        thread_id: &str,
+        working_dir_override: Option<&str>,
+        profile_id: Option<&str>,
+        overrides: Option<&ProfileSessionOverrides>,
+        source_permalink: Option<&str>,
+    ) -> Result<bool> {
         let gate = self.thread_gate(thread_id).await;
         let _guard = gate.lock().await;
 
         if let Some(pool) = self.existing_pool(thread_id).await {
             let result = pool.get_or_create(thread_id, working_dir_override).await;
             return match result {
-                Ok(outcome) => Ok(self.apply_ensure_outcome(thread_id, outcome).await),
+                Ok(outcome) => {
+                    self.backfill_source_permalink(thread_id, source_permalink)
+                        .await;
+                    Ok(self.apply_ensure_outcome(thread_id, outcome).await)
+                }
                 Err(err) => {
                     self.mark_session_error(thread_id, err.to_string()).await;
                     Err(err)
@@ -210,6 +232,7 @@ impl SessionPool {
                         self.external_base_url.as_deref(),
                     );
                     snapshot.replace_runtime_metadata(runtime_metadata);
+                    snapshot.set_source_permalink(source_permalink);
                     if !profile_config_errors.is_empty() {
                         snapshot.set_profile_config_errors(profile_config_errors);
                     }
@@ -481,6 +504,21 @@ impl SessionPool {
             .insert(snapshot.session_id.clone(), snapshot.clone());
         self.session_events
             .publish(SessionEventKind::SessionCreated, snapshot);
+    }
+
+    async fn backfill_source_permalink(&self, thread_id: &str, permalink: Option<&str>) {
+        let snapshot = {
+            let mut snapshots = self.snapshots.write().await;
+            let Some(snapshot) = snapshots.get_mut(thread_id) else {
+                return;
+            };
+            if !snapshot.set_source_permalink(permalink) {
+                return;
+            }
+            snapshot.clone()
+        };
+        self.session_events
+            .publish(SessionEventKind::SourceChanged, snapshot);
     }
 
     async fn update_snapshot<F>(&self, thread_id: &str, kind: SessionEventKind, apply: F)

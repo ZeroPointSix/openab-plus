@@ -3,12 +3,14 @@ import {
   applySessionEvent,
   filterSessions,
   matchesSessionKeyword,
+  mergeTimelineItem,
   parseSessionEventPayload,
   sessionMetrics,
   sortSessions,
   timelineItemFromEvent,
 } from './session';
 import { SessionSnapshot } from '../types';
+import { sessionStatusDisplay, sessionStatusOptions } from './format';
 
 const sessions: SessionSnapshot[] = [
   {
@@ -47,9 +49,20 @@ describe('session helpers', () => {
     expect(matchesSessionKeyword(sessions[0], 'not-found')).toBe(false);
   });
 
-  it('computes dashboard metrics', () => {
-    expect(sessionMetrics(sessions)).toEqual({
-      total: 2,
+  it('derives completed state display, filters, and metrics from one mapping', () => {
+    const completed: SessionSnapshot = {
+      ...sessions[0],
+      session_id: 'discord:completed',
+      status: 'exited',
+    };
+
+    expect(sessionStatusDisplay.exited.label).toBe('已完成');
+    expect(sessionStatusOptions).toContainEqual({
+      label: '已完成',
+      value: 'exited',
+    });
+    expect(sessionMetrics([...sessions, completed])).toEqual({
+      total: 3,
       active: 1,
       running: 1,
       failed: 1,
@@ -100,6 +113,26 @@ describe('session helpers', () => {
         JSON.stringify({ error: 'event history unavailable' }),
       ),
     ).toBeNull();
+  });
+
+  it('replaces temporary detail seeds when real history arrives', () => {
+    const initial = [
+      {
+        id: 'initial:created',
+        event: 'session.created',
+        status: 'idle' as const,
+        at: sessions[0].created_at,
+      },
+    ];
+    const historical = {
+      id: 'generation-a:1:session.created',
+      event: 'session.created',
+      status: 'idle' as const,
+      at: sessions[0].created_at,
+    };
+
+    expect(mergeTimelineItem(initial, historical)).toEqual([historical]);
+    expect(mergeTimelineItem([historical], historical)).toEqual([historical]);
   });
 
   it('uses the full SSE id to disambiguate timeline events across restarts', () => {

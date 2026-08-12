@@ -232,6 +232,24 @@ impl SlackAdapter {
         Ok(json)
     }
 
+    /// Resolve the Slack permalink for a message or thread root via the official API.
+    /// The result is optional so message delivery remains available when the app lacks
+    /// the scope or Slack cannot resolve a link.
+    async fn message_permalink(&self, channel_id: &str, message_ts: &str) -> Option<String> {
+        let response = self
+            .api_get(
+                "chat.getPermalink",
+                &[("channel", channel_id), ("message_ts", message_ts)],
+            )
+            .await
+            .ok()?;
+        response
+            .get("permalink")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     /// Resolve a Slack user ID to display name via users.info API.
     /// Results are cached for 5 minutes to avoid hitting Slack rate limits.
     async fn resolve_user_name(&self, user_id: &str) -> Option<String> {
@@ -1807,6 +1825,7 @@ async fn handle_message(
         .thread_id
         .as_deref()
         .unwrap_or(&thread_channel.channel_id);
+    let source_permalink = adapter.message_permalink(&channel_id, thread_id).await;
     let thread_key = dispatcher.key("slack", thread_id, &sender.sender_id);
     let estimated_tokens = crate::dispatch::estimate_tokens(&prompt, &extra_blocks);
     let buf_msg = crate::dispatch::BufferedMessage {
@@ -1815,6 +1834,7 @@ async fn handle_message(
         prompt,
         extra_blocks,
         trigger_msg,
+        source_permalink,
         arrived_at: std::time::Instant::now(),
         estimated_tokens,
         other_bot_present,
