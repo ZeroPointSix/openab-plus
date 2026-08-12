@@ -80,9 +80,7 @@ async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Res
 
     let event_bus = pool.session_event_bus();
     let cursor = last_event_cursor(&headers);
-    let last_sequence = cursor.as_ref().and_then(|cursor| {
-        (cursor.generation.as_deref() == Some(event_bus.generation())).then_some(cursor.sequence)
-    });
+    let last_sequence = replay_cursor_sequence(cursor.as_ref(), &event_bus);
     let subscription = event_bus.subscribe_after(last_sequence);
     let last_replayed_sequence = subscription
         .replay
@@ -158,6 +156,21 @@ fn parse_last_event_id(value: &str) -> Option<SessionEventCursor> {
     })
 }
 
+fn replay_cursor_sequence(
+    cursor: Option<&SessionEventCursor>,
+    event_bus: &SessionEventBus,
+) -> Option<u64> {
+    match cursor {
+        Some(cursor) if cursor.generation.as_deref() == Some(event_bus.generation()) => {
+            Some(cursor.sequence)
+        }
+        Some(_) => None,
+        // A fresh admin page has no browser cursor yet. Replay from zero so the
+        // globally-owned connection seeds detail timelines before it goes live.
+        None => Some(0),
+    }
+}
+
 fn replay_events_sse(
     cursor: Option<&SessionEventCursor>,
     last_sequence: Option<u64>,
@@ -173,13 +186,13 @@ fn replay_events_sse(
         if replay.overflowed {
             events.push(history_unavailable_event_sse(cursor.sequence, &replay));
         }
-        events.extend(
-            replay
-                .events
-                .into_iter()
-                .map(|event| session_event_sse(event_bus, event)),
-        );
     }
+    events.extend(
+        replay
+            .events
+            .into_iter()
+            .map(|event| session_event_sse(event_bus, event)),
+    );
     events
 }
 
@@ -341,5 +354,23 @@ mod tests {
                 sequence: 42,
             })
         );
+    }
+
+    #[test]
+    fn fresh_stream_replays_history_from_zero() {
+        let event_bus = SessionEventBus::new(8);
+
+        assert_eq!(replay_cursor_sequence(None, &event_bus), Some(0));
+    }
+
+    #[test]
+    fn stale_stream_cursor_requests_a_reset() {
+        let event_bus = SessionEventBus::new(8);
+        let stale = SessionEventCursor {
+            generation: Some("previous-generation".into()),
+            sequence: 42,
+        };
+
+        assert_eq!(replay_cursor_sequence(Some(&stale), &event_bus), None);
     }
 }

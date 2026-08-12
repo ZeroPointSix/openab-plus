@@ -1,6 +1,9 @@
+import { useEffect } from 'react';
 import {
   ArrowLeftOutlined,
   BranchesOutlined,
+  ClockCircleOutlined,
+  ExclamationCircleFilled,
   LinkOutlined,
   ProfileOutlined,
 } from '@ant-design/icons';
@@ -10,27 +13,53 @@ import {
   Button,
   Descriptions,
   Empty,
+  message,
   Space,
   Spin,
+  Timeline,
   Typography,
 } from 'antd';
-import { useQuery } from '@tanstack/react-query';
+import {
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { adminApi } from '../lib/api';
-import { formatDateTime } from '../lib/format';
+import {
+  eventLabel,
+  formatDateTime,
+  sessionStatusDisplay,
+} from '../lib/format';
+import { initialTimeline } from '../lib/session';
+import { SessionTimelineItem } from '../types';
 import { StatusTag } from '../components/StatusTag';
-import { SessionActivityFeed } from '../components/activity/SessionActivityFeed';
-import { mockTranscript } from '../components/activity/mockTranscript';
 
 export function SessionDetailPage() {
   const params = useParams<{ id: string }>();
   const sessionId = params.id || '';
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const sessionQuery = useQuery({
     queryKey: ['session', sessionId],
     queryFn: () => adminApi.session(sessionId),
     enabled: Boolean(sessionId),
   });
+  const timelineQuery = useQuery<SessionTimelineItem[]>({
+    queryKey: ['sessionTimeline', sessionId],
+    queryFn: async () => [],
+    enabled: false,
+    initialData: [],
+  });
+
+  useEffect(() => {
+    if (!sessionQuery.data) return;
+    queryClient.setQueryData<SessionTimelineItem[]>(
+      ['sessionTimeline', sessionId],
+      (current = []) =>
+        current.length ? current : initialTimeline(sessionQuery.data),
+    );
+  }, [queryClient, sessionId, sessionQuery.data]);
+
   if (sessionQuery.isLoading) {
     return (
       <div className="page-loading">
@@ -50,6 +79,22 @@ export function SessionDetailPage() {
   }
 
   const session = sessionQuery.data;
+  const timeline = timelineQuery.data || [];
+  const sourcePlatformLabel =
+    session.source.platform === 'slack'
+      ? 'Slack'
+      : session.source.platform === 'discord'
+        ? 'Discord'
+        : session.source.platform;
+  const copySessionLink = async () => {
+    if (!session.external_url) return;
+    try {
+      await navigator.clipboard.writeText(session.external_url);
+      message.success('会话链接已复制');
+    } catch {
+      message.error('复制会话链接失败');
+    }
+  };
   const metadataSourceLabel =
     session.metadata_source === 'acp'
       ? 'ACP 运行时'
@@ -72,14 +117,23 @@ export function SessionDetailPage() {
         </Button>,
         session.external_url ? (
           <Button
-            key="external"
+            key="copy-session-link"
             type="primary"
             icon={<LinkOutlined />}
-            href={session.external_url}
+            onClick={() => void copySessionLink()}
+          >
+            复制会话链接
+          </Button>
+        ) : null,
+        session.source.permalink ? (
+          <Button
+            key="source-permalink"
+            icon={<LinkOutlined />}
+            href={session.source.permalink}
             target="_blank"
             rel="noreferrer"
           >
-            打开来源
+            回到 {sourcePlatformLabel}
           </Button>
         ) : null,
       ]}
@@ -94,21 +148,55 @@ export function SessionDetailPage() {
         />
       ) : null}
       <div className="session-detail-grid">
-        <section className="detail-panel activity-panel">
+        <section className="detail-panel timeline-panel">
           <div className="panel-heading">
             <div className="panel-heading-title">
               <span className="panel-icon blue" aria-hidden="true">
                 <BranchesOutlined />
               </span>
               <div>
-                <Typography.Title level={4}>Agent 活动流</Typography.Title>
+                <Typography.Title level={4}>事件时间线</Typography.Title>
                 <Typography.Text type="secondary">
-                  连续展示回复、思考、计划、工具调用、终端输出和文件编辑差异
+                  实时状态事件，最多保留当前会话最近 60 条
                 </Typography.Text>
               </div>
             </div>
           </div>
-          <SessionActivityFeed entries={mockTranscript} source="mock" />
+          {timeline.length ? (
+            <Timeline
+              items={[...timeline].reverse().map((item) => ({
+                color:
+                  (sessionStatusDisplay[item.status] || sessionStatusDisplay.unknown)
+                    .timelineColor,
+                dot:
+                  item.status === 'error' ? (
+                    <ExclamationCircleFilled />
+                  ) : (
+                    <ClockCircleOutlined />
+                  ),
+                children: (
+                  <div className="timeline-entry">
+                    <div className="timeline-title">
+                      <Typography.Text strong>
+                        {eventLabel(item.event)}
+                      </Typography.Text>
+                      <StatusTag status={item.status} />
+                    </div>
+                    <Typography.Text type="secondary">
+                      {formatDateTime(item.at)}
+                    </Typography.Text>
+                    {item.error ? (
+                      <Typography.Paragraph type="danger">
+                        {item.error}
+                      </Typography.Paragraph>
+                    ) : null}
+                  </div>
+                ),
+              }))}
+            />
+          ) : (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无事件" />
+          )}
         </section>
 
         <aside className="detail-panel metadata-panel">

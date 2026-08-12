@@ -1062,6 +1062,11 @@ impl EventHandler for Handler {
         }
 
         let trigger_msg = discord_msg_ref(&msg);
+        let source_permalink = discord_session_permalink(
+            &msg.link(),
+            &msg.channel_id.get().to_string(),
+            &thread_channel,
+        );
 
         // Per-thread streaming: check if another bot is present in this thread
         let other_bot_present_flag = {
@@ -1132,6 +1137,7 @@ impl EventHandler for Handler {
                 prompt,
                 extra_blocks,
                 trigger_msg,
+                source_permalink: Some(source_permalink),
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present: other_bot_present_flag,
@@ -1373,6 +1379,7 @@ impl EventHandler for Handler {
                 prompt,
                 extra_blocks: Vec::new(),
                 trigger_msg,
+                source_permalink: None,
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present,
@@ -2972,6 +2979,25 @@ async fn get_or_create_thread(
     }
 }
 
+/// Return the destination for the session source. For a message that creates a
+/// new Discord thread, use that thread's channel URL rather than the original
+/// parent-message permalink; otherwise retain the canonical message permalink.
+fn discord_session_permalink(
+    message_permalink: &str,
+    message_channel_id: &str,
+    thread_channel: &ChannelRef,
+) -> String {
+    if thread_channel.parent_id.is_none() || thread_channel.channel_id == message_channel_id {
+        return message_permalink.to_string();
+    }
+
+    let marker = format!("/{message_channel_id}/");
+    let Some((guild_prefix, _)) = message_permalink.rsplit_once(&marker) else {
+        return message_permalink.to_string();
+    };
+    format!("{guild_prefix}/{}", thread_channel.channel_id)
+}
+
 /// Detect Discord's "A thread has already been created for this message" error
 /// (JSON error code 160004). Triggered when two bots responding to the same
 /// @-mention race to create a thread from the same trigger message.
@@ -3620,6 +3646,48 @@ mod tests {
         );
 
         assert!(text.contains("content_type: unknown"));
+    }
+
+    // --- session source permalink ---
+
+    #[test]
+    fn session_permalink_targets_new_thread_instead_of_parent_message() {
+        let thread = ChannelRef {
+            platform: "discord".into(),
+            channel_id: "thread".into(),
+            thread_id: None,
+            parent_id: Some("parent".into()),
+            origin_event_id: None,
+        };
+
+        assert_eq!(
+            discord_session_permalink(
+                "https://discord.com/channels/guild/parent/message",
+                "parent",
+                &thread,
+            ),
+            "https://discord.com/channels/guild/thread"
+        );
+    }
+
+    #[test]
+    fn session_permalink_preserves_message_link_inside_existing_thread() {
+        let thread = ChannelRef {
+            platform: "discord".into(),
+            channel_id: "thread".into(),
+            thread_id: None,
+            parent_id: None,
+            origin_event_id: None,
+        };
+
+        assert_eq!(
+            discord_session_permalink(
+                "https://discord.com/channels/guild/thread/message",
+                "thread",
+                &thread,
+            ),
+            "https://discord.com/channels/guild/thread/message"
+        );
     }
 
     // --- thread-race error detection ---

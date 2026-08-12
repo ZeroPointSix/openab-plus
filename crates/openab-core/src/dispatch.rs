@@ -44,6 +44,8 @@ pub struct BufferedMessage {
     pub extra_blocks: Vec<ContentBlock>,
     /// Anchor for reactions (👀 / ❌).
     pub trigger_msg: MessageRef,
+    /// Real platform thread or message URL, used to backfill session source metadata.
+    pub source_permalink: Option<String>,
     /// Broker receive time — used for `buffer_wait_ms` observability.
     pub arrived_at: Instant,
     /// Rough token estimate for `max_batch_tokens` cap.
@@ -141,6 +143,7 @@ pub trait DispatchTarget: Send + Sync + 'static {
         working_dir: Option<&str>,
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
+        source_permalink: Option<&str>,
     ) -> Result<bool>;
 
     /// Destroy the session for `session_key` (used to rollback on directive failure).
@@ -180,9 +183,16 @@ impl DispatchTarget for AdapterRouter {
         working_dir: Option<&str>,
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
+        source_permalink: Option<&str>,
     ) -> Result<bool> {
         self.pool()
-            .get_or_create_with_profile(session_key, working_dir, profile_id, overrides)
+            .get_or_create_with_profile_and_source(
+                session_key,
+                working_dir,
+                profile_id,
+                overrides,
+                source_permalink,
+            )
             .await
     }
 
@@ -712,6 +722,9 @@ async fn dispatch_batch(
     // Extract workspace path for ensure_session (None if no directive or resolution failed).
     let workspace_override: Option<String> =
         ws_resolved.as_ref().and_then(|r| r.as_ref().ok().cloned());
+    let source_permalink = batch
+        .first()
+        .and_then(|message| message.source_permalink.as_deref());
 
     // Ensure session exists. The create_gate mutex inside get_or_create serializes
     // concurrent callers — only the winner gets created_now == true.
@@ -721,6 +734,7 @@ async fn dispatch_batch(
             workspace_override.as_deref(),
             profile_id.as_deref(),
             profile_overrides.as_ref(),
+            source_permalink,
         )
         .await
     {
@@ -1456,6 +1470,7 @@ mod tests {
             _working_dir: Option<&str>,
             profile_id: Option<&str>,
             overrides: Option<&ProfileSessionOverrides>,
+            _source_permalink: Option<&str>,
         ) -> Result<bool> {
             self.ensure_calls.lock().unwrap().push(RecordedEnsure {
                 profile_id: profile_id.map(ToString::to_string),
@@ -1561,6 +1576,7 @@ mod tests {
                 channel: make_channel("T"),
                 message_id: format!("m-{prompt}"),
             },
+            source_permalink: None,
             arrived_at: Instant::now(),
             estimated_tokens: tokens,
             other_bot_present: false,
