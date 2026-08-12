@@ -19,6 +19,56 @@ pub enum ProfileStatus {
     Deleted,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMetadataSource {
+    Acp,
+    Configured,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionRuntimeMetadata {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub metadata_source: Option<SessionMetadataSource>,
+}
+
+impl SessionRuntimeMetadata {
+    pub fn acp(
+        agent: Option<String>,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+    ) -> Self {
+        let metadata_source = (agent.is_some() || model.is_some() || reasoning_effort.is_some())
+            .then_some(SessionMetadataSource::Acp);
+        Self {
+            agent,
+            model,
+            reasoning_effort,
+            metadata_source,
+        }
+    }
+
+    pub fn configured(model: Option<String>, reasoning_effort: Option<String>) -> Self {
+        let metadata_source = (model.is_some() || reasoning_effort.is_some())
+            .then_some(SessionMetadataSource::Configured);
+        Self {
+            agent: None,
+            model,
+            reasoning_effort,
+            metadata_source,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.agent.is_none()
+            && self.model.is_none()
+            && self.reasoning_effort.is_none()
+            && self.metadata_source.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileConfigError {
     pub config_id: String,
@@ -69,6 +119,10 @@ pub struct SessionSnapshot {
     pub profile_status: Option<ProfileStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<SessionMetadataSource>,
     pub status: SessionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
@@ -102,6 +156,8 @@ impl SessionSnapshot {
             profile_name,
             profile_status,
             model,
+            reasoning_effort: None,
+            metadata_source: None,
             status: SessionStatus::Idle,
             last_error: None,
             profile_config_errors: Vec::new(),
@@ -140,6 +196,23 @@ impl SessionSnapshot {
 
     pub fn set_model(&mut self, model: Option<String>) {
         self.model = model;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn replace_runtime_metadata(&mut self, metadata: SessionRuntimeMetadata) {
+        self.agent = metadata.agent.unwrap_or_default();
+        self.model = metadata.model;
+        self.reasoning_effort = metadata.reasoning_effort;
+        self.metadata_source = metadata.metadata_source;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn update_runtime_config_metadata(&mut self, metadata: SessionRuntimeMetadata) {
+        self.model = metadata.model;
+        self.reasoning_effort = metadata.reasoning_effort;
+        if metadata.metadata_source.is_some() {
+            self.metadata_source = metadata.metadata_source;
+        }
         self.updated_at = Utc::now();
     }
 
@@ -275,6 +348,55 @@ mod tests {
 
         assert_eq!(value["profile_config_errors"][0]["config_id"], "model");
         assert_eq!(value["profile_config_errors"][0]["error"], "unsupported");
+    }
+
+    #[test]
+    fn runtime_metadata_serializes_live_agent_model_thinking_and_source() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            String::new(),
+            "/workspace".into(),
+            Some("profile-1".into()),
+            Some("Default Profile".into()),
+            None,
+            None,
+        );
+        snapshot.replace_runtime_metadata(SessionRuntimeMetadata::acp(
+            Some("Codex ACP".into()),
+            Some("gpt-5".into()),
+            Some("high".into()),
+        ));
+
+        let value = serde_json::to_value(snapshot).expect("snapshot should serialize");
+        assert_eq!(value["agent"], "Codex ACP");
+        assert_eq!(value["model"], "gpt-5");
+        assert_eq!(value["reasoning_effort"], "high");
+        assert_eq!(value["metadata_source"], "acp");
+    }
+
+    #[test]
+    fn configured_metadata_is_explicitly_labeled() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            String::new(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.replace_runtime_metadata(SessionRuntimeMetadata::configured(
+            Some("configured-model".into()),
+            Some("medium".into()),
+        ));
+
+        assert_eq!(snapshot.agent, "");
+        assert_eq!(snapshot.model.as_deref(), Some("configured-model"));
+        assert_eq!(snapshot.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            snapshot.metadata_source,
+            Some(SessionMetadataSource::Configured)
+        );
     }
 
     #[test]

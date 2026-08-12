@@ -89,7 +89,9 @@ export function SessionTable({
       render: (_, record) => (
         <Space size={8} className="agent-cell">
           <EntityMark name={record.agent} />
-          <Typography.Text strong>{record.agent || '-'}</Typography.Text>
+          <Typography.Text strong>
+            {record.agent || '未报告'}
+          </Typography.Text>
         </Space>
       ),
     },

@@ -1,12 +1,11 @@
-use super::connection::AcpConnection;
+use super::connection::{runtime_metadata_from_options, AcpConnection};
 use super::pool;
 use super::protocol::ConfigOption;
 use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy};
 use crate::config::AgentConfig;
 use crate::session_event::{SessionEventBus, SessionEventKind};
-use crate::session_snapshot::{SessionSnapshot, SessionStatus};
+use crate::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
 use anyhow::{anyhow, Result};
-use chrono::Utc;
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
@@ -159,15 +158,16 @@ impl SessionPool {
             .profile
             .as_ref()
             .map(|profile| profile.name.clone());
-        let agent = resolved
-            .profile
-            .as_ref()
-            .map(|profile| profile.agent_type.clone())
-            .unwrap_or_else(|| resolved.config.command.clone());
         let workdir = working_dir_override
             .unwrap_or(&resolved.config.working_dir)
             .to_string();
-        let model = configured_model(&resolved.config, &resolved.config_options);
+        let configured_metadata = SessionRuntimeMetadata::configured(
+            configured_model(&resolved.config, &resolved.config_options),
+            resolved
+                .config_options
+                .get("reasoning_effort")
+                .and_then(|value| non_empty_string(value)),
+        );
         let policy = ThreadProfilePolicy {
             timeout_secs: resolved.timeout_secs,
             recovery_strategy: resolved.recovery_strategy.clone(),
@@ -193,17 +193,23 @@ impl SessionPool {
                     .await
                     .insert(thread_id.to_string(), policy);
                 let profile_config_errors = outcome.profile_config_errors.clone();
+                let runtime_metadata = if outcome.runtime_metadata.is_empty() {
+                    configured_metadata
+                } else {
+                    outcome.runtime_metadata.clone()
+                };
                 let created = self.apply_ensure_outcome(thread_id, outcome).await;
                 if created {
                     let mut snapshot = SessionSnapshot::new(
                         thread_id.to_string(),
-                        agent,
+                        String::new(),
                         workdir,
                         profile_id,
                         profile_name,
-                        model,
+                        None,
                         self.external_base_url.as_deref(),
                     );
+                    snapshot.replace_runtime_metadata(runtime_metadata);
                     if !profile_config_errors.is_empty() {
                         snapshot.set_profile_config_errors(profile_config_errors);
                     }
@@ -320,7 +326,11 @@ impl SessionPool {
             .ok_or_else(|| anyhow!("no connection for thread {thread_id}"))?;
         match pool.set_config_option(thread_id, config_id, value).await {
             Ok(options) => {
-                self.record_session_config_update(thread_id, &options).await;
+                let runtime_metadata = pool.runtime_metadata(thread_id).await.unwrap_or_default();
+                self.update_snapshot(thread_id, SessionEventKind::ConfigChanged, |snapshot| {
+                    snapshot.replace_runtime_metadata(runtime_metadata);
+                })
+                .await;
                 Ok(options)
             }
             Err(err) => {
@@ -436,13 +446,9 @@ impl SessionPool {
     }
 
     pub async fn record_session_config_update(&self, thread_id: &str, options: &[ConfigOption]) {
-        let model = model_from_options(options);
+        let runtime_metadata = runtime_metadata_from_options(None, options);
         self.update_snapshot(thread_id, SessionEventKind::ConfigChanged, |snapshot| {
-            if model.is_some() {
-                snapshot.set_model(model);
-            } else {
-                snapshot.updated_at = Utc::now();
-            }
+            snapshot.update_runtime_config_metadata(runtime_metadata);
         })
         .await;
     }
@@ -500,6 +506,7 @@ impl SessionPool {
         let created = outcome.created;
         let recovered = outcome.recovered;
         let profile_config_errors = outcome.profile_config_errors;
+        let runtime_metadata = outcome.runtime_metadata;
 
         if recovered {
             self.update_snapshot(
@@ -507,6 +514,7 @@ impl SessionPool {
                 SessionEventKind::StatusChanged,
                 move |snapshot| {
                     snapshot.set_status(SessionStatus::Idle);
+                    snapshot.replace_runtime_metadata(runtime_metadata);
                     if !profile_config_errors.is_empty() {
                         snapshot.set_profile_config_errors(profile_config_errors);
                     }
@@ -636,15 +644,6 @@ fn clone_agent_config(config: &AgentConfig) -> AgentConfig {
     }
 }
 
-fn model_from_options(options: &[ConfigOption]) -> Option<String> {
-    options
-        .iter()
-        .find(|option| option.id == "model")
-        .map(|option| option.current_value.trim())
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
 fn configured_model(
     config: &AgentConfig,
     config_options: &HashMap<String, String>,
@@ -718,7 +717,9 @@ fn session_external_base_url_from_env() -> Option<String> {
 mod tests {
     use super::super::protocol::ConfigOptionValue;
     use super::*;
-    use crate::session_snapshot::{ProfileConfigError, ProfileStatus};
+    use crate::session_snapshot::{
+        ProfileConfigError, ProfileStatus, SessionMetadataSource, SessionRuntimeMetadata,
+    };
 
     fn config_option(id: &str, current_value: &str) -> ConfigOption {
         ConfigOption {
@@ -757,13 +758,18 @@ mod tests {
     }
 
     #[test]
-    fn extracts_model_from_config_options() {
+    fn extracts_runtime_metadata_from_config_options() {
         let options = vec![
             config_option("mode", "default"),
             config_option("model", "gpt-5"),
+            config_option("reasoning_effort", "high"),
         ];
 
-        assert_eq!(model_from_options(&options).as_deref(), Some("gpt-5"));
+        let metadata = runtime_metadata_from_options(Some("Codex ACP"), &options);
+        assert_eq!(metadata.agent.as_deref(), Some("Codex ACP"));
+        assert_eq!(metadata.model.as_deref(), Some("gpt-5"));
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(metadata.metadata_source, Some(SessionMetadataSource::Acp));
     }
 
     #[test]
@@ -890,6 +896,11 @@ mod tests {
                     created: false,
                     recovered: true,
                     profile_config_errors: Vec::new(),
+                    runtime_metadata: SessionRuntimeMetadata::acp(
+                        Some("Codex ACP".into()),
+                        Some("gpt-5".into()),
+                        Some("high".into()),
+                    ),
                 },
             )
             .await;
@@ -898,11 +909,99 @@ mod tests {
         let snapshot = outer.session_snapshot("thread").await.expect("snapshot");
         assert_eq!(snapshot.status, SessionStatus::Idle);
         assert_eq!(snapshot.last_error, None);
+        assert_eq!(snapshot.agent, "Codex ACP");
+        assert_eq!(snapshot.model.as_deref(), Some("gpt-5"));
+        assert_eq!(snapshot.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(snapshot.metadata_source, Some(SessionMetadataSource::Acp));
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
             .await
             .expect("event should arrive")
             .expect("event channel should stay open");
         assert_eq!(event.event, SessionEventKind::StatusChanged);
+    }
+
+    #[tokio::test]
+    async fn runtime_metadata_stays_session_specific_within_one_profile() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        for thread in ["slack:first", "slack:second"] {
+            outer
+                .seed_session_snapshot_for_test(SessionSnapshot::new(
+                    thread.into(),
+                    String::new(),
+                    "/workspace".into(),
+                    Some("shared-profile".into()),
+                    Some("Shared Profile".into()),
+                    None,
+                    None,
+                ))
+                .await;
+        }
+
+        for (thread, model, effort) in [
+            ("slack:first", "gpt-5", "high"),
+            ("slack:second", "claude-sonnet-4", "medium"),
+        ] {
+            outer
+                .apply_ensure_outcome(
+                    thread,
+                    pool::SessionEnsureOutcome {
+                        created: false,
+                        recovered: true,
+                        profile_config_errors: Vec::new(),
+                        runtime_metadata: SessionRuntimeMetadata::acp(
+                            Some("Codex ACP".into()),
+                            Some(model.into()),
+                            Some(effort.into()),
+                        ),
+                    },
+                )
+                .await;
+        }
+
+        let first = outer
+            .session_snapshot("slack:first")
+            .await
+            .expect("first snapshot");
+        let second = outer
+            .session_snapshot("slack:second")
+            .await
+            .expect("second snapshot");
+        assert_eq!(first.profile_id, second.profile_id);
+        assert_eq!(first.model.as_deref(), Some("gpt-5"));
+        assert_eq!(second.model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(first.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(second.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[tokio::test]
+    async fn config_update_clears_stale_runtime_model_and_thinking() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            String::new(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+        snapshot.replace_runtime_metadata(SessionRuntimeMetadata::acp(
+            Some("Codex ACP".into()),
+            Some("gpt-5".into()),
+            Some("high".into()),
+        ));
+        outer.seed_session_snapshot_for_test(snapshot).await;
+
+        outer.record_session_config_update("slack:thread", &[]).await;
+
+        let snapshot = outer
+            .session_snapshot("slack:thread")
+            .await
+            .expect("snapshot");
+        assert_eq!(snapshot.agent, "Codex ACP");
+        assert_eq!(snapshot.model, None);
+        assert_eq!(snapshot.reasoning_effort, None);
+        assert_eq!(snapshot.metadata_source, Some(SessionMetadataSource::Acp));
     }
 
     #[tokio::test]
@@ -928,6 +1027,7 @@ mod tests {
                     created: false,
                     recovered: true,
                     profile_config_errors: vec![ProfileConfigError::new("model", "unsupported")],
+                    runtime_metadata: SessionRuntimeMetadata::default(),
                 },
             )
             .await;
@@ -1078,6 +1178,6 @@ mod tests {
     fn ignores_empty_model_config_value() {
         let options = vec![config_option("model", "   ")];
 
-        assert_eq!(model_from_options(&options), None);
+        assert_eq!(runtime_metadata_from_options(None, &options).model, None);
     }
 }

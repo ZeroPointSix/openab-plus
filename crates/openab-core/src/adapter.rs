@@ -14,7 +14,7 @@ use crate::error_display::{format_coded_error, format_user_error};
 use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
-use crate::session_snapshot::{SessionSnapshot, SessionStatus};
+use crate::session_snapshot::{SessionMetadataSource, SessionSnapshot, SessionStatus};
 
 // --- Output directive parsing ---
 
@@ -1253,7 +1253,7 @@ impl AdapterRouter {
                                     session_pool
                                         .record_session_config_update(&session_key, &options)
                                         .await;
-                                    conn.config_options = options;
+                                    conn.replace_config_options_from_acp(options);
                                 }
                                 _ => {}
                             }
@@ -1926,24 +1926,31 @@ fn append_observability_footer(
     snapshot: Option<&SessionSnapshot>,
     label: Option<&str>,
 ) -> String {
-    let mut fields = Vec::with_capacity(3);
+    let mut fields = Vec::with_capacity(4);
     if let Some((url, label)) =
         snapshot.and_then(|value| value.external_url.as_deref()).zip(label)
     {
         fields.push(format!("[{label}]({url})"));
     }
 
-    let model = snapshot
+    let runtime_snapshot = snapshot.filter(|value| {
+        value.metadata_source == Some(SessionMetadataSource::Acp)
+    });
+    let agent = runtime_snapshot
+        .and_then(|value| non_empty(Some(value.agent.as_str())))
+        .unwrap_or("not reported");
+    let model = runtime_snapshot
         .and_then(|value| non_empty(value.model.as_deref()))
         .unwrap_or("not reported");
-    let agent = snapshot
-        .and_then(|value| {
-            non_empty(value.profile_name.as_deref())
-                .or_else(|| non_empty(Some(value.agent.as_str())))
-        })
+    let reasoning_effort = runtime_snapshot
+        .and_then(|value| non_empty(value.reasoning_effort.as_deref()))
         .unwrap_or("not reported");
-    fields.push(format!("Model: `{}`", inline_metadata(model)));
     fields.push(format!("Agent: `{}`", inline_metadata(agent)));
+    fields.push(format!("Model: `{}`", inline_metadata(model)));
+    fields.push(format!(
+        "Thinking: `{}`",
+        inline_metadata(reasoning_effort)
+    ));
 
     let footer = fields.join(" · ");
     let content = content.trim_end();
@@ -3185,21 +3192,30 @@ mod tests {
     }
 
     #[test]
-    fn observability_footer_contains_link_model_and_agent() {
-        let snapshot = SessionSnapshot::new(
+    fn observability_footer_contains_live_agent_model_and_thinking() {
+        let mut snapshot = SessionSnapshot::new(
             "slack:1700.1".into(),
-            "codex-acp".into(),
+            String::new(),
             "/workspace".into(),
             Some("codex".into()),
             Some("Codex Web".into()),
-            Some("gpt-5".into()),
+            None,
             Some("https://openab.example"),
+        );
+        snapshot.replace_runtime_metadata(
+            crate::session_snapshot::SessionRuntimeMetadata::acp(
+                Some("codex-acp".into()),
+                Some("gpt-5".into()),
+                Some("high".into()),
+            ),
         );
         let output =
             append_observability_footer("完成", Some(&snapshot), Some("Open in OpenAB Plus"));
         assert!(output.contains("[Open in OpenAB Plus](https://openab.example/#/sessions/"));
+        assert!(output.contains("Agent: `codex-acp`"));
         assert!(output.contains("Model: `gpt-5`"));
-        assert!(output.contains("Agent: `Codex Web`"));
+        assert!(output.contains("Thinking: `high`"));
+        assert!(!output.contains("Agent: `Codex Web`"));
     }
 
     #[test]
@@ -3208,6 +3224,32 @@ mod tests {
         assert!(!output.contains("Open in OpenAB Plus"));
         assert!(output.contains("Model: `not reported`"));
         assert!(output.contains("Agent: `not reported`"));
+        assert!(output.contains("Thinking: `not reported`"));
+    }
+
+    #[test]
+    fn observability_footer_does_not_present_configured_values_as_runtime() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:1700.2".into(),
+            String::new(),
+            "/workspace".into(),
+            Some("codex".into()),
+            Some("Codex Web".into()),
+            None,
+            None,
+        );
+        snapshot.replace_runtime_metadata(
+            crate::session_snapshot::SessionRuntimeMetadata::configured(
+                Some("configured-model".into()),
+                Some("medium".into()),
+            ),
+        );
+
+        let output = append_observability_footer("完成", Some(&snapshot), None);
+        assert!(output.contains("Agent: `not reported`"));
+        assert!(output.contains("Model: `not reported`"));
+        assert!(output.contains("Thinking: `not reported`"));
+        assert!(!output.contains("configured-model"));
     }
 
     #[test]

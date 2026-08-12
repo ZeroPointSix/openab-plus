@@ -11,7 +11,9 @@ use openab_core::acp::SessionPool;
 use openab_core::agent_profile::AgentProfile;
 use openab_core::config::AgentConfig;
 use openab_core::session_event::SessionEventKind;
-use openab_core::session_snapshot::{SessionSnapshot, SessionStatus};
+use openab_core::session_snapshot::{
+    SessionRuntimeMetadata, SessionSnapshot, SessionStatus,
+};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,16 +61,21 @@ fn config_option(id: &str, name: &str, current_value: &str, values: &[&str]) -> 
 async fn sessions_list_and_detail_happy_path() {
     let env = AdminTestEnv::new().await;
     let pool = env.pool();
-    pool.seed_session_snapshot_for_test(SessionSnapshot::new(
+    let mut runtime_snapshot = SessionSnapshot::new(
         "slack:thread-1".into(),
-        "codex".into(),
+        String::new(),
         "/workspace".into(),
         Some("codex-default".into()),
         Some("Codex Default".into()),
-        Some("gpt-5".into()),
         None,
-    ))
-    .await;
+        None,
+    );
+    runtime_snapshot.replace_runtime_metadata(SessionRuntimeMetadata::acp(
+        Some("codex-acp".into()),
+        Some("gpt-5".into()),
+        Some("high".into()),
+    ));
+    pool.seed_session_snapshot_for_test(runtime_snapshot).await;
     pool.seed_session_snapshot_for_test(SessionSnapshot::new(
         "discord:thread-2".into(),
         "opencode".into(),
@@ -128,7 +135,10 @@ async fn sessions_list_and_detail_happy_path() {
         .expect("detail json");
     assert_eq!(detail["session_id"], "slack:thread-1");
     assert_eq!(detail["status"], "idle");
-    assert_eq!(detail["agent"], "codex");
+    assert_eq!(detail["agent"], "codex-acp");
+    assert_eq!(detail["model"], "gpt-5");
+    assert_eq!(detail["reasoning_effort"], "high");
+    assert_eq!(detail["metadata_source"], "acp");
 
     let missing = client
         .get(format!("{}/api/v1/sessions/missing", server.base_url))
