@@ -4,10 +4,7 @@ import {
   SessionSnapshot,
   SessionTimelineItem,
 } from '../types';
-
-const ACTIVE = new Set(['starting', 'idle', 'running', 'suspended']);
-const RUNNING = new Set(['starting', 'running']);
-const FAILED = new Set(['error', 'exited']);
+import { sessionStatusDisplay } from './format';
 
 export function parseSessionEventPayload(
   data: string,
@@ -68,9 +65,13 @@ export function filterSessions(
 export function sessionMetrics(sessions: SessionSnapshot[]) {
   return {
     total: sessions.length,
-    active: sessions.filter((session) => ACTIVE.has(session.status)).length,
-    running: sessions.filter((session) => RUNNING.has(session.status)).length,
-    failed: sessions.filter((session) => FAILED.has(session.status)).length,
+    active: sessions.filter((session) => sessionStatusDisplay[session.status].active)
+      .length,
+    running: sessions.filter(
+      (session) => sessionStatusDisplay[session.status].running,
+    ).length,
+    failed: sessions.filter((session) => sessionStatusDisplay[session.status].failed)
+      .length,
   };
 }
 

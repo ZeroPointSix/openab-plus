@@ -9,6 +9,7 @@ import {
   timelineItemFromEvent,
 } from './session';
 import { SessionSnapshot } from '../types';
+import { sessionStatusDisplay, sessionStatusOptions } from './format';
 
 const sessions: SessionSnapshot[] = [
   {
@@ -41,9 +42,20 @@ describe('session helpers', () => {
     ).toHaveLength(1);
   });
 
-  it('computes dashboard metrics', () => {
-    expect(sessionMetrics(sessions)).toEqual({
-      total: 2,
+  it('derives completed state display, filters, and metrics from one mapping', () => {
+    const completed: SessionSnapshot = {
+      ...sessions[0],
+      session_id: 'discord:completed',
+      status: 'exited',
+    };
+
+    expect(sessionStatusDisplay.exited.label).toBe('已完成');
+    expect(sessionStatusOptions).toContainEqual({
+      label: '已完成',
+      value: 'exited',
+    });
+    expect(sessionMetrics([...sessions, completed])).toEqual({
+      total: 3,
       active: 1,
       running: 1,
       failed: 1,
