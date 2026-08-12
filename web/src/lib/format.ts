@@ -1,17 +1,78 @@
 import { SessionStatus } from '../types';
 
-export const sessionStatusDisplay: Record<
-  SessionStatus,
-  { label: string; tagColor: string; timelineColor: string }
-> = {
-  starting: { label: '启动中', tagColor: 'processing', timelineColor: 'blue' },
-  idle: { label: '等待中', tagColor: 'default', timelineColor: 'gray' },
-  running: { label: '运行中', tagColor: 'success', timelineColor: 'green' },
-  suspended: { label: '已暂停', tagColor: 'warning', timelineColor: 'orange' },
-  error: { label: '失败', tagColor: 'error', timelineColor: 'red' },
-  exited: { label: '已完成', tagColor: 'default', timelineColor: 'gray' },
-  unknown: { label: '未知', tagColor: 'default', timelineColor: 'gray' },
+type SessionStatusDisplay = {
+  label: string;
+  tagColor: string;
+  timelineColor: string;
+  active: boolean;
+  running: boolean;
+  failed: boolean;
 };
+
+export const sessionStatusDisplay: Record<SessionStatus, SessionStatusDisplay> = {
+  starting: {
+    label: '启动中',
+    tagColor: 'processing',
+    timelineColor: 'blue',
+    active: true,
+    running: true,
+    failed: false,
+  },
+  idle: {
+    label: '等待中',
+    tagColor: 'default',
+    timelineColor: 'gray',
+    active: true,
+    running: false,
+    failed: false,
+  },
+  running: {
+    label: '运行中',
+    tagColor: 'success',
+    timelineColor: 'green',
+    active: true,
+    running: true,
+    failed: false,
+  },
+  suspended: {
+    label: '已暂停',
+    tagColor: 'warning',
+    timelineColor: 'orange',
+    active: true,
+    running: false,
+    failed: false,
+  },
+  error: {
+    label: '失败',
+    tagColor: 'error',
+    timelineColor: 'red',
+    active: false,
+    running: false,
+    failed: true,
+  },
+  exited: {
+    label: '已完成',
+    tagColor: 'default',
+    timelineColor: 'gray',
+    active: false,
+    running: false,
+    failed: false,
+  },
+  unknown: {
+    label: '未知',
+    tagColor: 'default',
+    timelineColor: 'gray',
+    active: false,
+    running: false,
+    failed: false,
+  },
+};
+
+export const sessionStatusOptions = (
+  Object.entries(sessionStatusDisplay) as Array<
+    [SessionStatus, SessionStatusDisplay]
+  >
+).map(([value, display]) => ({ value, label: display.label }));
 
 export function formatDateTime(value?: string): string {
   if (!value) return '-';
