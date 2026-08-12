@@ -1,4 +1,4 @@
-use axum::extract::Path;
+use axum::extract::{Path, Query};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{
     sse::{Event, KeepAlive, Sse},
@@ -7,7 +7,8 @@ use axum::response::{
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
-use openab_core::session_event::{SessionEvent, SessionEventBus, SessionEventReplay};
+use openab_core::session_event::{SessionStreamBus, SessionStreamEvent, SessionStreamReplay};
+use serde::Deserialize;
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -37,6 +38,18 @@ where
                 move |headers: HeaderMap| {
                     let pool = pool.clone();
                     async move { stream_session_events(headers, pool).await }
+                }
+            }),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/transcript",
+            get({
+                let pool = pool.clone();
+                move |headers: HeaderMap,
+                      Path(session_id): Path<String>,
+                      Query(query): Query<TranscriptQuery>| {
+                    let pool = pool.clone();
+                    async move { get_transcript(headers, session_id, query, pool).await }
                 }
             }),
         )
@@ -73,46 +86,71 @@ async fn get_session(headers: HeaderMap, session_id: String, pool: CoreSessionPo
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct TranscriptQuery {
+    after: Option<u64>,
+}
+
+async fn get_transcript(
+    headers: HeaderMap,
+    session_id: String,
+    query: TranscriptQuery,
+    pool: CoreSessionPool,
+) -> Response {
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
+    }
+    if pool.session_snapshot(&session_id).await.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "session not found" })),
+        )
+            .into_response();
+    }
+
+    Json(pool.transcript_store().snapshot(&session_id, query.after)).into_response()
+}
+
 async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
 
-    let event_bus = pool.session_event_bus();
+    let stream_bus = pool.session_stream_bus();
     let cursor = last_event_cursor(&headers);
-    let last_sequence = replay_cursor_sequence(cursor.as_ref(), &event_bus);
-    let subscription = event_bus.subscribe_after(last_sequence);
+    let last_sequence = replay_cursor_sequence(cursor.as_ref(), &stream_bus);
+    let subscription = stream_bus.subscribe_after(last_sequence);
     let last_replayed_sequence = subscription
         .replay
         .events
         .last()
-        .map(|event| event.sequence)
+        .map(SessionStreamEvent::sequence)
         .or(last_sequence)
         .unwrap_or_default();
     let replay_events = replay_events_sse(
         cursor.as_ref(),
         last_sequence,
-        &event_bus,
+        &stream_bus,
         subscription.replay,
     );
 
     let live_events = stream::unfold(
-        (subscription.receiver, last_replayed_sequence, event_bus),
-        |(mut receiver, last_replayed_sequence, event_bus)| async move {
+        (subscription.receiver, last_replayed_sequence, stream_bus),
+        |(mut receiver, last_replayed_sequence, stream_bus)| async move {
             loop {
                 match receiver.recv().await {
-                    Ok(event) if event.sequence <= last_replayed_sequence => continue,
+                    Ok(event) if event.sequence() <= last_replayed_sequence => continue,
                     Ok(event) => {
-                        let sequence = event.sequence;
+                        let sequence = event.sequence();
                         return Some((
-                            session_event_sse(&event_bus, event),
-                            (receiver, sequence, event_bus),
+                            session_stream_event_sse(&stream_bus, event),
+                            (receiver, sequence, stream_bus),
                         ));
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         return Some((
                             lagged_event_sse(skipped),
-                            (receiver, last_replayed_sequence, event_bus),
+                            (receiver, last_replayed_sequence, stream_bus),
                         ));
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
@@ -158,10 +196,10 @@ fn parse_last_event_id(value: &str) -> Option<SessionEventCursor> {
 
 fn replay_cursor_sequence(
     cursor: Option<&SessionEventCursor>,
-    event_bus: &SessionEventBus,
+    stream_bus: &SessionStreamBus,
 ) -> Option<u64> {
     match cursor {
-        Some(cursor) if cursor.generation.as_deref() == Some(event_bus.generation()) => {
+        Some(cursor) if cursor.generation.as_deref() == Some(stream_bus.generation()) => {
             Some(cursor.sequence)
         }
         Some(_) => None,
@@ -174,13 +212,13 @@ fn replay_cursor_sequence(
 fn replay_events_sse(
     cursor: Option<&SessionEventCursor>,
     last_sequence: Option<u64>,
-    event_bus: &SessionEventBus,
-    replay: SessionEventReplay,
+    stream_bus: &SessionStreamBus,
+    replay: SessionStreamReplay,
 ) -> Vec<Result<Event, Infallible>> {
     let mut events = Vec::new();
     if let Some(cursor) = cursor {
         if last_sequence.is_none() {
-            events.push(cursor_reset_event_sse(cursor, event_bus));
+            events.push(cursor_reset_event_sse(cursor, stream_bus));
             return events;
         }
     }
@@ -194,20 +232,20 @@ fn replay_events_sse(
         replay
             .events
             .into_iter()
-            .map(|event| session_event_sse(event_bus, event)),
+            .map(|event| session_stream_event_sse(stream_bus, event)),
     );
     events
 }
 
-fn session_event_sse(
-    event_bus: &SessionEventBus,
-    event: SessionEvent,
+fn session_stream_event_sse(
+    stream_bus: &SessionStreamBus,
+    event: SessionStreamEvent,
 ) -> Result<Event, Infallible> {
-    let event_name = event.event.as_sse_event();
-    let id = event_bus.event_id(event.sequence);
+    let event_name = event.as_sse_event();
+    let id = stream_bus.event_id(event.sequence());
     let data = serde_json::to_string(&event).unwrap_or_else(|err| {
         json!({
-            "error": "failed to serialize session event",
+            "error": "failed to serialize session stream event",
             "message": err.to_string(),
         })
         .to_string()
@@ -217,17 +255,17 @@ fn session_event_sse(
 
 fn cursor_reset_event_sse(
     cursor: &SessionEventCursor,
-    event_bus: &SessionEventBus,
+    stream_bus: &SessionStreamBus,
 ) -> Result<Event, Infallible> {
     Ok(Event::default()
         .event("cursor_reset")
-        .id(event_bus.event_id(0))
+        .id(stream_bus.event_id(0))
         .data(
             json!({
                 "error": "event cursor generation changed",
                 "last_event_generation": cursor.generation.as_deref(),
                 "last_sequence": cursor.sequence,
-                "current_generation": event_bus.generation(),
+                "current_generation": stream_bus.generation(),
                 "action": "refetch /api/v1/sessions before continuing the stream",
             })
             .to_string(),
@@ -246,7 +284,7 @@ fn lagged_event_sse(skipped: u64) -> Result<Event, Infallible> {
 
 fn history_unavailable_event_sse(
     last_event_id: u64,
-    replay: &SessionEventReplay,
+    replay: &SessionStreamReplay,
 ) -> Result<Event, Infallible> {
     Ok(Event::default().event("error").data(
         json!({
@@ -361,19 +399,19 @@ mod tests {
 
     #[test]
     fn fresh_stream_replays_history_from_zero() {
-        let event_bus = SessionEventBus::new(8);
+        let stream_bus = SessionStreamBus::new(8);
 
-        assert_eq!(replay_cursor_sequence(None, &event_bus), Some(0));
+        assert_eq!(replay_cursor_sequence(None, &stream_bus), Some(0));
     }
 
     #[test]
     fn stale_stream_cursor_requests_a_reset() {
-        let event_bus = SessionEventBus::new(8);
+        let stream_bus = SessionStreamBus::new(8);
         let stale = SessionEventCursor {
             generation: Some("previous-generation".into()),
             sequence: 42,
         };
 
-        assert_eq!(replay_cursor_sequence(Some(&stale), &event_bus), None);
+        assert_eq!(replay_cursor_sequence(Some(&stale), &stream_bus), None);
     }
 }
