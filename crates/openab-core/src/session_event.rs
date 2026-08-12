@@ -192,6 +192,12 @@ pub struct SessionStreamBus {
     history: Arc<Mutex<SessionStreamHistory>>,
 }
 
+impl Default for SessionStreamBus {
+    fn default() -> Self {
+        Self::new(DEFAULT_HISTORY_CAPACITY)
+    }
+}
+
 impl SessionStreamBus {
     pub fn new(capacity: usize) -> Self {
         let (tx, _) = broadcast::channel(capacity.max(1));
@@ -290,10 +296,14 @@ impl Default for SessionEventBus {
 
 impl SessionEventBus {
     pub fn new(capacity: usize) -> Self {
-        Self::new_with_stream(capacity, SessionStreamBus::new(capacity))
+        Self::new_with_stream_capacity(capacity, SessionStreamBus::new(capacity))
     }
 
-    pub(crate) fn new_with_stream(capacity: usize, stream: SessionStreamBus) -> Self {
+    pub(crate) fn new_with_stream(stream: SessionStreamBus) -> Self {
+        Self::new_with_stream_capacity(DEFAULT_HISTORY_CAPACITY, stream)
+    }
+
+    fn new_with_stream_capacity(capacity: usize, stream: SessionStreamBus) -> Self {
         let (tx, _) = broadcast::channel(capacity.max(1));
         Self {
             tx,

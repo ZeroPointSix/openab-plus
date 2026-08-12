@@ -1,7 +1,7 @@
 use crate::session_event::SessionStreamBus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,9 @@ pub enum TranscriptRole {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptEntry {
+    /// Stable per-session identity. Every revision of a streamed assistant or
+    /// tool entry keeps this value so a client can upsert rather than append.
+    pub entry_id: String,
     /// A per-session mutation sequence. A merged text entry or tool upsert gets
     /// a fresh sequence so snapshot `after` requests can replay its latest form.
     pub sequence: u64,
@@ -34,6 +37,28 @@ pub struct TranscriptEntry {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptEntryDraft {
+    role: TranscriptRole,
+    content: Option<String>,
+    tool_call: Option<Value>,
+    tool_result: Option<Value>,
+    tool_call_id: Option<String>,
+    status: Option<String>,
+}
+
+/// Complete information for one ACP tool_call or tool_call_update notification.
+/// `payload` is intentionally not normalized: ACP agents use agent-specific
+/// fields for raw input, output, terminal output, and file diffs.
+#[derive(Debug, Clone)]
+pub struct ToolTranscriptUpdate {
+    pub tool_call_id: String,
+    pub title: String,
+    pub status: String,
+    pub completed: bool,
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -58,6 +83,7 @@ pub struct TranscriptSnapshot {
 struct TranscriptSession {
     capacity: usize,
     next_sequence: u64,
+    next_entry_id: u64,
     /// The current, de-duplicated display state. Assistant text chunks and a
     /// tool's lifecycle share one visible entry each.
     entries: VecDeque<TranscriptEntry>,
@@ -72,6 +98,7 @@ impl TranscriptSession {
         Self {
             capacity: capacity.max(1),
             next_sequence: 1,
+            next_entry_id: 1,
             entries: VecDeque::new(),
             events: VecDeque::new(),
         }
@@ -81,6 +108,12 @@ impl TranscriptSession {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         sequence
+    }
+
+    fn allocate_entry_id(&mut self) -> String {
+        let entry_id = format!("entry-{}", self.next_entry_id);
+        self.next_entry_id += 1;
+        entry_id
     }
 
     fn push_event(&mut self, entry: TranscriptEntry) {
@@ -184,12 +217,14 @@ impl SessionTranscriptStore {
     ) -> TranscriptEvent {
         self.append_entry(
             session_id,
-            TranscriptRole::User,
-            Some(content.into()),
-            None,
-            None,
-            None,
-            Some("completed".to_string()),
+            TranscriptEntryDraft {
+                role: TranscriptRole::User,
+                content: Some(content.into()),
+                tool_call: None,
+                tool_result: None,
+                tool_call_id: None,
+                status: Some("completed".to_string()),
+            },
         )
     }
 
@@ -201,12 +236,14 @@ impl SessionTranscriptStore {
     ) -> TranscriptEvent {
         self.append_entry(
             session_id,
-            TranscriptRole::System,
-            Some(content.into()),
-            None,
-            None,
-            None,
-            Some(status.into()),
+            TranscriptEntryDraft {
+                role: TranscriptRole::System,
+                content: Some(content.into()),
+                tool_call: None,
+                tool_result: None,
+                tool_call_id: None,
+                status: Some(status.into()),
+            },
         )
     }
 
@@ -239,6 +276,7 @@ impl SessionTranscriptStore {
             }
 
             let entry = TranscriptEntry {
+                entry_id: session.allocate_entry_id(),
                 sequence,
                 timestamp: now,
                 role: TranscriptRole::Assistant,
@@ -257,33 +295,29 @@ impl SessionTranscriptStore {
     pub fn append_thinking(&self, session_id: &str, content: impl Into<String>) -> TranscriptEvent {
         self.append_entry(
             session_id,
-            TranscriptRole::Assistant,
-            Some(content.into()),
-            None,
-            None,
-            None,
-            Some("thinking".to_string()),
+            TranscriptEntryDraft {
+                role: TranscriptRole::Assistant,
+                content: Some(content.into()),
+                tool_call: None,
+                tool_result: None,
+                tool_call_id: None,
+                status: Some("thinking".to_string()),
+            },
         )
     }
 
     pub fn upsert_tool_call(
         &self,
         session_id: &str,
-        tool_call_id: impl Into<String>,
-        title: impl Into<String>,
-        status: impl Into<String>,
-        completed: bool,
+        update: ToolTranscriptUpdate,
     ) -> TranscriptEvent {
-        let tool_call_id = tool_call_id.into();
-        let title = title.into();
-        let status = status.into();
         self.mutate(session_id, move |session| {
             let sequence = session.allocate_sequence();
             let now = Utc::now();
-            let call = json!({
-                "id": tool_call_id,
-                "title": title,
-            });
+            let tool_call_id = update.tool_call_id;
+            let title = update.title;
+            let status = update.status;
+            let payload = tool_call_payload(update.payload, &tool_call_id, &title);
             if let Some(entry) = session.entries.iter_mut().find(|entry| {
                 entry.role == TranscriptRole::Tool
                     && entry.tool_call_id.as_deref() == Some(tool_call_id.as_str())
@@ -292,22 +326,25 @@ impl SessionTranscriptStore {
                 entry.timestamp = now;
                 if !title.is_empty() {
                     entry.content = Some(title.clone());
-                    entry.tool_call = Some(call.clone());
                 }
+                entry.tool_call = Some(merge_tool_payload(entry.tool_call.take(), payload.clone()));
                 entry.status = Some(status.clone());
-                entry.tool_result = completed.then(|| json!({ "status": status }));
+                if update.completed {
+                    entry.tool_result = Some(merge_tool_payload(entry.tool_result.take(), payload));
+                }
                 let event = entry.clone();
                 session.push_event(event.clone());
                 return event;
             }
 
             let entry = TranscriptEntry {
+                entry_id: session.allocate_entry_id(),
                 sequence,
                 timestamp: now,
                 role: TranscriptRole::Tool,
                 content: (!title.is_empty()).then_some(title),
-                tool_call: Some(call),
-                tool_result: completed.then(|| json!({ "status": status })),
+                tool_call: Some(payload.clone()),
+                tool_result: update.completed.then_some(payload),
                 tool_call_id: Some(tool_call_id),
                 status: Some(status),
             };
@@ -335,26 +372,18 @@ impl SessionTranscriptStore {
         })
     }
 
-    fn append_entry(
-        &self,
-        session_id: &str,
-        role: TranscriptRole,
-        content: Option<String>,
-        tool_call: Option<Value>,
-        tool_result: Option<Value>,
-        tool_call_id: Option<String>,
-        status: Option<String>,
-    ) -> TranscriptEvent {
+    fn append_entry(&self, session_id: &str, draft: TranscriptEntryDraft) -> TranscriptEvent {
         self.mutate(session_id, move |session| {
             let entry = TranscriptEntry {
+                entry_id: session.allocate_entry_id(),
                 sequence: session.allocate_sequence(),
                 timestamp: Utc::now(),
-                role,
-                content,
-                tool_call,
-                tool_result,
-                tool_call_id,
-                status,
+                role: draft.role,
+                content: draft.content,
+                tool_call: draft.tool_call,
+                tool_result: draft.tool_result,
+                tool_call_id: draft.tool_call_id,
+                status: draft.status,
             };
             session.push_entry(entry.clone());
             session.push_event(entry.clone());
@@ -404,9 +433,32 @@ impl SessionTranscriptStore {
     }
 }
 
+fn tool_call_payload(mut payload: Value, tool_call_id: &str, title: &str) -> Value {
+    if let Value::Object(fields) = &mut payload {
+        fields
+            .entry("toolCallId".to_string())
+            .or_insert_with(|| Value::String(tool_call_id.to_string()));
+        if !title.is_empty() {
+            fields.insert("title".to_string(), Value::String(title.to_string()));
+        }
+    }
+    payload
+}
+
+fn merge_tool_payload(existing: Option<Value>, update: Value) -> Value {
+    match (existing, update) {
+        (Some(Value::Object(mut existing)), Value::Object(update)) => {
+            existing.extend(update);
+            Value::Object(existing)
+        }
+        (_, update) => update,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn store(capacity: usize) -> SessionTranscriptStore {
         SessionTranscriptStore::new(capacity, SessionStreamBus::new(32))
@@ -419,8 +471,10 @@ mod tests {
         let second = store.append_assistant_text("session", " world");
 
         assert!(second.sequence > first.sequence);
+        assert_eq!(first.entry.entry_id, second.entry.entry_id);
         let snapshot = store.snapshot("session", None);
         assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].entry_id, first.entry.entry_id);
         assert_eq!(snapshot.entries[0].content.as_deref(), Some("hello world"));
         assert_eq!(snapshot.entries[0].sequence, 2);
 
@@ -431,18 +485,56 @@ mod tests {
     }
 
     #[test]
-    fn upserts_tool_calls_by_stable_identifier() {
+    fn upserts_tool_calls_by_stable_identifier_without_losing_raw_payload() {
         let store = store(8);
-        let first = store.upsert_tool_call("session", "tool-1", "Terminal", "running", false);
-        let second = store.upsert_tool_call("session", "tool-1", "Terminal", "completed", true);
+        let first = store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "Terminal".into(),
+                status: "running".into(),
+                completed: false,
+                payload: json!({
+                    "sessionUpdate": "tool_call",
+                    "rawInput": {"command": "git status"}
+                }),
+            },
+        );
+        let second = store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "".into(),
+                status: "completed".into(),
+                completed: true,
+                payload: json!({
+                    "sessionUpdate": "tool_call_update",
+                    "content": [{"type": "text", "text": "clean"}],
+                    "diff": {"path": "src/lib.rs", "before": "old", "after": "new"}
+                }),
+            },
+        );
 
         assert!(second.sequence > first.sequence);
+        assert_eq!(first.entry.entry_id, second.entry.entry_id);
         let snapshot = store.snapshot("session", None);
         assert_eq!(snapshot.entries.len(), 1);
         let entry = &snapshot.entries[0];
         assert_eq!(entry.tool_call_id.as_deref(), Some("tool-1"));
         assert_eq!(entry.status.as_deref(), Some("completed"));
-        assert_eq!(entry.tool_result.as_ref().unwrap()["status"], "completed");
+        assert_eq!(
+            entry.tool_call.as_ref().unwrap()["rawInput"]["command"],
+            "git status"
+        );
+        assert_eq!(
+            entry.tool_call.as_ref().unwrap()["diff"]["path"],
+            "src/lib.rs"
+        );
+        assert_eq!(
+            entry.tool_result.as_ref().unwrap()["content"][0]["text"],
+            "clean"
+        );
+        assert_eq!(entry.tool_result.as_ref().unwrap()["diff"]["after"], "new");
     }
 
     #[test]
