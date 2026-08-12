@@ -26,6 +26,17 @@ pub struct OutputDirectives {
     pub reply_to: Option<String>,
 }
 
+/// Chunk limit for delivering a reply on `platform`. ACP is a WebSocket transport with
+/// no small per-message limit, and its reply route closes after the first delivered
+/// message. Deliver ACP replies whole so long responses are not truncated.
+fn reply_message_limit(platform: &str, adapter_limit: usize) -> usize {
+    if platform == "acp" {
+        usize::MAX
+    } else {
+        adapter_limit
+    }
+}
+
 /// Parse `[[key:value]]` directives from the beginning of agent output.
 /// Returns parsed directives and the remaining content (directives stripped).
 pub fn parse_output_directives(content: &str) -> (OutputDirectives, String) {
@@ -807,13 +818,17 @@ impl AdapterRouter {
     ) -> Result<()> {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
-        let message_limit = adapter.message_limit();
+        let message_limit =
+            reply_message_limit(&thread_channel.platform, adapter.message_limit());
         let exposes_intermediate_text = adapter.exposes_intermediate_text();
         // A strict privacy-boundary adapter (Slack) never publishes raw agent
-        // chunks while a turn is running. It keeps the status/progress message,
-        // then sends only the finalized answer.
-        let streaming =
-            adapter.use_streaming(other_bot_present) && exposes_intermediate_text;
+        // chunks while a turn is running. ACP uses snapshot edits to produce
+        // append-only agent_message_chunk updates, independent of Telegram streaming.
+        let streaming = if thread_channel.platform == "acp" {
+            false
+        } else {
+            adapter.use_streaming(other_bot_present) && exposes_intermediate_text
+        };
         // Intermediate narration is never retained across a strict privacy
         // boundary, even if the shared narration_display setting is enabled.
         let keep_full_text = exposes_intermediate_text
@@ -841,6 +856,8 @@ impl AdapterRouter {
         } else {
             tool_display
         };
+        // ACP chunks are append-only; do not re-render tool prefixes into text deltas.
+        let platform_is_acp = thread_channel.platform == "acp";
         let session_link_label = adapter.session_link_label();
         let external_url = self
             .pool
@@ -1135,7 +1152,8 @@ impl AdapterRouter {
                                             }
                                         }
                                     } else if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(compose_display(
+                                        let _ = tx.send(display_for(
+                                            platform_is_acp,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1195,7 +1213,8 @@ impl AdapterRouter {
                                     }
                                     // Post+edit live update (no-op under native streaming: buf_tx is None).
                                     if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(compose_display(
+                                        let _ = tx.send(display_for(
+                                            platform_is_acp,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1241,7 +1260,8 @@ impl AdapterRouter {
                                     }
                                     tool_progress.update(&tool_lines).await;
                                     if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(compose_display(
+                                        let _ = tx.send(display_for(
+                                            platform_is_acp,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1318,7 +1338,13 @@ impl AdapterRouter {
                     tool_progress.finish(&tool_lines, turn_failed).await;
                     // Build final content
                     let final_content =
-                        compose_display(&tool_lines, &text_buf, false, reply_tool_display);
+                        display_for(
+                            platform_is_acp,
+                            &tool_lines,
+                            &text_buf,
+                            false,
+                            reply_tool_display,
+                        );
                     let final_content = if final_content.is_empty() {
                         if turn_result.is_silent_failure() {
                             warn!(
@@ -2272,6 +2298,22 @@ pub(crate) fn classify_empty_turn(
     }
 }
 
+/// Select content for a reply. ACP receives raw append-only answer text; other
+/// platforms retain their existing tool-merged display.
+fn display_for(
+    platform_is_acp: bool,
+    tool_lines: &[ToolEntry],
+    text: &str,
+    streaming: bool,
+    tool_display: ToolDisplay,
+) -> String {
+    if platform_is_acp {
+        text.to_string()
+    } else {
+        compose_display(tool_lines, text, streaming, tool_display)
+    }
+}
+
 fn compose_display(
     tool_lines: &[ToolEntry],
     text: &str,
@@ -2486,6 +2528,18 @@ fn propagate_mentions_to_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acp_reply_limit_is_unbounded_others_use_adapter_limit() {
+        assert_eq!(reply_message_limit("acp", 4096), usize::MAX);
+        assert_eq!(reply_message_limit("discord", 2000), 2000);
+        assert_eq!(reply_message_limit("slack", 4096), 4096);
+        let long = "x".repeat(50_000);
+        assert_eq!(
+            crate::format::split_message(&long, reply_message_limit("acp", 4096)).len(),
+            1
+        );
+    }
 
     #[test]
     fn profile_metadata_converts_to_safe_session_overrides() {

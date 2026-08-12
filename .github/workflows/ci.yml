@@ -50,9 +50,11 @@ jobs:
         run: cargo clippy --workspace --features unified -- -D warnings
       - name: cargo test
         run: cargo test --workspace
-
-  # gateway tests are now covered by `cargo test --workspace` in the check job above
-  # (openab-gateway is a workspace member in crates/openab-gateway/)
+      # Workspace tests use default features, so exercise the ACP-gated server separately.
+      - name: cargo test (acp gateway)
+        run: cargo test -p openab-gateway --features acp
+      - name: cargo build (unified)
+        run: cargo build --features unified
 
   operator:
     needs: changes
