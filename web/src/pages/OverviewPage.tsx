@@ -18,7 +18,7 @@ import { Typography } from 'antd';
 import { SessionFilters } from '../types';
 import { adminApi } from '../lib/api';
 import { filterSessions, sessionMetrics } from '../lib/session';
-import { RecentSessionsList } from '../components/RecentSessionsList';
+import { RecentSessionsTable } from '../components/RecentSessionsTable';
 
 const { Statistic } = StatisticCard;
 
@@ -177,10 +177,12 @@ export function OverviewPage() {
         </ProForm>
       </section>
 
-      <RecentSessionsList
+      <RecentSessionsTable
         title="最近会话"
         sessions={filteredSessions}
         loading={sessionsQuery.isLoading}
+        compact
+        searchable={false}
         limit={8}
         onReload={() => void sessionsQuery.refetch()}
       />

@@ -28,11 +28,14 @@ export function parseSessionEventPayload(
   }
 }
 
+function sessionTimestamp(session: SessionSnapshot): number {
+  const timestamp = Date.parse(session.updated_at || session.created_at);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
 export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
-  return [...sessions].sort((a, b) =>
-    String(b.updated_at || b.created_at).localeCompare(
-      String(a.updated_at || a.created_at),
-    ),
+  return [...sessions].sort(
+    (a, b) => sessionTimestamp(b) - sessionTimestamp(a),
   );
 }
 

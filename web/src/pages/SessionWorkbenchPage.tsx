@@ -1,40 +1,37 @@
-import { useEffect, useMemo, useState } from 'react';
-import { AppstoreOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { useEffect, useState } from 'react';
+import { PageContainer } from '@ant-design/pro-components';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Drawer, Space, Typography } from 'antd';
-import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
-import { SessionMainPanel } from '../components/SessionMainPanel';
-import { SessionInspector } from '../components/SessionInspector';
-import { SessionSidebar } from '../components/SessionSidebar';
-import { StreamStatus } from '../hooks/useSessionStream';
+import { useNavigate, useParams } from 'react-router-dom';
+import { Drawer } from 'antd';
 import { adminApi } from '../lib/api';
-import { initialTimeline } from '../lib/session';
-import { SessionSnapshot, SessionTimelineItem } from '../types';
-
-export interface AdminLayoutOutletContext {
-  streamStatus: StreamStatus;
-}
+import { initialTimeline, sortSessions } from '../lib/session';
+import { SessionTimelineItem } from '../types';
+import { useMediaQuery } from '../hooks/useMediaQuery';
+import { SessionInspector } from '../components/session-workbench/SessionInspector';
+import { SessionMainPanel } from '../components/session-workbench/SessionMainPanel';
+import { SessionSidebar } from '../components/session-workbench/SessionSidebar';
 
 export function SessionWorkbenchPage() {
-  const { id } = useParams<{ id: string }>();
-  const sessionId = id || '';
+  const params = useParams<{ id?: string }>();
+  const sessionId = params.id || '';
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { streamStatus } = useOutletContext<AdminLayoutOutletContext>();
-  const [mobilePanel, setMobilePanel] = useState<'sidebar' | 'inspector' | null>(
-    null,
-  );
+  const compact = useMediaQuery('(max-width: 1100px)');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   const sessionsQuery = useQuery({
     queryKey: ['sessions'],
     queryFn: adminApi.sessions,
     refetchInterval: 30_000,
   });
+
   const sessionQuery = useQuery({
     queryKey: ['session', sessionId],
     queryFn: () => adminApi.session(sessionId),
     enabled: Boolean(sessionId),
   });
+
   const timelineQuery = useQuery<SessionTimelineItem[]>({
     queryKey: ['sessionTimeline', sessionId],
     queryFn: async () => [],
@@ -42,115 +39,104 @@ export function SessionWorkbenchPage() {
     initialData: [],
   });
 
+  const sessions = sessionsQuery.data || [];
+
   useEffect(() => {
-    if (!sessionQuery.data || !sessionId) return;
+    if (sessionId || sessionsQuery.isLoading || sessionsQuery.isFetching) {
+      return;
+    }
+
+    const [firstSession] = sortSessions(sessions);
+    if (firstSession) {
+      navigate('/sessions/' + encodeURIComponent(firstSession.session_id), {
+        replace: true,
+      });
+    }
+  }, [
+    navigate,
+    sessionId,
+    sessions,
+    sessionsQuery.isFetching,
+    sessionsQuery.isLoading,
+  ]);
+
+  useEffect(() => {
+    if (!sessionQuery.data) return;
     queryClient.setQueryData<SessionTimelineItem[]>(
       ['sessionTimeline', sessionId],
       (current = []) =>
-        current.length ? current : initialTimeline(sessionQuery.data),
+        current.length ? current : initialTimeline(sessionQuery.data!),
     );
   }, [queryClient, sessionId, sessionQuery.data]);
 
-  const sessions = useMemo(() => {
-    const current = sessionsQuery.data || [];
-    if (!sessionQuery.data) return current;
-    if (current.some((session) => session.session_id === sessionQuery.data?.session_id)) {
-      return current;
-    }
-    return [sessionQuery.data, ...current];
-  }, [sessionsQuery.data, sessionQuery.data]);
-
-  const selectedSession = useMemo(
-    () =>
-      sessions.find((session) => session.session_id === sessionId) ||
-      sessionQuery.data,
-    [sessionId, sessionQuery.data, sessions],
-  );
-
-  const selectSession = (nextId: string) => {
-    setMobilePanel(null);
-    navigate('/sessions/' + encodeURIComponent(nextId));
+  const selectSession = (nextSessionId: string) => {
+    navigate('/sessions/' + encodeURIComponent(nextSessionId));
+    setSidebarOpen(false);
   };
+
+  const timeline = sessionId ? timelineQuery.data || [] : [];
 
   const sidebar = (
     <SessionSidebar
       sessions={sessions}
-      selectedId={sessionId || undefined}
-      loading={sessionsQuery.isLoading || sessionQuery.isLoading}
+      loading={sessionsQuery.isLoading}
+      activeSessionId={sessionId || undefined}
       onSelect={selectSession}
       onReload={() => void sessionsQuery.refetch()}
     />
   );
+
   const inspector = (
     <SessionInspector
-      session={selectedSession}
-      timeline={timelineQuery.data || []}
+      session={sessionQuery.data}
+      timeline={timeline}
+      hasSelection={Boolean(sessionId)}
     />
   );
 
   return (
-    <div className="session-workbench-page">
-      <header className="session-workbench-header">
-        <div className="session-workbench-title">
-          <span className="panel-icon blue" aria-hidden="true">
-            <AppstoreOutlined />
-          </span>
-          <div>
-            <Typography.Title level={2}>Sessions</Typography.Title>
-            <Typography.Text type="secondary">
-              三栏只读会话工作台
-            </Typography.Text>
-          </div>
-        </div>
-        <Space className="session-mobile-actions" size={8}>
-          <Button onClick={() => setMobilePanel('sidebar')}>会话列表</Button>
-          <Button
-            icon={<InfoCircleOutlined />}
-            onClick={() => setMobilePanel('inspector')}
+    <PageContainer
+      title="会话工作台"
+      subTitle="只读观测 Agent 会话 · 不提供发送或控制入口"
+      className="page-container session-workbench-page"
+    >
+      <div className="session-workbench">
+        {compact ? (
+          <Drawer
+            className="workbench-drawer"
+            placement="left"
+            width={320}
+            open={sidebarOpen}
+            onClose={() => setSidebarOpen(false)}
+            title={null}
           >
-            Inspector
-          </Button>
-        </Space>
-      </header>
-
-      <div className="session-workbench-grid">
-        <div className="session-workbench-sidebar">{sidebar}</div>
+            {sidebar}
+          </Drawer>
+        ) : (
+          sidebar
+        )}
         <SessionMainPanel
-          session={selectedSession}
-          timeline={timelineQuery.data || []}
-          streamStatus={streamStatus}
+          session={sessionQuery.data}
+          loading={Boolean(sessionId) && sessionQuery.isLoading}
+          hasSelection={Boolean(sessionId)}
+          onOpenSidebar={compact ? () => setSidebarOpen(true) : undefined}
+          onOpenInspector={compact ? () => setInspectorOpen(true) : undefined}
         />
-        <div className="session-workbench-inspector">{inspector}</div>
+        {compact ? (
+          <Drawer
+            className="workbench-drawer"
+            placement="right"
+            width={340}
+            open={inspectorOpen}
+            onClose={() => setInspectorOpen(false)}
+            title={null}
+          >
+            {inspector}
+          </Drawer>
+        ) : (
+          inspector
+        )}
       </div>
-
-      <Drawer
-        title="会话列表"
-        placement="left"
-        open={mobilePanel === 'sidebar'}
-        onClose={() => setMobilePanel(null)}
-        width={Math.min(360, window.innerWidth - 24)}
-        className="session-mobile-drawer"
-        destroyOnClose={false}
-      >
-        {sidebar}
-      </Drawer>
-      <Drawer
-        title="Inspector"
-        placement="right"
-        open={mobilePanel === 'inspector'}
-        onClose={() => setMobilePanel(null)}
-        width={Math.min(380, window.innerWidth - 24)}
-        className="session-mobile-drawer"
-        destroyOnClose={false}
-      >
-        {inspector}
-      </Drawer>
-
-      {sessionQuery.isError ? (
-        <Typography.Text type="danger" className="session-workbench-error">
-          无法加载深链会话，请检查会话 ID 或稍后重试。
-        </Typography.Text>
-      ) : null}
-    </div>
+    </PageContainer>
   );
 }
