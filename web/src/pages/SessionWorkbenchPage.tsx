@@ -9,6 +9,7 @@ import {
   sortSessions,
   visibleTimelineItems,
 } from '../lib/session';
+import { transcriptEntriesToActivity } from '../lib/transcript';
 import { SessionTimelineItem } from '../types';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { SessionInspector } from '../components/session-workbench/SessionInspector';
@@ -34,6 +35,13 @@ export function SessionWorkbenchPage() {
     queryKey: ['session', sessionId],
     queryFn: () => adminApi.session(sessionId),
     enabled: Boolean(sessionId),
+  });
+
+  const transcriptQuery = useQuery({
+    queryKey: ['sessionTranscript', sessionId],
+    queryFn: () => adminApi.transcript(sessionId),
+    enabled: Boolean(sessionId),
+    staleTime: Infinity,
   });
 
   const timelineQuery = useQuery<SessionTimelineItem[]>({
@@ -123,6 +131,15 @@ export function SessionWorkbenchPage() {
         )}
         <SessionMainPanel
           session={sessionQuery.data}
+          activityEntries={transcriptEntriesToActivity(
+            transcriptQuery.data?.entries || [],
+          )}
+          activityLoading={Boolean(sessionId) && transcriptQuery.isLoading}
+          activityError={
+            transcriptQuery.error instanceof Error
+              ? transcriptQuery.error.message
+              : undefined
+          }
           loading={Boolean(sessionId) && sessionQuery.isLoading}
           hasSelection={Boolean(sessionId)}
           onOpenSidebar={compact ? () => setSidebarOpen(true) : undefined}

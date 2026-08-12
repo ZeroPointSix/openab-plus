@@ -11,6 +11,7 @@ import {
   ConfigValues,
   ProfileValidationResult,
   SessionSnapshot,
+  TranscriptSnapshot,
 } from '../types';
 import { notifyUnauthorized, readAdminToken } from './auth';
 
@@ -92,6 +93,12 @@ export const adminApi = {
   session: (id: string) =>
     apiRequest<SessionSnapshot>(
       '/api/v1/sessions/' + encodeURIComponent(id),
+    ),
+  transcript: (id: string) =>
+    apiRequest<TranscriptSnapshot>(
+      '/api/v1/sessions/' +
+        encodeURIComponent(id) +
+        '/transcript',
     ),
   profiles: () =>
     apiRequest<AgentProfileDocument>('/api/v1/agent-profiles'),

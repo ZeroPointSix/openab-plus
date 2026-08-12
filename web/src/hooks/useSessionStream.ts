@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   SessionSnapshot,
   SessionTimelineItem,
+  TranscriptSnapshot,
 } from '../types';
 import { notifyUnauthorized, readAdminToken } from '../lib/auth';
 import {
@@ -12,6 +13,10 @@ import {
   parseSessionEventPayload,
   timelineItemFromEvent,
 } from '../lib/session';
+import {
+  parseTranscriptEventPayload,
+  upsertTranscriptEntry,
+} from '../lib/transcript';
 
 export type StreamStatus = 'connecting' | 'live' | 'reconnecting' | 'offline';
 
@@ -74,6 +79,17 @@ export function useSessionStream(enabled: boolean): StreamStatus {
                 lastEventId.current = message.id;
               }
 
+              if (message.event === 'transcript') {
+                const transcriptEvent = parseTranscriptEventPayload(message.data);
+                if (transcriptEvent) {
+                  queryClient.setQueryData<TranscriptSnapshot>(
+                    ['sessionTranscript', transcriptEvent.session_id],
+                    (current) => upsertTranscriptEntry(current, transcriptEvent),
+                  );
+                  return;
+                }
+              }
+
               const event = parseSessionEventPayload(message.data);
               if (!event) {
                 // Cursor reset and replay diagnostics contain no session snapshot.
@@ -85,6 +101,9 @@ export function useSessionStream(enabled: boolean): StreamStatus {
                 ) {
                   void queryClient.invalidateQueries({ queryKey: ['sessions'] });
                   void queryClient.invalidateQueries({ queryKey: ['session'] });
+                  void queryClient.invalidateQueries({
+                    queryKey: ['sessionTranscript'],
+                  });
                 }
                 return;
               }

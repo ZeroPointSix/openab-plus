@@ -2,25 +2,27 @@ import {
   CopyOutlined,
   LinkOutlined,
   ProfileOutlined,
-  ReadOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import { Button, Empty, Space, Spin, Typography, message } from 'antd';
+import { Alert, Button, Empty, Space, Spin, Typography, message } from 'antd';
 import {
   streamStatusLabels,
   useStreamStatus,
 } from '../../hooks/streamStatusContext';
 import {
-  formatDateTime,
   formatRelativeTime,
   sourcePlatformLabel,
 } from '../../lib/format';
-import { SessionSnapshot } from '../../types';
+import { ActivityEntry, SessionSnapshot } from '../../types';
+import { SessionActivityFeed } from '../activity/SessionActivityFeed';
 import { EntityMark } from '../EntityMark';
 import { StatusTag } from '../StatusTag';
 
 interface SessionMainPanelProps {
   session?: SessionSnapshot;
+  activityEntries: ActivityEntry[];
+  activityLoading?: boolean;
+  activityError?: string;
   loading?: boolean;
   hasSelection: boolean;
   onOpenSidebar?: () => void;
@@ -29,6 +31,9 @@ interface SessionMainPanelProps {
 
 export function SessionMainPanel({
   session,
+  activityEntries,
+  activityLoading,
+  activityError,
   loading,
   hasSelection,
   onOpenSidebar,
@@ -152,19 +157,21 @@ export function SessionMainPanel({
           <div className="workbench-main-empty">
             <Empty description="未找到该会话，可能已结束或 ID 无效" />
           </div>
+        ) : activityLoading ? (
+          <div className="workbench-main-loading">
+            <Spin size="large" />
+          </div>
+        ) : activityError ? (
+          <Alert
+            className="workbench-activity-error"
+            type="error"
+            showIcon
+            message="活动流加载失败"
+            description={activityError}
+          />
         ) : (
-          <section className="workbench-placeholder" aria-label="活动流占位">
-            <span className="workbench-placeholder-icon" aria-hidden="true">
-              <ReadOutlined />
-            </span>
-            <Typography.Title level={4}>活动流（W4 接入）</Typography.Title>
-            <Typography.Paragraph type="secondary">
-              此处将展示 Agent 执行过程中的完整 Transcript 与工具调用活动流。
-              当前版本仅提供只读观测入口，不提供发送、插话或停止控制。
-            </Typography.Paragraph>
-            <Typography.Text type="secondary">
-              最近更新 {formatDateTime(session.updated_at)}
-            </Typography.Text>
+          <section className="activity-panel workbench-activity-panel">
+            <SessionActivityFeed entries={activityEntries} />
           </section>
         )}
       </div>
