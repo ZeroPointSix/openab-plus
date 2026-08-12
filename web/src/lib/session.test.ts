@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
+  matchesSessionKeyword,
   parseSessionEventPayload,
   sessionMetrics,
   sortSessions,
@@ -38,6 +39,12 @@ describe('session helpers', () => {
     expect(
       filterSessions(sessions, { platform: 'slack', profile: 'primary' }),
     ).toHaveLength(1);
+  });
+
+  it('matches keywords across session identity fields', () => {
+    expect(matchesSessionKeyword(sessions[0], 'ALPHA')).toBe(true);
+    expect(matchesSessionKeyword(sessions[0], 'primary')).toBe(true);
+    expect(matchesSessionKeyword(sessions[0], 'not-found')).toBe(false);
   });
 
   it('computes dashboard metrics', () => {

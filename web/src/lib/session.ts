@@ -39,6 +39,26 @@ export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
   );
 }
 
+export function matchesSessionKeyword(
+  session: SessionSnapshot,
+  keyword: string,
+): boolean {
+  const normalized = keyword.trim().toLocaleLowerCase();
+  if (!normalized) return true;
+  return [
+    session.session_id,
+    session.agent,
+    session.profile_id,
+    session.profile_name,
+    session.source.platform,
+    session.source.thread_id,
+    session.workdir,
+    session.model,
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLocaleLowerCase().includes(normalized));
+}
+
 export function filterSessions(
   sessions: SessionSnapshot[],
   filters: SessionFilters,
