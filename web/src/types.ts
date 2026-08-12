@@ -51,6 +51,94 @@ export interface SessionTimelineItem {
   sequence?: number;
 }
 
+export type ActivityToolStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'error'
+  | 'canceled';
+
+export interface FileDiffPayload {
+  path: string;
+  old_text: string;
+  new_text: string;
+}
+
+export interface TerminalOutputPayload {
+  command: string;
+  output?: string;
+  exit_code?: number;
+  signaled?: boolean;
+  truncated?: boolean;
+}
+
+export interface NormalizedToolCall {
+  key: string;
+  name: string;
+  kind?: string;
+  status: ActivityToolStatus;
+  description?: string;
+  input?: string;
+  output?: string;
+  duration_ms?: number;
+  truncated?: boolean;
+  /** @deprecated Use diffs; retained for one-diff snapshot compatibility. */
+  diff?: FileDiffPayload;
+  /** All file changes reported by a tool call, including ACP update.content arrays. */
+  diffs?: FileDiffPayload[];
+  terminal?: TerminalOutputPayload;
+}
+
+export interface ActivityBaseEntry {
+  id: string;
+  created_at: string;
+}
+
+export interface ActivityTurnEntry extends ActivityBaseEntry {
+  type: 'turn';
+  label: string;
+}
+
+export interface ActivityTextEntry extends ActivityBaseEntry {
+  type: 'user' | 'assistant';
+  text: string;
+}
+
+export interface ActivityThinkingEntry extends ActivityBaseEntry {
+  type: 'thinking';
+  text: string;
+}
+
+export interface ActivityPlanEntry extends ActivityBaseEntry {
+  type: 'plan';
+  title: string;
+  items: Array<{ text: string; done?: boolean }>;
+}
+
+export interface ActivityToolEntry extends ActivityBaseEntry {
+  type: 'tool';
+  tool: NormalizedToolCall;
+}
+
+export interface ActivityTerminalEntry extends ActivityBaseEntry {
+  type: 'terminal';
+  terminal: TerminalOutputPayload;
+}
+
+export interface ActivityErrorEntry extends ActivityBaseEntry {
+  type: 'error';
+  message: string;
+}
+
+export type ActivityEntry =
+  | ActivityTurnEntry
+  | ActivityTextEntry
+  | ActivityThinkingEntry
+  | ActivityPlanEntry
+  | ActivityToolEntry
+  | ActivityTerminalEntry
+  | ActivityErrorEntry;
+
 export type WorkdirStrategy =
   | 'system_default'
   | 'profile_default'
