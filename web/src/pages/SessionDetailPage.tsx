@@ -3,6 +3,7 @@ import {
   ArrowLeftOutlined,
   BranchesOutlined,
   ClockCircleOutlined,
+  CopyOutlined,
   ExclamationCircleFilled,
   LinkOutlined,
   ProfileOutlined,
@@ -13,11 +14,11 @@ import {
   Button,
   Descriptions,
   Empty,
-  message,
   Space,
   Spin,
   Timeline,
   Typography,
+  message,
 } from 'antd';
 import {
   useQuery,
@@ -25,12 +26,8 @@ import {
 } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { adminApi } from '../lib/api';
-import {
-  eventLabel,
-  formatDateTime,
-  sessionStatusDisplay,
-} from '../lib/format';
-import { initialTimeline } from '../lib/session';
+import { eventLabel, formatDateTime, sourcePlatformLabel } from '../lib/format';
+import { initialTimeline, visibleTimelineItems } from '../lib/session';
 import { SessionTimelineItem } from '../types';
 import { StatusTag } from '../components/StatusTag';
 
@@ -79,28 +76,24 @@ export function SessionDetailPage() {
   }
 
   const session = sessionQuery.data;
-  const timeline = timelineQuery.data || [];
-  const sourcePlatformLabel =
-    session.source.platform === 'slack'
-      ? 'Slack'
-      : session.source.platform === 'discord'
-        ? 'Discord'
-        : session.source.platform;
-  const copySessionLink = async () => {
-    if (!session.external_url) return;
-    try {
-      await navigator.clipboard.writeText(session.external_url);
-      message.success('会话链接已复制');
-    } catch {
-      message.error('复制会话链接失败');
-    }
-  };
+  const timeline = visibleTimelineItems(timelineQuery.data || []);
   const metadataSourceLabel =
     session.metadata_source === 'acp'
       ? 'ACP 运行时'
       : session.metadata_source === 'configured'
         ? '配置值'
         : '未报告';
+  const sourcePlatform = sourcePlatformLabel(session.source?.platform);
+
+  const copySessionLink = async () => {
+    if (!session.external_url) return;
+    try {
+      await navigator.clipboard.writeText(session.external_url);
+      message.success('会话链接已复制');
+    } catch {
+      message.error('复制失败，请检查浏览器剪贴板权限');
+    }
+  };
 
   return (
     <PageContainer
@@ -115,25 +108,25 @@ export function SessionDetailPage() {
         >
           返回
         </Button>,
-        session.external_url ? (
+        session.source?.permalink ? (
           <Button
-            key="copy-session-link"
+            key="source"
             type="primary"
-            icon={<LinkOutlined />}
-            onClick={() => void copySessionLink()}
-          >
-            复制会话链接
-          </Button>
-        ) : null,
-        session.source.permalink ? (
-          <Button
-            key="source-permalink"
             icon={<LinkOutlined />}
             href={session.source.permalink}
             target="_blank"
             rel="noreferrer"
           >
-            回到 {sourcePlatformLabel}
+            {sourcePlatform ? '回到 ' + sourcePlatform : '打开来源'}
+          </Button>
+        ) : null,
+        session.external_url ? (
+          <Button
+            key="copy-link"
+            icon={<CopyOutlined />}
+            onClick={copySessionLink}
+          >
+            复制会话链接
           </Button>
         ) : null,
       ]}
@@ -166,8 +159,11 @@ export function SessionDetailPage() {
             <Timeline
               items={[...timeline].reverse().map((item) => ({
                 color:
-                  (sessionStatusDisplay[item.status] || sessionStatusDisplay.unknown)
-                    .timelineColor,
+                  item.status === 'error'
+                    ? 'red'
+                    : item.status === 'running'
+                      ? 'green'
+                      : 'blue',
                 dot:
                   item.status === 'error' ? (
                     <ExclamationCircleFilled />

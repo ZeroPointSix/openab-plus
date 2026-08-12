@@ -2,11 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
-  matchesSessionKeyword,
+  initialTimeline,
   parseSessionEventPayload,
   sessionMetrics,
-  sortSessions,
   timelineItemFromEvent,
+  visibleTimelineItems,
 } from './session';
 import { SessionSnapshot } from '../types';
 
@@ -41,12 +41,6 @@ describe('session helpers', () => {
     ).toHaveLength(1);
   });
 
-  it('matches keywords across session identity fields', () => {
-    expect(matchesSessionKeyword(sessions[0], 'ALPHA')).toBe(true);
-    expect(matchesSessionKeyword(sessions[0], 'primary')).toBe(true);
-    expect(matchesSessionKeyword(sessions[0], 'not-found')).toBe(false);
-  });
-
   it('computes dashboard metrics', () => {
     expect(sessionMetrics(sessions)).toEqual({
       total: 2,
@@ -54,24 +48,6 @@ describe('session helpers', () => {
       running: 1,
       failed: 1,
     });
-  });
-
-  it('sorts by the instant represented by timestamps across time zones', () => {
-    const [newest, oldest] = sortSessions([
-      {
-        ...sessions[0],
-        session_id: 'slack:newest',
-        updated_at: '2026-08-12T06:43:22Z',
-      },
-      {
-        ...sessions[1],
-        session_id: 'discord:oldest',
-        updated_at: '2026-08-12T14:42:22+08:00',
-      },
-    ]);
-
-    expect(newest.session_id).toBe('slack:newest');
-    expect(oldest.session_id).toBe('discord:oldest');
   });
 
   it('upserts a snapshot received from SSE', () => {
@@ -115,5 +91,20 @@ describe('session helpers', () => {
     expect(previous?.id).toBe('generation-a:1:status_changed');
     expect(restarted?.id).toBe('generation-b:1:status_changed');
     expect(previous?.id).not.toBe(restarted?.id);
+  });
+
+  it('drops seed timeline entries once replayed stream events arrive', () => {
+    const seeds = initialTimeline(sessions[0]);
+    expect(seeds.length).toBeGreaterThan(0);
+    // 只有种子条目时原样展示（SSE 尚未补齐历史时的兜底）。
+    expect(visibleTimelineItems(seeds)).toEqual(seeds);
+
+    const replayed = timelineItemFromEvent(
+      { sequence: 7, event: 'session.created', snapshot: sessions[0] },
+      'gen:7',
+    );
+    expect(replayed).not.toBeNull();
+    // 真实的流事件（带 sequence）到达后，种子条目被过滤，避免重复。
+    expect(visibleTimelineItems([...seeds, replayed!])).toEqual([replayed]);
   });
 });

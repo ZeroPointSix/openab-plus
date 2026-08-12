@@ -5,10 +5,12 @@ import {
   SessionSnapshot,
   SessionTimelineItem,
 } from '../types';
-import { notifyUnauthorized, readAdminToken } from '../lib/auth';
+import {
+  notifyUnauthorized,
+  readAdminToken,
+} from '../lib/auth';
 import {
   applySessionEvent,
-  mergeTimelineItem,
   parseSessionEventPayload,
   timelineItemFromEvent,
 } from '../lib/session';
@@ -24,9 +26,12 @@ function wait(milliseconds: number): Promise<void> {
 export function useSessionStream(enabled: boolean): StreamStatus {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<StreamStatus>('offline');
-  // A reload starts without a cursor so the one app-wide SSE connection replays
-  // session history before it switches to live delivery. The ref still preserves
-  // the cursor for reconnects within the current page lifetime.
+  // Cold start always connects without Last-Event-ID so the server replays
+  // the retained history from sequence 0: the timeline cache is in-memory
+  // only, so resuming from a persisted cursor after a refresh would leave
+  // the detail timeline with just its seed entries. Reconnects within this
+  // page's lifetime still resume from the in-memory cursor to avoid
+  // re-replaying history on every transient drop.
   const lastEventId = useRef('');
 
   useEffect(() => {
@@ -76,16 +81,12 @@ export function useSessionStream(enabled: boolean): StreamStatus {
 
               const event = parseSessionEventPayload(message.data);
               if (!event) {
-                // Cursor reset and replay diagnostics contain no session snapshot.
-                // Re-sync the server state without discarding any timeline already
-                // displayed for another session.
-                if (
-                  message.event === 'cursor_reset' ||
-                  message.event === 'error'
-                ) {
-                  void queryClient.invalidateQueries({ queryKey: ['sessions'] });
-                  void queryClient.invalidateQueries({ queryKey: ['session'] });
-                }
+                queryClient.setQueriesData<SessionTimelineItem[]>(
+                  { queryKey: ['sessionTimeline'] },
+                  [],
+                );
+                void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+                void queryClient.invalidateQueries({ queryKey: ['session'] });
                 return;
               }
 
@@ -108,7 +109,14 @@ export function useSessionStream(enabled: boolean): StreamStatus {
                 if (timelineItem) {
                   queryClient.setQueryData<SessionTimelineItem[]>(
                     ['sessionTimeline', event.snapshot.session_id],
-                    (current) => mergeTimelineItem(current, timelineItem),
+                    (current = []) => {
+                      if (
+                        current.some((item) => item.id === timelineItem.id)
+                      ) {
+                        return current;
+                      }
+                      return [...current, timelineItem].slice(-60);
+                    },
                   );
                 }
               }

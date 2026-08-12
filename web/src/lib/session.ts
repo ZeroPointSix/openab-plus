@@ -163,3 +163,17 @@ export function initialTimeline(
   }
   return items;
 }
+
+/**
+ * 冷启动 / 刷新后，SSE 会从 0 补齐历史事件；一旦时间线里出现带 sequence
+ * 的真实流事件，就把 initialTimeline 种下的种子条目（created/current）
+ * 过滤掉，避免同一条「会话创建 / 当前状态」在时间线上重复出现。
+ */
+export function visibleTimelineItems(
+  items: SessionTimelineItem[],
+): SessionTimelineItem[] {
+  const hasStreamed = items.some((item) => typeof item.sequence === 'number');
+  return hasStreamed
+    ? items.filter((item) => typeof item.sequence === 'number')
+    : items;
+}

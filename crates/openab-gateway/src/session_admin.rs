@@ -118,9 +118,14 @@ async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Res
 
     let stream_bus = pool.session_stream_bus();
     let cursor = last_event_cursor(&headers);
-    let last_sequence = cursor.as_ref().and_then(|cursor| {
-        (cursor.generation.as_deref() == Some(stream_bus.generation())).then_some(cursor.sequence)
-    });
+    let last_sequence = match cursor.as_ref() {
+        Some(cursor) => (cursor.generation.as_deref() == Some(stream_bus.generation()))
+            .then_some(cursor.sequence),
+        // No Last-Event-ID (cold start after a deep link / hard refresh):
+        // replay the retained history from sequence 0 so the client backfills
+        // before live events stream in on the same connection.
+        None => Some(0),
+    };
     let subscription = stream_bus.subscribe_after(last_sequence);
     let last_replayed_sequence = subscription
         .replay
@@ -203,21 +208,26 @@ fn replay_events_sse(
     replay: SessionStreamReplay,
 ) -> Vec<Result<Event, Infallible>> {
     let mut events = Vec::new();
+    // A cursor from a previous gateway generation cannot be mapped onto the
+    // current history — tell the client to resync instead of replaying.
     if let Some(cursor) = cursor {
         if last_sequence.is_none() {
             events.push(cursor_reset_event_sse(cursor, stream_bus));
             return events;
         }
-        if replay.overflowed {
-            events.push(history_unavailable_event_sse(cursor.sequence, &replay));
-        }
-        events.extend(
-            replay
-                .events
-                .into_iter()
-                .map(|event| session_stream_event_sse(stream_bus, event)),
-        );
     }
+    if replay.overflowed {
+        events.push(history_unavailable_event_sse(
+            last_sequence.unwrap_or_default(),
+            &replay,
+        ));
+    }
+    events.extend(
+        replay
+            .events
+            .into_iter()
+            .map(|event| session_stream_event_sse(stream_bus, event)),
+    );
     events
 }
 
