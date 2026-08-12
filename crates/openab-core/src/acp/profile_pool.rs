@@ -966,9 +966,9 @@ mod tests {
                         recovered: true,
                         profile_config_errors: Vec::new(),
                         runtime_metadata: SessionRuntimeMetadata::acp(
+                            Some("Codex ACP".into()),
                             Some(model.into()),
                             Some(effort.into()),
-                            Some("Codex ACP".into()),
                         ),
                     },
                 )
