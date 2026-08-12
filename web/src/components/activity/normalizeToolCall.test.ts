@@ -1,0 +1,77 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildParamSummary,
+  normalizeAcpToolCall,
+  normalizeToolCall,
+  normalizeToolStatus,
+} from './normalizeToolCall';
+
+describe('activity tool-call normalization', () => {
+  it.each([
+    ['Success', 'completed'],
+    ['in_progress', 'running'],
+    ['failed', 'error'],
+    ['Canceled', 'canceled'],
+    ['unknown', 'pending'],
+  ] as const)('maps %s to %s', (source, expected) => {
+    expect(normalizeToolStatus(source)).toBe(expected);
+  });
+
+  it('summarizes supported filesystem, command, and search inputs', () => {
+    expect(buildParamSummary('read', { file_path: 'src/main.ts' })).toBe('src/main.ts');
+    expect(buildParamSummary('execute', { command: 'pnpm lint' })).toBe('pnpm lint');
+    expect(buildParamSummary('grep', { pattern: 'transcript', path: 'web/src' })).toBe(
+      '“transcript” in web/src',
+    );
+    expect(buildParamSummary('glob', { pattern: '**/*.tsx', path: 'web/src' })).toBe(
+      '**/*.tsx in web/src',
+    );
+  });
+
+  it('normalizes an edit result with a file diff', () => {
+    const tool = normalizeToolCall({
+      call_id: 'edit-1',
+      name: 'edit',
+      kind: 'edit',
+      status: 'completed',
+      raw_input: { path: 'src/page.tsx' },
+      output: {
+        path: 'src/page.tsx',
+        old_text: 'before',
+        new_text: 'after',
+      },
+      duration_ms: 400,
+    });
+
+    expect(tool).toMatchObject({
+      key: 'edit-1',
+      status: 'completed',
+      description: 'src/page.tsx',
+      duration_ms: 400,
+      diff: { path: 'src/page.tsx', old_text: 'before', new_text: 'after' },
+    });
+  });
+
+  it('normalizes ACP updates and text output', () => {
+    const tool = normalizeAcpToolCall({
+      content: {
+        update: {
+          tool_call_id: 'acp-1',
+          title: '搜索会话事件',
+          kind: 'search',
+          status: 'in_progress',
+          raw_input: { query: 'SSE', path: 'web/src' },
+          content: [{ type: 'content', content: { text: '已找到 3 处匹配。' } }],
+        },
+      },
+    });
+
+    expect(tool).toMatchObject({
+      key: 'acp-1',
+      name: '搜索会话事件',
+      status: 'running',
+      description: '“SSE” in web/src',
+      output: '已找到 3 处匹配。',
+    });
+  });
+});
