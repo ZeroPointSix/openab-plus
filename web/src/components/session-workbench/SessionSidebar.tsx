@@ -14,7 +14,11 @@ import {
   Typography,
 } from 'antd';
 import { filterSessions, matchesSessionKeyword } from '../../lib/session';
-import { agentDisplayName, formatRelativeTime } from '../../lib/format';
+import {
+  agentDisplayName,
+  formatRelativeTime,
+  sessionStatusOptions,
+} from '../../lib/format';
 import { SessionFilters, SessionSnapshot } from '../../types';
 import { EntityMark } from '../EntityMark';
 import { StatusTag } from '../StatusTag';
@@ -29,12 +33,7 @@ interface SessionSidebarProps {
 
 const statusOptions = [
   { label: '全部状态', value: '' },
-  { label: '启动中', value: 'starting' },
-  { label: '空闲', value: 'idle' },
-  { label: '运行中', value: 'running' },
-  { label: '已暂停', value: 'suspended' },
-  { label: '失败', value: 'error' },
-  { label: '已退出', value: 'exited' },
+  ...sessionStatusOptions.filter((option) => option.value !== 'unknown'),
 ];
 
 function sessionTitle(session: SessionSnapshot): string {
