@@ -7,11 +7,15 @@ use axum::response::{
 use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
+use openab_core::agent_profile::ProfileSessionOverrides;
 use openab_core::session_event::{SessionEvent, SessionEventBus, SessionEventReplay};
+use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 type CoreSessionPool = Arc<openab_core::acp::SessionPool>;
 
@@ -27,6 +31,13 @@ where
                 move |headers: HeaderMap| {
                     let pool = pool.clone();
                     async move { list_sessions(headers, pool).await }
+                }
+            })
+            .post({
+                let pool = pool.clone();
+                move |headers: HeaderMap, body: Json<CreateSessionRequest>| {
+                    let pool = pool.clone();
+                    async move { create_session(headers, body, pool).await }
                 }
             }),
         )
@@ -71,6 +82,106 @@ async fn get_session(headers: HeaderMap, session_id: String, pool: CoreSessionPo
         )
             .into_response(),
     }
+}
+
+/// Creates a new ACP session in the admin-owned source namespace.
+///
+/// The request deliberately selects a persisted Profile and exposes only the
+/// pre-start options already supported by ProfileSessionOverrides. Credential
+/// material stays in the Profile's `env_refs` and is never accepted or echoed
+/// by this endpoint.
+async fn create_session(
+    headers: HeaderMap,
+    Json(request): Json<CreateSessionRequest>,
+    pool: CoreSessionPool,
+) -> Response {
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
+    }
+
+    let profile_id = request.profile_id.trim().to_string();
+    if profile_id.is_empty() {
+        return bad_request("profile_id is required");
+    }
+    if let Err(message) = request.overrides.validate() {
+        return bad_request(&message);
+    }
+
+    // `admin:<uuid>` deliberately identifies an ACP session created from the
+    // control plane without pretending to be a Discord/Slack ChatAdapter.
+    let session_id = format!("admin:{}", Uuid::new_v4());
+    let overrides = request.overrides.into_profile_overrides();
+    match pool
+        .get_or_create_with_profile(&session_id, None, Some(&profile_id), Some(&overrides))
+        .await
+    {
+        Ok(_) => match pool.session_snapshot(&session_id).await {
+            Some(snapshot) => (StatusCode::CREATED, Json(snapshot)).into_response(),
+            None => internal_error("created session has no observable snapshot"),
+        },
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("agent profile")
+                || message.contains("invalid agent profile")
+                || message.contains("specified profile is not enabled")
+            {
+                return bad_request(&message);
+            }
+            tracing::error!(profile_id, error = %message, "admin session creation failed");
+            internal_error("failed to start agent session")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSessionRequest {
+    profile_id: String,
+    #[serde(default)]
+    overrides: CreateSessionOverrides,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CreateSessionOverrides {
+    #[serde(default)]
+    working_dir: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    config_options: HashMap<String, String>,
+}
+
+impl CreateSessionOverrides {
+    fn validate(&self) -> Result<(), String> {
+        for (key, value) in &self.config_options {
+            if key.trim().is_empty() || value.trim().is_empty() {
+                return Err("config_options keys and values must not be empty".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn into_profile_overrides(self) -> ProfileSessionOverrides {
+        ProfileSessionOverrides {
+            working_dir: clean_optional(self.working_dir),
+            model: clean_optional(self.model),
+            reasoning_effort: clean_optional(self.reasoning_effort),
+            config_options: self
+                .config_options
+                .into_iter()
+                .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    })
 }
 
 async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Response {
@@ -291,6 +402,18 @@ fn auth_error_response(error: AuthError) -> Response {
     }
 }
 
+fn bad_request(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+}
+
+fn internal_error(message: &str) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +463,40 @@ mod tests {
                 generation: None,
                 sequence: 42,
             })
+        );
+    }
+
+    #[test]
+    fn session_start_overrides_trim_values_without_accepting_empty_options() {
+        let overrides = CreateSessionOverrides {
+            working_dir: Some(" /workspace/project ".into()),
+            model: Some(" gpt-5 ".into()),
+            reasoning_effort: Some(" high ".into()),
+            config_options: HashMap::from([("mode".into(), " standard ".into())]),
+        };
+
+        assert!(overrides.validate().is_ok());
+        let overrides = overrides.into_profile_overrides();
+        assert_eq!(overrides.working_dir.as_deref(), Some("/workspace/project"));
+        assert_eq!(overrides.model.as_deref(), Some("gpt-5"));
+        assert_eq!(overrides.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            overrides.config_options.get("mode").map(String::as_str),
+            Some("standard")
+        );
+        assert!(overrides.env.is_empty());
+    }
+
+    #[test]
+    fn session_start_overrides_reject_empty_config_option_values() {
+        let overrides = CreateSessionOverrides {
+            config_options: HashMap::from([("mode".into(), " ".into())]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            overrides.validate(),
+            Err("config_options keys and values must not be empty".to_string())
         );
     }
 }

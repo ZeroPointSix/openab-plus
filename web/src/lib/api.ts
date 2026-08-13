@@ -3,6 +3,7 @@ import {
   AgentProfile,
   AgentProfileDocument,
   AgentSummary,
+  CreateSessionRequest,
   ConfigDocument,
   ConfigReloadResponse,
   ConfigStatus,
@@ -93,6 +94,11 @@ export const adminApi = {
     apiRequest<SessionSnapshot>(
       '/api/v1/sessions/' + encodeURIComponent(id),
     ),
+  createSession: (request: CreateSessionRequest) =>
+    apiRequest<SessionSnapshot>('/api/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }),
   profiles: () =>
     apiRequest<AgentProfileDocument>('/api/v1/agent-profiles'),
   agents: () => apiRequest<AgentSummary[]>('/api/v1/agents'),

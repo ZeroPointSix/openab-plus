@@ -1,15 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
 import { AppstoreOutlined, InfoCircleOutlined } from '@ant-design/icons';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Button, Drawer, Space, Typography } from 'antd';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Button, Drawer, Space, Typography, message } from 'antd';
 import { useNavigate, useOutletContext, useParams } from 'react-router-dom';
+import { NewAgentWizard } from '../components/NewAgentWizard';
 import { SessionMainPanel } from '../components/SessionMainPanel';
 import { SessionInspector } from '../components/SessionInspector';
 import { SessionSidebar } from '../components/SessionSidebar';
 import { StreamStatus } from '../hooks/useSessionStream';
-import { adminApi } from '../lib/api';
+import { adminApi, ApiError } from '../lib/api';
 import { initialTimeline } from '../lib/session';
-import { SessionSnapshot, SessionTimelineItem } from '../types';
+import { AgentProfile, SessionSnapshot, SessionTimelineItem } from '../types';
+
+const COMMON_AGENT_TYPES = [
+  'codex',
+  'claude',
+  'gemini',
+  'opencode',
+  'kiro',
+  'cursor',
+  'hermes',
+];
 
 export interface AdminLayoutOutletContext {
   streamStatus: StreamStatus;
@@ -24,11 +35,20 @@ export function SessionWorkbenchPage() {
   const [mobilePanel, setMobilePanel] = useState<'sidebar' | 'inspector' | null>(
     null,
   );
+  const [newAgentOpen, setNewAgentOpen] = useState(false);
 
   const sessionsQuery = useQuery({
     queryKey: ['sessions'],
     queryFn: adminApi.sessions,
     refetchInterval: 30_000,
+  });
+  const profilesQuery = useQuery({
+    queryKey: ['profiles'],
+    queryFn: adminApi.profiles,
+  });
+  const agentsQuery = useQuery({
+    queryKey: ['agents'],
+    queryFn: adminApi.agents,
   });
   const sessionQuery = useQuery({
     queryKey: ['session', sessionId],
@@ -40,6 +60,26 @@ export function SessionWorkbenchPage() {
     queryFn: async () => [],
     enabled: false,
     initialData: [],
+  });
+
+  const createSessionMutation = useMutation({
+    mutationFn: (profile: AgentProfile) =>
+      adminApi.createSession({ profile_id: profile.id }),
+    onSuccess: (snapshot) => {
+      queryClient.setQueryData<SessionSnapshot[]>(['sessions'], (current = []) => [
+        snapshot,
+        ...current.filter((session) => session.session_id !== snapshot.session_id),
+      ]);
+      queryClient.setQueryData(['session', snapshot.session_id], snapshot);
+      message.success('新会话已启动');
+      setMobilePanel(null);
+      navigate('/sessions/' + encodeURIComponent(snapshot.session_id));
+    },
+    onError: (error) => {
+      message.error(
+        error instanceof ApiError ? error.message : '启动新会话失败',
+      );
+    },
   });
 
   useEffect(() => {
@@ -54,11 +94,28 @@ export function SessionWorkbenchPage() {
   const sessions = useMemo(() => {
     const current = sessionsQuery.data || [];
     if (!sessionQuery.data) return current;
-    if (current.some((session) => session.session_id === sessionQuery.data?.session_id)) {
+    if (
+      current.some(
+        (session) => session.session_id === sessionQuery.data?.session_id,
+      )
+    ) {
       return current;
     }
     return [sessionQuery.data, ...current];
   }, [sessionsQuery.data, sessionQuery.data]);
+
+  const profiles = profilesQuery.data?.profiles || [];
+  const agentTypes = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          ...COMMON_AGENT_TYPES,
+          ...(agentsQuery.data || []).map((agent) => agent.agent_type),
+          ...profiles.map((profile) => profile.agent_type),
+        ]),
+      ).sort(),
+    [agentsQuery.data, profiles],
+  );
 
   const selectedSession = useMemo(
     () =>
@@ -72,13 +129,26 @@ export function SessionWorkbenchPage() {
     navigate('/sessions/' + encodeURIComponent(nextId));
   };
 
+  const handleProfileCreated = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['profiles'] }),
+      queryClient.invalidateQueries({ queryKey: ['agents'] }),
+    ]);
+  };
+
   const sidebar = (
     <SessionSidebar
       sessions={sessions}
+      profiles={profiles}
       selectedId={sessionId || undefined}
-      loading={sessionsQuery.isLoading || sessionQuery.isLoading}
+      loading={
+        sessionsQuery.isLoading || sessionQuery.isLoading || profilesQuery.isLoading
+      }
+      creatingSession={createSessionMutation.isPending}
       onSelect={selectSession}
       onReload={() => void sessionsQuery.refetch()}
+      onNewAgent={() => setNewAgentOpen(true)}
+      onCreateSession={(profile) => createSessionMutation.mutate(profile)}
     />
   );
   const inspector = (
@@ -98,7 +168,7 @@ export function SessionWorkbenchPage() {
           <div>
             <Typography.Title level={2}>Sessions</Typography.Title>
             <Typography.Text type="secondary">
-              三栏只读会话工作台
+              按 Agent/Profile 切换的会话工作台
             </Typography.Text>
           </div>
         </div>
@@ -145,6 +215,13 @@ export function SessionWorkbenchPage() {
       >
         {inspector}
       </Drawer>
+
+      <NewAgentWizard
+        open={newAgentOpen}
+        agentTypes={agentTypes}
+        onCancel={() => setNewAgentOpen(false)}
+        onCreated={handleProfileCreated}
+      />
 
       {sessionQuery.isError ? (
         <Typography.Text type="danger" className="session-workbench-error">

@@ -65,6 +65,7 @@ export function filterSessions(
       return false;
     }
     if (filters.status && session.status !== filters.status) return false;
+    if (filters.agent && session.agent !== filters.agent) return false;
     if (
       filters.profile &&
       session.profile_id !== filters.profile &&

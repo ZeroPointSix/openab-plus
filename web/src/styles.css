@@ -1599,3 +1599,48 @@ select {
 .recent-sessions-loading {
   padding: 18px;
 }
+
+/* ---------- Configurable Agent workbench ---------- */
+
+.session-agent-filter {
+  width: 100%;
+}
+
+.agent-wizard-content {
+  min-height: 330px;
+  padding-top: 24px;
+}
+
+.agent-wizard-step {
+  display: flex;
+  width: 100%;
+}
+
+.agent-wizard-step .ant-typography {
+  margin-bottom: 8px;
+}
+
+.agent-wizard-step .ant-form-item {
+  margin-bottom: 14px;
+}
+
+.agent-wizard-credentials {
+  display: flex;
+  width: 100%;
+}
+
+.agent-wizard-credentials > .ant-space-item {
+  width: 100%;
+}
+
+@media (max-width: 480px) {
+  .agent-wizard-content {
+    min-height: 360px;
+    padding-top: 18px;
+  }
+
+  .agent-wizard-credentials .ant-space {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+}
