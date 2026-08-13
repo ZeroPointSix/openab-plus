@@ -340,9 +340,13 @@ impl SessionEventBus {
     }
 
     pub fn subscribe_after(&self, last_sequence: Option<u64>) -> SessionEventSubscription {
+        // Do not acquire the shared stream mutex while lifecycle history is held.
+        // Publication also touches both histories, so keeping these operations
+        // non-nested removes a lock-order coupling between publish and replay.
+        let stream_next_sequence = self.stream.next_sequence();
         let history = self.history.lock().expect("session event history lock");
         let replay = last_sequence
-            .map(|last_sequence| history.replay_after(last_sequence, self.stream.next_sequence()))
+            .map(|last_sequence| history.replay_after(last_sequence, stream_next_sequence))
             .unwrap_or_default();
         let receiver = self.tx.subscribe();
 
@@ -350,10 +354,11 @@ impl SessionEventBus {
     }
 
     pub fn replay_after(&self, last_sequence: u64) -> SessionEventReplay {
+        let stream_next_sequence = self.stream.next_sequence();
         self.history
             .lock()
             .expect("session event history lock")
-            .replay_after(last_sequence, self.stream.next_sequence())
+            .replay_after(last_sequence, stream_next_sequence)
     }
 
     pub fn publish(&self, event: SessionEventKind, snapshot: SessionSnapshot) -> SessionEvent {
