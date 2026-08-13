@@ -111,7 +111,17 @@ export function SessionInspector({
               </Space>
             </Descriptions.Item>
             <Descriptions.Item label="模型">
-              {session.model || '-'}
+              {session.model || '--'}
+            </Descriptions.Item>
+            <Descriptions.Item label="Thinking">
+              {session.reasoning_effort || '--'}
+            </Descriptions.Item>
+            <Descriptions.Item label="元数据来源">
+              {session.metadata_source === 'acp'
+                ? 'ACP 运行时'
+                : session.metadata_source === 'configured'
+                  ? '配置值'
+                  : '--'}
             </Descriptions.Item>
             <Descriptions.Item label="创建时间">
               {formatDateTime(session.created_at)}
