@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { fetchEventSource } from '@microsoft/fetch-event-source';
 import type { TranscriptEntry, TranscriptSnapshot } from '../types';
 import { adminApi } from '../lib/api';
@@ -31,6 +31,17 @@ interface UseSessionTranscriptResult {
   latencyMs?: number;
   recovery?: TranscriptRecoveryNotice;
   reload: () => void;
+}
+
+export interface TranscriptViewState {
+  entries: TranscriptEntry[];
+  latencyMs?: number;
+  recovery?: TranscriptRecoveryNotice;
+}
+
+/** Clears all session-specific display state before loading a different session. */
+export function resetTranscriptView(): TranscriptViewState {
+  return { entries: [] };
 }
 
 const cursorStorageKey = (sessionId: string) =>
@@ -117,15 +128,31 @@ export function useSessionTranscript(
   const [recovery, setRecovery] = useState<TranscriptRecoveryNotice>();
   const [reloadVersion, setReloadVersion] = useState(0);
   const entriesRef = useRef<TranscriptEntry[]>([]);
+  const activeSessionRef = useRef(sessionId);
+
+  const clearVisibleTranscript = useCallback(() => {
+    const cleared = resetTranscriptView();
+    entriesRef.current = cleared.entries;
+    setEntries(cleared.entries);
+    setLatencyMs(cleared.latencyMs);
+    setRecovery(cleared.recovery);
+  }, []);
 
   const reload = useCallback(() => {
     setReloadVersion((version) => version + 1);
   }, []);
 
+  // This effect runs before the loader below on every session change. It
+  // prevents A's transcript being rendered beneath B's metadata while B's
+  // snapshot is pending or when that snapshot fails.
+  useLayoutEffect(() => {
+    activeSessionRef.current = sessionId;
+    clearVisibleTranscript();
+    setStatus(sessionId ? 'loading' : 'offline');
+  }, [clearVisibleTranscript, sessionId]);
+
   useEffect(() => {
     if (!sessionId) {
-      entriesRef.current = [];
-      setEntries([]);
       setStatus('offline');
       return;
     }
@@ -133,6 +160,8 @@ export function useSessionTranscript(
     let stopped = false;
     let retryCount = 0;
     let streamCursor = sessionStorage.getItem(cursorStorageKey(sessionId)) || '';
+    const isCurrentSession = () =>
+      !stopped && activeSessionRef.current === sessionId;
     const controller = new AbortController();
     const setVisibleEntries = (next: TranscriptEntry[]) => {
       entriesRef.current = next;
@@ -144,14 +173,14 @@ export function useSessionTranscript(
       setRecovery(undefined);
       try {
         const snapshot = await adminApi.transcript(sessionId);
-        if (stopped) return false;
+        if (!isCurrentSession()) return false;
         setVisibleEntries(snapshot.entries);
         streamCursor = streamCursorFromSnapshot(snapshot) || streamCursor;
 
         const after = snapshotTailCursor(snapshot);
         if (after === undefined) return true;
         const tail = await adminApi.transcript(sessionId, after);
-        if (stopped) return false;
+        if (!isCurrentSession()) return false;
         if (tail.overflowed) {
           setRecovery({
             kind: 'history_gap',
@@ -168,7 +197,7 @@ export function useSessionTranscript(
         streamCursor = streamCursorFromSnapshot(tail) || streamCursor;
         return true;
       } catch {
-        if (!stopped) {
+        if (isCurrentSession()) {
           setRecovery({
             kind: 'snapshot_failed',
             message: '无法获取 transcript 快照，请检查连接后重试。',
@@ -181,9 +210,10 @@ export function useSessionTranscript(
 
     const connect = async () => {
       const restored = await restoreSnapshotAndTail();
-      if (!restored || stopped) return;
+      if (!restored || !isCurrentSession()) return;
 
       while (!stopped) {
+        if (!isCurrentSession()) return;
         const token = readAdminToken();
         if (!token) {
           setStatus('offline');
@@ -200,6 +230,7 @@ export function useSessionTranscript(
               ...(streamCursor ? { 'Last-Event-ID': streamCursor } : {}),
             },
             async onopen(response) {
+              if (!isCurrentSession()) return;
               if (response.status === 401) {
                 notifyUnauthorized();
                 throw new AuthenticationStreamError('unauthorized');
@@ -211,6 +242,7 @@ export function useSessionTranscript(
               setStatus('live');
             },
             onmessage(message) {
+              if (!isCurrentSession()) return;
               const recoveryNotice = recoveryFromStreamMessage(
                 message.event,
                 message.data,
@@ -243,7 +275,7 @@ export function useSessionTranscript(
             },
           });
         } catch (error) {
-          if (stopped || controller.signal.aborted) return;
+          if (!isCurrentSession() || controller.signal.aborted) return;
           if (error instanceof AuthenticationStreamError) {
             setStatus('offline');
             return;
