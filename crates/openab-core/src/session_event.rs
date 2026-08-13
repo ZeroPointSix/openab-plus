@@ -273,6 +273,21 @@ impl SessionStreamBus {
         published
     }
 
+    /// Executes `capture` while holding the same stream lock used for event
+    /// publication, then returns the generation and the next global sequence.
+    /// This lets a transcript snapshot and its continuation cursor be captured
+    /// atomically: an event is either included in the snapshot or replayed after
+    /// this cursor, never lost in the hand-off to SSE.
+    pub fn capture_cursor<T>(&self, capture: impl FnOnce() -> T) -> (T, String, u64) {
+        let history = self.history.lock().expect("session stream history lock");
+        let captured = capture();
+        (
+            captured,
+            self.generation().to_string(),
+            history.next_sequence,
+        )
+    }
+
     fn next_sequence(&self) -> u64 {
         self.history
             .lock()
