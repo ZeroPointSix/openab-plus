@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import {
-  PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
@@ -12,7 +11,6 @@ import {
   Select,
   Space,
   Spin,
-  Tooltip,
   Typography,
 } from 'antd';
 import { filterSessions } from '../../lib/session';
@@ -136,16 +134,6 @@ export function SessionSidebar({
             onClick={onReload}
           />
         ) : null}
-      </div>
-
-      <div className="workbench-sidebar-newchat">
-        <Tooltip title="会话创建将在后续版本开放">
-          <span className="workbench-sidebar-newchat-tooltip">
-            <Button block disabled icon={<PlusOutlined />}>
-              New chat
-            </Button>
-          </span>
-        </Tooltip>
       </div>
 
       <div className="workbench-sidebar-filters">
