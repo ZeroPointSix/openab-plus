@@ -38,8 +38,13 @@ function splitLines(value: string): string[] {
   return lines;
 }
 
-function findWithin(lines: string[], value: string, start: number): number | undefined {
-  const end = Math.min(lines.length, start + RESYNC_LOOKAHEAD);
+function findWithin(
+  lines: string[],
+  value: string,
+  start: number,
+  limit: number,
+): number | undefined {
+  const end = Math.min(limit, start + RESYNC_LOOKAHEAD);
   for (let index = start; index < end; index += 1) {
     if (lines[index] === value) return index;
   }
@@ -48,13 +53,40 @@ function findWithin(lines: string[], value: string, start: number): number | und
 
 function buildLineOperations(before: string[], after: string[]): DiffLine[] {
   const operations: DiffLine[] = [];
-  let oldIndex = 0;
-  let newIndex = 0;
+  let prefixLength = 0;
+  while (
+    prefixLength < before.length &&
+    prefixLength < after.length &&
+    before[prefixLength] === after[prefixLength]
+  ) {
+    operations.push({
+      kind: 'context',
+      text: before[prefixLength],
+      oldNumber: prefixLength + 1,
+      newNumber: prefixLength + 1,
+    });
+    prefixLength += 1;
+  }
 
-  while (oldIndex < before.length || newIndex < after.length) {
+  let suffixLength = 0;
+  while (
+    suffixLength < before.length - prefixLength &&
+    suffixLength < after.length - prefixLength &&
+    before[before.length - suffixLength - 1] ===
+      after[after.length - suffixLength - 1]
+  ) {
+    suffixLength += 1;
+  }
+
+  const oldEnd = before.length - suffixLength;
+  const newEnd = after.length - suffixLength;
+  let oldIndex = prefixLength;
+  let newIndex = prefixLength;
+
+  while (oldIndex < oldEnd || newIndex < newEnd) {
     if (
-      oldIndex < before.length &&
-      newIndex < after.length &&
+      oldIndex < oldEnd &&
+      newIndex < newEnd &&
       before[oldIndex] === after[newIndex]
     ) {
       operations.push({
@@ -68,7 +100,7 @@ function buildLineOperations(before: string[], after: string[]): DiffLine[] {
       continue;
     }
 
-    if (oldIndex >= before.length) {
+    if (oldIndex >= oldEnd) {
       operations.push({
         kind: 'added',
         text: after[newIndex],
@@ -78,7 +110,7 @@ function buildLineOperations(before: string[], after: string[]): DiffLine[] {
       continue;
     }
 
-    if (newIndex >= after.length) {
+    if (newIndex >= newEnd) {
       operations.push({
         kind: 'removed',
         text: before[oldIndex],
@@ -88,8 +120,18 @@ function buildLineOperations(before: string[], after: string[]): DiffLine[] {
       continue;
     }
 
-    const nextNewMatch = findWithin(after, before[oldIndex], newIndex + 1);
-    const nextOldMatch = findWithin(before, after[newIndex], oldIndex + 1);
+    const nextNewMatch = findWithin(
+      after,
+      before[oldIndex],
+      newIndex + 1,
+      newEnd,
+    );
+    const nextOldMatch = findWithin(
+      before,
+      after[newIndex],
+      oldIndex + 1,
+      oldEnd,
+    );
     const addedDistance = nextNewMatch === undefined ? Infinity : nextNewMatch - newIndex;
     const removedDistance = nextOldMatch === undefined ? Infinity : nextOldMatch - oldIndex;
 
@@ -127,6 +169,17 @@ function buildLineOperations(before: string[], after: string[]): DiffLine[] {
     );
     oldIndex += 1;
     newIndex += 1;
+  }
+
+  for (let index = 0; index < suffixLength; index += 1) {
+    const oldNumber = oldEnd + index + 1;
+    const newNumber = newEnd + index + 1;
+    operations.push({
+      kind: 'context',
+      text: before[oldNumber - 1],
+      oldNumber,
+      newNumber,
+    });
   }
 
   return operations;

@@ -69,6 +69,31 @@ describe('bounded file diff preview', () => {
     }
   });
 
+  it.each(['insert', 'delete'] as const)(
+    'resynchronizes the unchanged suffix after a 65-line %s',
+    (operation) => {
+      const before = Array.from({ length: 1_000 }, (_, index) => `line ${index + 1}`);
+      const inserted = Array.from({ length: 65 }, (_, index) => `inserted ${index + 1}`);
+      const after =
+        operation === 'insert'
+          ? [...before.slice(0, 499), ...inserted, ...before.slice(499)]
+          : [...before.slice(0, 499), ...before.slice(564)];
+
+      const preview = buildHunkPreview(before.join('\n'), after.join('\n'));
+      const suffixText = operation === 'insert' ? 'line 500' : 'line 565';
+
+      expect(preview).toContainEqual(
+        expect.objectContaining({ kind: 'context', text: suffixText }),
+      );
+      expect(preview).not.toContainEqual(
+        expect.objectContaining({ kind: 'removed', text: suffixText }),
+      );
+      expect(preview).not.toContainEqual(
+        expect.objectContaining({ kind: 'added', text: suffixText }),
+      );
+    },
+  );
+
   it('bounds previews with hundreds of sparse changed hunks', () => {
     const before = Array.from({ length: 5_001 }, (_, index) => `line ${index + 1}`);
     const after = [...before];

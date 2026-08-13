@@ -75,7 +75,17 @@ fn record_acp_event_transcript(store: &SessionTranscriptStore, session_id: &str,
                 ToolTranscriptUpdate {
                     tool_call_id: id.clone(),
                     title: title.clone(),
-                    status: "running".to_string(),
+                    status: payload
+                        .get("status")
+                        .and_then(|value| value.as_str())
+                        .map(String::from)
+                        .or_else(|| {
+                            (payload
+                                .get("sessionUpdate")
+                                .and_then(|value| value.as_str())
+                                == Some("tool_call"))
+                            .then(|| "running".to_string())
+                        }),
                     completed: false,
                     payload: payload.clone(),
                 },
@@ -92,7 +102,7 @@ fn record_acp_event_transcript(store: &SessionTranscriptStore, session_id: &str,
                 ToolTranscriptUpdate {
                     tool_call_id: id.clone(),
                     title: title.clone(),
-                    status: status.clone(),
+                    status: Some(status.clone()),
                     completed: true,
                     payload: payload.clone(),
                 },
@@ -2638,16 +2648,32 @@ mod tests {
                 }
             })),
         };
+        let sparse_update = JsonRpcMessage {
+            id: None,
+            method: Some("session/update".into()),
+            result: None,
+            error: None,
+            params: Some(json!({
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tool-42",
+                    "title": "Refined terminal"
+                }
+            })),
+        };
 
         let start = classify_notification(&tool_call).expect("classify tool call");
         record_acp_event_transcript(&store, "session", &start);
         let done = classify_notification(&tool_done).expect("classify tool completion");
         record_acp_event_transcript(&store, "session", &done);
+        let sparse = classify_notification(&sparse_update).expect("classify sparse tool update");
+        record_acp_event_transcript(&store, "session", &sparse);
 
         let snapshot = store.snapshot("session", None);
         assert_eq!(snapshot.entries.len(), 1);
         let entry = &snapshot.entries[0];
         assert_eq!(entry.tool_call_id.as_deref(), Some("tool-42"));
+        assert_eq!(entry.content.as_deref(), Some("Refined terminal"));
         assert_eq!(entry.status.as_deref(), Some("completed"));
         assert_eq!(
             entry.tool_call.as_ref().unwrap()["rawInput"]["command"],

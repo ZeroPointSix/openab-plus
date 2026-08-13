@@ -56,7 +56,8 @@ struct TranscriptEntryDraft {
 pub struct ToolTranscriptUpdate {
     pub tool_call_id: String,
     pub title: String,
-    pub status: String,
+    /// `None` means this ACP patch did not change the tool status.
+    pub status: Option<String>,
     pub completed: bool,
     pub payload: Value,
 }
@@ -273,13 +274,18 @@ impl SessionTranscriptStore {
     ) -> TranscriptEvent {
         let content = content.into();
         self.mutate(session_id, move |session| {
-            let sequence = session.allocate_sequence();
-            let now = Utc::now();
-            if let Some(entry) = session.entries.back_mut().filter(|entry| {
+            let entry_index = session.entries.iter().rposition(|entry| {
                 entry.role == TranscriptRole::Assistant
                     && entry.status.as_deref() == Some("streaming")
                     && entry.tool_call_id.is_none()
-            }) {
+            });
+            let sequence = session.allocate_sequence();
+            let now = Utc::now();
+            if let Some(entry_index) = entry_index {
+                let entry = session
+                    .entries
+                    .get_mut(entry_index)
+                    .expect("active assistant transcript entry");
                 entry.sequence = sequence;
                 entry.timestamp = now;
                 entry
@@ -344,7 +350,9 @@ impl SessionTranscriptStore {
                     entry.content = Some(title.clone());
                 }
                 entry.tool_call = Some(merge_tool_payload(entry.tool_call.take(), payload.clone()));
-                entry.status = Some(status.clone());
+                if let Some(status) = &status {
+                    entry.status = Some(status.clone());
+                }
                 if update.completed {
                     // ACP tool_call_update notifications are patch-like. A terminal
                     // status update may contain only `status`, while output/diff data
@@ -367,7 +375,7 @@ impl SessionTranscriptStore {
                 tool_call: Some(payload.clone()),
                 tool_result: update.completed.then_some(payload),
                 tool_call_id: Some(tool_call_id),
-                status: Some(status),
+                status,
             };
             session.push_entry(entry.clone());
             session.push_event(entry.clone());
@@ -510,6 +518,24 @@ mod tests {
     }
 
     #[test]
+    fn interleaved_thinking_keeps_one_streaming_assistant_entry() {
+        let store = store(8);
+        let first = store.append_assistant_text("session", "first");
+        store.append_thinking("session", "thought");
+        let second = store.append_assistant_text("session", " second");
+        let finished = store.finish_assistant_turn("session").unwrap();
+
+        assert_eq!(first.entry.entry_id, second.entry.entry_id);
+        assert_eq!(finished.entry.entry_id, first.entry.entry_id);
+        assert_eq!(finished.entry.content.as_deref(), Some("first second"));
+        assert_eq!(finished.entry.status.as_deref(), Some("completed"));
+        let snapshot = store.snapshot("session", None);
+        assert_eq!(snapshot.entries.len(), 2);
+        assert_eq!(snapshot.entries[0].content.as_deref(), Some("first second"));
+        assert_eq!(snapshot.entries[1].status.as_deref(), Some("thinking"));
+    }
+
+    #[test]
     fn upserts_tool_calls_by_stable_identifier_without_losing_raw_payload() {
         let store = store(8);
         let first = store.upsert_tool_call(
@@ -517,7 +543,7 @@ mod tests {
             ToolTranscriptUpdate {
                 tool_call_id: "tool-1".into(),
                 title: "Terminal".into(),
-                status: "running".into(),
+                status: Some("running".into()),
                 completed: false,
                 payload: json!({
                     "sessionUpdate": "tool_call",
@@ -530,7 +556,7 @@ mod tests {
             ToolTranscriptUpdate {
                 tool_call_id: "tool-1".into(),
                 title: "".into(),
-                status: "completed".into(),
+                status: Some("completed".into()),
                 completed: true,
                 payload: json!({
                     "sessionUpdate": "tool_call_update",
@@ -578,6 +604,48 @@ mod tests {
     }
 
     #[test]
+    fn sparse_tool_update_preserves_completed_status() {
+        let store = store(8);
+        store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "Command".into(),
+                status: Some("running".into()),
+                completed: false,
+                payload: json!({"sessionUpdate": "tool_call"}),
+            },
+        );
+        store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "".into(),
+                status: Some("completed".into()),
+                completed: true,
+                payload: json!({"sessionUpdate": "tool_call_update", "status": "completed"}),
+            },
+        );
+        store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "Refined command".into(),
+                status: None,
+                completed: false,
+                payload: json!({"sessionUpdate": "tool_call_update", "title": "Refined command"}),
+            },
+        );
+
+        let snapshot = store.snapshot("session", None);
+        assert_eq!(snapshot.entries[0].status.as_deref(), Some("completed"));
+        assert_eq!(
+            snapshot.entries[0].content.as_deref(),
+            Some("Refined command")
+        );
+    }
+
+    #[test]
     fn terminal_status_only_update_preserves_earlier_tool_result_payload() {
         let store = store(8);
         store.upsert_tool_call(
@@ -585,7 +653,7 @@ mod tests {
             ToolTranscriptUpdate {
                 tool_call_id: "tool-1".into(),
                 title: "Edit file".into(),
-                status: "running".into(),
+                status: Some("running".into()),
                 completed: false,
                 payload: json!({
                     "sessionUpdate": "tool_call",
@@ -598,7 +666,7 @@ mod tests {
             ToolTranscriptUpdate {
                 tool_call_id: "tool-1".into(),
                 title: "".into(),
-                status: "running".into(),
+                status: Some("running".into()),
                 completed: false,
                 payload: json!({
                     "sessionUpdate": "tool_call_update",
@@ -612,7 +680,7 @@ mod tests {
             ToolTranscriptUpdate {
                 tool_call_id: "tool-1".into(),
                 title: "".into(),
-                status: "completed".into(),
+                status: Some("completed".into()),
                 completed: true,
                 payload: json!({
                     "sessionUpdate": "tool_call_update",
