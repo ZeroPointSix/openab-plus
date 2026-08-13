@@ -43,6 +43,13 @@ describe('session helpers', () => {
     ).toHaveLength(1);
   });
 
+  it('filters by Agent type before rendering grouped history', () => {
+    const matching = filterSessions(sessions, { agent: 'claude' });
+
+    expect(matching).toHaveLength(1);
+    expect(matching[0].session_id).toBe('discord:beta');
+  });
+
   it('matches keywords across session identity and model metadata', () => {
     const modeled = { ...sessions[0], model: 'claude-opus-5' };
 
