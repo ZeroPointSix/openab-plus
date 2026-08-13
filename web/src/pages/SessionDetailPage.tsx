@@ -14,18 +14,25 @@ import {
   Spin,
   Typography,
 } from 'antd';
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { adminApi } from '../lib/api';
 import { formatDateTime } from '../lib/format';
 import { StatusTag } from '../components/StatusTag';
 import { SessionActivityFeed } from '../components/activity/SessionActivityFeed';
-import { mockTranscript } from '../components/activity/mockTranscript';
+import { useSessionTranscript } from '../hooks/useSessionTranscript';
+import { activityEntriesFromTranscript } from '../lib/transcript';
 
 export function SessionDetailPage() {
   const params = useParams<{ id: string }>();
   const sessionId = params.id || '';
   const navigate = useNavigate();
+  const transcript = useSessionTranscript(sessionId);
+  const activityEntries = useMemo(
+    () => activityEntriesFromTranscript(transcript.entries),
+    [transcript.entries],
+  );
   const sessionQuery = useQuery({
     queryKey: ['session', sessionId],
     queryFn: () => adminApi.session(sessionId),
@@ -93,6 +100,30 @@ export function SessionDetailPage() {
           className="detail-alert"
         />
       ) : null}
+      {transcript.recovery ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="活动流需要恢复"
+          description={
+            <Space direction="vertical" size={8}>
+              <span>{transcript.recovery.message}</span>
+              {transcript.recovery.oldestSequence !== undefined ? (
+                <Typography.Text type="secondary">
+                  可恢复记录起点：{transcript.recovery.oldestSequence}
+                  {transcript.recovery.nextSequence !== undefined
+                    ? `；服务端下一序号：${transcript.recovery.nextSequence}`
+                    : ''}
+                </Typography.Text>
+              ) : null}
+              <Button type="primary" size="small" onClick={transcript.reload}>
+                重新拉取 transcript 快照
+              </Button>
+            </Space>
+          }
+          className="detail-alert"
+        />
+      ) : null}
       <div className="session-detail-grid">
         <section className="detail-panel activity-panel">
           <div className="panel-heading">
@@ -104,11 +135,16 @@ export function SessionDetailPage() {
                 <Typography.Title level={4}>Agent 活动流</Typography.Title>
                 <Typography.Text type="secondary">
                   连续展示回复、思考、计划、工具调用、终端输出和文件编辑差异
+                  {transcript.latencyMs !== undefined
+                    ? ` · SSE 端到端延迟 ${transcript.latencyMs}ms${
+                        transcript.latencyMs > 2_000 ? '（超过 2s 观测目标）' : ''
+                      }`
+                    : ''}
                 </Typography.Text>
               </div>
             </div>
           </div>
-          <SessionActivityFeed entries={mockTranscript} source="mock" />
+          <SessionActivityFeed entries={activityEntries} source="live" />
         </section>
 
         <aside className="detail-panel metadata-panel">

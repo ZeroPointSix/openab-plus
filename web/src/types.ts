@@ -51,6 +51,36 @@ export interface SessionTimelineItem {
   sequence?: number;
 }
 
+export type TranscriptRole = 'user' | 'assistant' | 'system' | 'tool';
+
+export interface TranscriptEntry {
+  entry_id: string;
+  sequence: number;
+  timestamp: string;
+  role: TranscriptRole;
+  content?: string;
+  tool_call?: unknown;
+  tool_result?: unknown;
+  tool_call_id?: string;
+  status?: string;
+}
+
+export interface TranscriptSnapshot {
+  session_id: string;
+  entries: TranscriptEntry[];
+  overflowed: boolean;
+  oldest_sequence?: number;
+  next_sequence: number;
+  stream_generation?: string;
+  stream_next_sequence?: number;
+}
+
+export interface TranscriptStreamEvent {
+  sequence: number;
+  session_id: string;
+  entry: TranscriptEntry;
+}
+
 export type ActivityToolStatus =
   | 'pending'
   | 'running'

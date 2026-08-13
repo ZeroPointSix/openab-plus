@@ -77,6 +77,13 @@ pub struct TranscriptSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_sequence: Option<u64>,
     pub next_sequence: u64,
+    /// The generation for the shared SSE cursor captured with this snapshot.
+    /// Together with `stream_next_sequence`, clients can replay the tiny window
+    /// between snapshot/tail retrieval and live SSE subscription.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_next_sequence: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -155,6 +162,8 @@ impl TranscriptSession {
             overflowed,
             oldest_sequence,
             next_sequence: self.next_sequence,
+            stream_generation: None,
+            stream_next_sequence: None,
         }
     }
 }
@@ -195,19 +204,26 @@ impl SessionTranscriptStore {
     }
 
     pub fn snapshot(&self, session_id: &str, after: Option<u64>) -> TranscriptSnapshot {
-        self.inner
-            .lock()
-            .expect("session transcript store lock")
-            .sessions
-            .get(session_id)
-            .map(|session| session.snapshot(session_id, after))
-            .unwrap_or(TranscriptSnapshot {
-                session_id: session_id.to_string(),
-                entries: Vec::new(),
-                overflowed: false,
-                oldest_sequence: None,
-                next_sequence: 1,
-            })
+        let (mut snapshot, generation, stream_next_sequence) = self.stream.capture_cursor(|| {
+            self.inner
+                .lock()
+                .expect("session transcript store lock")
+                .sessions
+                .get(session_id)
+                .map(|session| session.snapshot(session_id, after))
+                .unwrap_or(TranscriptSnapshot {
+                    session_id: session_id.to_string(),
+                    entries: Vec::new(),
+                    overflowed: false,
+                    oldest_sequence: None,
+                    next_sequence: 1,
+                    stream_generation: None,
+                    stream_next_sequence: None,
+                })
+        });
+        snapshot.stream_generation = Some(generation);
+        snapshot.stream_next_sequence = Some(stream_next_sequence);
+        snapshot
     }
 
     pub fn record_user_text(
@@ -556,6 +572,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some("two"), Some("three")]
         );
+    }
+
+    #[test]
+    fn snapshot_captures_shared_stream_cursor() {
+        let store = store(8);
+        store.record_user_text("session", "one");
+
+        let snapshot = store.snapshot("session", None);
+
+        assert_eq!(
+            snapshot.stream_generation.as_deref(),
+            Some(store.stream.generation())
+        );
+        assert_eq!(snapshot.stream_next_sequence, Some(2));
     }
 
     #[test]

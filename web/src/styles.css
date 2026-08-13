@@ -1083,10 +1083,16 @@ select {
 
 .activity-feed-items {
   position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
   padding: 14px 0 2px 20px;
+}
+
+.activity-feed-virtual-list {
+  height: min(72vh, 720px);
+  min-height: 420px;
+}
+
+.activity-feed-row {
+  padding-bottom: 10px;
 }
 
 .activity-feed-items::before {
@@ -1459,6 +1465,10 @@ select {
 @media (max-width: 760px) {
   .activity-feed-items {
     padding-left: 16px;
+  }
+
+  .activity-feed-virtual-list {
+    min-height: 360px;
   }
 
   .activity-feed-items::before {
