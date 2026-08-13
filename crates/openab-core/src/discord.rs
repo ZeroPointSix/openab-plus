@@ -57,6 +57,15 @@ fn truncate_for_discord(s: &str, max: usize) -> String {
     }
 }
 
+/// Discord web permalink for a channel or thread. Guild channels use
+/// `/channels/{guild}/{channel}`; DMs use `/channels/@me/{channel}`.
+fn discord_channel_permalink(guild_id: Option<u64>, channel_id: u64) -> String {
+    match guild_id {
+        Some(guild_id) => format!("https://discord.com/channels/{guild_id}/{channel_id}"),
+        None => format!("https://discord.com/channels/@me/{channel_id}"),
+    }
+}
+
 /// Avoid unbounded Discord history exports from very large threads.
 const THREAD_EXPORT_MESSAGE_LIMIT: usize = 5000;
 
@@ -1044,6 +1053,24 @@ impl EventHandler for Handler {
             }
         };
 
+        // Backfill the session's source permalink so the admin console can
+        // deep-link back to the originating Discord channel/thread (ZER-669).
+        // Idempotent — the pool skips the write when the value is unchanged.
+        {
+            let session_channel = DiscordAdapter::resolve_channel(&thread_channel);
+            if let Ok(ch_id) = session_channel.parse::<u64>() {
+                let permalink =
+                    discord_channel_permalink(msg.guild_id.map(|id| id.get()), ch_id);
+                self.router
+                    .pool()
+                    .record_session_source_permalink(
+                        &format!("discord:{session_channel}"),
+                        permalink,
+                    )
+                    .await;
+            }
+        }
+
         // Notify user if any images couldn't be processed.
         if !failed_image_files.is_empty() {
             let file_list = failed_image_files
@@ -1062,6 +1089,11 @@ impl EventHandler for Handler {
         }
 
         let trigger_msg = discord_msg_ref(&msg);
+        let source_permalink = discord_session_permalink(
+            &msg.link(),
+            &msg.channel_id.get().to_string(),
+            &thread_channel,
+        );
 
         // Per-thread streaming: check if another bot is present in this thread
         let other_bot_present_flag = {
@@ -1132,6 +1164,7 @@ impl EventHandler for Handler {
                 prompt,
                 extra_blocks,
                 trigger_msg,
+                source_permalink: Some(source_permalink),
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present: other_bot_present_flag,
@@ -1373,6 +1406,7 @@ impl EventHandler for Handler {
                 prompt,
                 extra_blocks: Vec::new(),
                 trigger_msg,
+                source_permalink: None,
                 arrived_at: std::time::Instant::now(),
                 estimated_tokens,
                 other_bot_present,
@@ -2972,6 +3006,25 @@ async fn get_or_create_thread(
     }
 }
 
+/// Return the destination for the session source. For a message that creates a
+/// new Discord thread, use that thread's channel URL rather than the original
+/// parent-message permalink; otherwise retain the canonical message permalink.
+fn discord_session_permalink(
+    message_permalink: &str,
+    message_channel_id: &str,
+    thread_channel: &ChannelRef,
+) -> String {
+    if thread_channel.parent_id.is_none() || thread_channel.channel_id == message_channel_id {
+        return message_permalink.to_string();
+    }
+
+    let marker = format!("/{message_channel_id}/");
+    let Some((guild_prefix, _)) = message_permalink.rsplit_once(&marker) else {
+        return message_permalink.to_string();
+    };
+    format!("{guild_prefix}/{}", thread_channel.channel_id)
+}
+
 /// Detect Discord's "A thread has already been created for this message" error
 /// (JSON error code 160004). Triggered when two bots responding to the same
 /// @-mention race to create a thread from the same trigger message.
@@ -3620,6 +3673,48 @@ mod tests {
         );
 
         assert!(text.contains("content_type: unknown"));
+    }
+
+    // --- session source permalink ---
+
+    #[test]
+    fn session_permalink_targets_new_thread_instead_of_parent_message() {
+        let thread = ChannelRef {
+            platform: "discord".into(),
+            channel_id: "thread".into(),
+            thread_id: None,
+            parent_id: Some("parent".into()),
+            origin_event_id: None,
+        };
+
+        assert_eq!(
+            discord_session_permalink(
+                "https://discord.com/channels/guild/parent/message",
+                "parent",
+                &thread,
+            ),
+            "https://discord.com/channels/guild/thread"
+        );
+    }
+
+    #[test]
+    fn session_permalink_preserves_message_link_inside_existing_thread() {
+        let thread = ChannelRef {
+            platform: "discord".into(),
+            channel_id: "thread".into(),
+            thread_id: None,
+            parent_id: None,
+            origin_event_id: None,
+        };
+
+        assert_eq!(
+            discord_session_permalink(
+                "https://discord.com/channels/guild/thread/message",
+                "thread",
+                &thread,
+            ),
+            "https://discord.com/channels/guild/thread/message"
+        );
     }
 
     // --- thread-race error detection ---
@@ -4576,4 +4671,23 @@ mod tests {
             false, false, false,
         ));
     }
+
+    // --- Source channel/thread permalink (ZER-669) ---
+
+    #[test]
+    fn discord_permalink_guild_channel() {
+        assert_eq!(
+            discord_channel_permalink(Some(42), 100),
+            "https://discord.com/channels/42/100"
+        );
+    }
+
+    #[test]
+    fn discord_permalink_dm_uses_me() {
+        assert_eq!(
+            discord_channel_permalink(None, 100),
+            "https://discord.com/channels/@me/100"
+        );
+    }
+
 }

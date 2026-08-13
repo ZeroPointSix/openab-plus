@@ -6,7 +6,6 @@ import {
   SessionTimelineItem,
 } from '../types';
 import {
-  LAST_EVENT_ID_KEY,
   notifyUnauthorized,
   readAdminToken,
 } from '../lib/auth';
@@ -27,7 +26,13 @@ function wait(milliseconds: number): Promise<void> {
 export function useSessionStream(enabled: boolean): StreamStatus {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<StreamStatus>('offline');
-  const lastEventId = useRef(sessionStorage.getItem(LAST_EVENT_ID_KEY) || '');
+  // Cold start always connects without Last-Event-ID so the server replays
+  // the retained history from sequence 0: the timeline cache is in-memory
+  // only, so resuming from a persisted cursor after a refresh would leave
+  // the detail timeline with just its seed entries. Reconnects within this
+  // page's lifetime still resume from the in-memory cursor to avoid
+  // re-replaying history on every transient drop.
+  const lastEventId = useRef('');
 
   useEffect(() => {
     if (!enabled) {
@@ -72,7 +77,6 @@ export function useSessionStream(enabled: boolean): StreamStatus {
             onmessage(message) {
               if (message.id) {
                 lastEventId.current = message.id;
-                sessionStorage.setItem(LAST_EVENT_ID_KEY, message.id);
               }
 
               const event = parseSessionEventPayload(message.data);
@@ -88,10 +92,6 @@ export function useSessionStream(enabled: boolean): StreamStatus {
 
               if (event.sequence && !message.id) {
                 lastEventId.current = String(event.sequence);
-                sessionStorage.setItem(
-                  LAST_EVENT_ID_KEY,
-                  lastEventId.current,
-                );
               }
               queryClient.setQueryData<SessionSnapshot[]>(
                 ['sessions'],

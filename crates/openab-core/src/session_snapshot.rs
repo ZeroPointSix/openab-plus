@@ -88,6 +88,11 @@ impl ProfileConfigError {
 pub struct SessionSource {
     pub platform: String,
     pub thread_id: String,
+    /// Permalink to the originating thread (e.g. a Slack/Discord thread URL),
+    /// backfilled lazily by the source adapter. Optional and additive — older
+    /// payloads simply omit the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permalink: Option<String>,
 }
 
 impl SessionSource {
@@ -96,10 +101,12 @@ impl SessionSource {
             Some((platform, thread_id)) if !platform.is_empty() && !thread_id.is_empty() => Self {
                 platform: platform.to_string(),
                 thread_id: thread_id.to_string(),
+                permalink: None,
             },
             _ => Self {
                 platform: "unknown".into(),
                 thread_id: session_key.to_string(),
+                permalink: None,
             },
         }
     }
@@ -225,6 +232,18 @@ impl SessionSnapshot {
 
         self.profile_status = Some(ProfileStatus::Deleted);
         self.updated_at = Utc::now();
+        true
+    }
+
+    /// Set the permalink to the session's source thread. Deliberately does
+    /// NOT bump `updated_at`: the permalink is immutable source metadata,
+    /// not a session-activity signal. Returns whether the source changed.
+    pub fn set_source_permalink(&mut self, permalink: Option<&str>) -> bool {
+        let permalink = permalink.map(str::to_owned);
+        if self.source.permalink == permalink {
+            return false;
+        }
+        self.source.permalink = permalink;
         true
     }
 }
@@ -418,5 +437,35 @@ mod tests {
         assert_eq!(snapshot.profile_status, Some(ProfileStatus::Deleted));
         assert!(!snapshot.mark_profile_deleted("profile-1"));
         assert!(!snapshot.mark_profile_deleted("profile-2"));
+    }
+
+    #[test]
+    fn source_permalink_is_optional_and_serialized_when_present() {
+        let mut snapshot = SessionSnapshot::new(
+            "slack:thread".into(),
+            "codex".into(),
+            "/workspace".into(),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        // Omitted entirely until an adapter backfills it.
+        let value = serde_json::to_value(&snapshot).expect("snapshot should serialize");
+        assert!(value["source"].get("permalink").is_none());
+
+        assert!(snapshot
+            .set_source_permalink(Some("https://acme.slack.com/archives/C1/p1700000000000100",)));
+        let value = serde_json::to_value(&snapshot).expect("snapshot should serialize");
+        assert_eq!(
+            value["source"]["permalink"],
+            "https://acme.slack.com/archives/C1/p1700000000000100"
+        );
+
+        // Backwards compatible: payloads without the field still deserialize.
+        let legacy = serde_json::json!({ "platform": "slack", "thread_id": "T1" });
+        let source: SessionSource = serde_json::from_value(legacy).expect("legacy source");
+        assert_eq!(source.permalink, None);
     }
 }

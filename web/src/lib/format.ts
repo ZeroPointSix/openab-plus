@@ -1,14 +1,30 @@
-import { SessionStatus } from '../types';
+import {
+  SESSION_STATUS_DISPLAY,
+  SESSION_STATUS_FILTER_OPTIONS,
+} from './sessionStatus';
 
-export const statusLabels: Record<SessionStatus, string> = {
-  starting: '启动中',
-  idle: '空闲',
-  running: '运行中',
-  suspended: '已暂停',
-  error: '失败',
-  exited: '已退出',
-  unknown: '未知',
-};
+export const statusLabels: Record<string, string> = Object.fromEntries(
+  Object.entries(SESSION_STATUS_DISPLAY).map(([status, display]) => [
+    status,
+    display.label,
+  ]),
+);
+
+export const sessionStatusOptions = SESSION_STATUS_FILTER_OPTIONS;
+
+/**
+ * 平台标识 → 展示名称。用于「回到 Slack / Discord」等来源跳转文案。
+ */
+export function sourcePlatformLabel(platform?: string): string {
+  if (!platform) return '';
+  const labels: Record<string, string> = {
+    slack: 'Slack',
+    discord: 'Discord',
+    acp: 'ACP',
+    telegram: 'Telegram',
+  };
+  return labels[platform] || platform;
+}
 
 export function formatDateTime(value?: string): string {
   if (!value) return '-';

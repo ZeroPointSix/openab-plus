@@ -1005,6 +1005,43 @@ mod tests {
             .contains(&"specified_profile:deep".to_string()));
     }
 
+    #[tokio::test]
+    async fn selected_non_default_agent_profile_uses_its_own_acp_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::new(dir.path().join("profiles.toml"));
+        let mut claude = AgentProfile::new("claude-research", "Claude Research", "claude");
+        claude.command = Some("claude-agent-acp".into());
+        store
+            .save_atomic(&AgentProfileDocument {
+                default_profile: None,
+                profiles: vec![claude],
+            })
+            .await
+            .unwrap();
+        let service = AgentProfileService::new(store);
+
+        let resolved = service
+            .resolve_for_session(
+                &base_config(),
+                &HashMap::new(),
+                Some("claude-research"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.config.command, "claude-agent-acp");
+        assert!(resolved.config.args.is_empty());
+        assert!(resolved.config.command_explicit);
+        assert_eq!(
+            resolved
+                .profile
+                .expect("selected profile snapshot")
+                .agent_type,
+            "claude"
+        );
+    }
+
     #[test]
     fn startup_command_can_be_exact_command_line() {
         let mut config = base_config();

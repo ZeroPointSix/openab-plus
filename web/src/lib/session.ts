@@ -4,7 +4,6 @@ import {
   SessionSnapshot,
   SessionTimelineItem,
 } from '../types';
-
 const ACTIVE = new Set(['starting', 'idle', 'running', 'suspended']);
 const RUNNING = new Set(['starting', 'running']);
 const FAILED = new Set(['error', 'exited']);
@@ -28,12 +27,35 @@ export function parseSessionEventPayload(
   }
 }
 
+function sessionTimestamp(session: SessionSnapshot): number {
+  const timestamp = Date.parse(session.updated_at || session.created_at);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
 export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
-  return [...sessions].sort((a, b) =>
-    String(b.updated_at || b.created_at).localeCompare(
-      String(a.updated_at || a.created_at),
-    ),
+  return [...sessions].sort(
+    (a, b) => sessionTimestamp(b) - sessionTimestamp(a),
   );
+}
+
+export function matchesSessionKeyword(
+  session: SessionSnapshot,
+  keyword: string,
+): boolean {
+  const normalized = keyword.trim().toLocaleLowerCase();
+  if (!normalized) return true;
+  return [
+    session.session_id,
+    session.agent,
+    session.profile_id,
+    session.profile_name,
+    session.source.platform,
+    session.source.thread_id,
+    session.workdir,
+    session.model,
+  ]
+    .filter(Boolean)
+    .some((value) => String(value).toLocaleLowerCase().includes(normalized));
 }
 
 export function filterSessions(
@@ -45,6 +67,7 @@ export function filterSessions(
       return false;
     }
     if (filters.status && session.status !== filters.status) return false;
+    if (filters.agent && session.agent !== filters.agent) return false;
     if (
       filters.profile &&
       session.profile_id !== filters.profile &&
@@ -85,6 +108,19 @@ export function applySessionEvent(
   return sortSessions(sessions);
 }
 
+export function mergeTimelineItem(
+  current: SessionTimelineItem[] | undefined,
+  timelineItem: SessionTimelineItem,
+): SessionTimelineItem[] {
+  const timeline = (current || []).filter(
+    (item) => !item.id.startsWith('initial:'),
+  );
+  if (timeline.some((item) => item.id === timelineItem.id)) {
+    return timeline;
+  }
+  return [...timeline, timelineItem].slice(-60);
+}
+
 export function timelineItemFromEvent(
   event: SessionEventPayload,
   streamEventId?: string,
@@ -106,7 +142,7 @@ export function initialTimeline(
 ): SessionTimelineItem[] {
   const items: SessionTimelineItem[] = [
     {
-      id: 'created',
+      id: 'initial:created',
       event: 'session.created',
       status: 'idle',
       at: session.created_at,
@@ -117,7 +153,7 @@ export function initialTimeline(
     session.status !== 'idle'
   ) {
     items.push({
-      id: 'current',
+      id: 'initial:current',
       event: 'current',
       status: session.status,
       at: session.updated_at,
@@ -125,4 +161,18 @@ export function initialTimeline(
     });
   }
   return items;
+}
+
+/**
+ * 冷启动 / 刷新后，SSE 会从 0 补齐历史事件；一旦时间线里出现带 sequence
+ * 的真实流事件，就把 initialTimeline 种下的种子条目（created/current）
+ * 过滤掉，避免同一条「会话创建 / 当前状态」在时间线上重复出现。
+ */
+export function visibleTimelineItems(
+  items: SessionTimelineItem[],
+): SessionTimelineItem[] {
+  const hasStreamed = items.some((item) => typeof item.sequence === 'number');
+  return hasStreamed
+    ? items.filter((item) => typeof item.sequence === 'number')
+    : items;
 }

@@ -13,11 +13,15 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { SessionFilters, SessionSnapshot } from '../types';
 import { filterSessions } from '../lib/session';
-import { formatDateTime, formatRelativeTime } from '../lib/format';
+import {
+  formatDateTime,
+  formatRelativeTime,
+  sessionStatusOptions,
+} from '../lib/format';
 import { StatusTag } from './StatusTag';
 import { EntityMark } from './EntityMark';
 
-interface SessionTableProps {
+interface RecentSessionsTableProps {
   sessions: SessionSnapshot[];
   loading?: boolean;
   compact?: boolean;
@@ -35,7 +39,7 @@ interface SearchValues {
   updated_at?: [string, string];
 }
 
-export function SessionTable({
+export function RecentSessionsTable({
   sessions,
   loading,
   compact = false,
@@ -43,7 +47,7 @@ export function SessionTable({
   onReload,
   title = '会话',
   limit,
-}: SessionTableProps) {
+}: RecentSessionsTableProps) {
   const navigate = useNavigate();
   const [filters, setFilters] = useState<SessionFilters & { agent?: string }>(
     {},
@@ -70,14 +74,9 @@ export function SessionTable({
       dataIndex: 'status',
       width: 112,
       valueType: 'select',
-      valueEnum: {
-        starting: { text: '启动中' },
-        idle: { text: '空闲' },
-        running: { text: '运行中' },
-        suspended: { text: '已暂停' },
-        error: { text: '失败' },
-        exited: { text: '已退出' },
-      },
+      valueEnum: Object.fromEntries(
+        sessionStatusOptions.map(({ value, label }) => [value, { text: label }]),
+      ),
       render: (_, record) => <StatusTag status={record.status} />,
     },
     {
