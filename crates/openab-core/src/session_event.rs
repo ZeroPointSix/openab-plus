@@ -273,6 +273,21 @@ impl SessionStreamBus {
         published
     }
 
+    /// Executes `capture` while holding the same stream lock used for event
+    /// publication, then returns the generation and the next global sequence.
+    /// This lets a transcript snapshot and its continuation cursor be captured
+    /// atomically: an event is either included in the snapshot or replayed after
+    /// this cursor, never lost in the hand-off to SSE.
+    pub fn capture_cursor<T>(&self, capture: impl FnOnce() -> T) -> (T, String, u64) {
+        let history = self.history.lock().expect("session stream history lock");
+        let captured = capture();
+        (
+            captured,
+            self.generation().to_string(),
+            history.next_sequence,
+        )
+    }
+
     fn next_sequence(&self) -> u64 {
         self.history
             .lock()
@@ -325,9 +340,13 @@ impl SessionEventBus {
     }
 
     pub fn subscribe_after(&self, last_sequence: Option<u64>) -> SessionEventSubscription {
+        // Do not acquire the shared stream mutex while lifecycle history is held.
+        // Publication also touches both histories, so keeping these operations
+        // non-nested removes a lock-order coupling between publish and replay.
+        let stream_next_sequence = self.stream.next_sequence();
         let history = self.history.lock().expect("session event history lock");
         let replay = last_sequence
-            .map(|last_sequence| history.replay_after(last_sequence, self.stream.next_sequence()))
+            .map(|last_sequence| history.replay_after(last_sequence, stream_next_sequence))
             .unwrap_or_default();
         let receiver = self.tx.subscribe();
 
@@ -335,10 +354,11 @@ impl SessionEventBus {
     }
 
     pub fn replay_after(&self, last_sequence: u64) -> SessionEventReplay {
+        let stream_next_sequence = self.stream.next_sequence();
         self.history
             .lock()
             .expect("session event history lock")
-            .replay_after(last_sequence, self.stream.next_sequence())
+            .replay_after(last_sequence, stream_next_sequence)
     }
 
     pub fn publish(&self, event: SessionEventKind, snapshot: SessionSnapshot) -> SessionEvent {
@@ -429,6 +449,51 @@ mod tests {
         assert!(!replay.overflowed);
         assert_eq!(replay.events, vec![second]);
         assert_eq!(replay.oldest_sequence, Some(first.sequence));
+    }
+
+    #[test]
+    fn concurrent_publish_and_replay_complete_without_blocking() {
+        use std::sync::{mpsc, Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        let bus = Arc::new(SessionEventBus::new(512));
+        let barrier = Arc::new(Barrier::new(3));
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let publisher_bus = Arc::clone(&bus);
+        let publisher_barrier = Arc::clone(&barrier);
+        let publisher_done = done_tx.clone();
+        let publisher = thread::spawn(move || {
+            publisher_barrier.wait();
+            for _ in 0..128 {
+                publisher_bus.publish(SessionEventKind::StatusChanged, snapshot());
+            }
+            publisher_done
+                .send(())
+                .expect("publisher completion receiver");
+        });
+
+        let replay_bus = Arc::clone(&bus);
+        let replay_barrier = Arc::clone(&barrier);
+        let replay_done = done_tx;
+        let replay = thread::spawn(move || {
+            replay_barrier.wait();
+            for _ in 0..128 {
+                let _ = replay_bus.replay_after(0);
+                let _ = replay_bus.subscribe_after(Some(0));
+            }
+            replay_done.send(()).expect("replay completion receiver");
+        });
+
+        barrier.wait();
+        for _ in 0..2 {
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("concurrent publish/replay must not deadlock");
+        }
+        publisher.join().expect("publisher thread");
+        replay.join().expect("replay thread");
     }
 
     #[test]
