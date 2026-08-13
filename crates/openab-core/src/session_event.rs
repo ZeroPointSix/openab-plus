@@ -447,6 +447,51 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_publish_and_replay_complete_without_blocking() {
+        use std::sync::{mpsc, Arc, Barrier};
+        use std::thread;
+        use std::time::Duration;
+
+        let bus = Arc::new(SessionEventBus::new(512));
+        let barrier = Arc::new(Barrier::new(3));
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let publisher_bus = Arc::clone(&bus);
+        let publisher_barrier = Arc::clone(&barrier);
+        let publisher_done = done_tx.clone();
+        let publisher = thread::spawn(move || {
+            publisher_barrier.wait();
+            for _ in 0..128 {
+                publisher_bus.publish(SessionEventKind::StatusChanged, snapshot());
+            }
+            publisher_done
+                .send(())
+                .expect("publisher completion receiver");
+        });
+
+        let replay_bus = Arc::clone(&bus);
+        let replay_barrier = Arc::clone(&barrier);
+        let replay_done = done_tx;
+        let replay = thread::spawn(move || {
+            replay_barrier.wait();
+            for _ in 0..128 {
+                let _ = replay_bus.replay_after(0);
+                let _ = replay_bus.subscribe_after(Some(0));
+            }
+            replay_done.send(()).expect("replay completion receiver");
+        });
+
+        barrier.wait();
+        for _ in 0..2 {
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("concurrent publish/replay must not deadlock");
+        }
+        publisher.join().expect("publisher thread");
+        replay.join().expect("replay thread");
+    }
+
+    #[test]
     fn replay_after_reports_history_overflow() {
         let bus = SessionEventBus::new(2);
         let first = bus.publish(SessionEventKind::SessionCreated, snapshot());
