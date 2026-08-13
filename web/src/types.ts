@@ -37,6 +37,18 @@ export interface SessionSnapshot {
   external_url?: string;
 }
 
+export interface CreateSessionOverrides {
+  working_dir?: string;
+  model?: string;
+  reasoning_effort?: string;
+  config_options?: Record<string, string>;
+}
+
+export interface CreateSessionRequest {
+  profile_id: string;
+  overrides?: CreateSessionOverrides;
+}
+
 export interface SessionEventPayload {
   sequence: number;
   event: string;
@@ -265,6 +277,7 @@ export interface ConfigReloadResponse {
 export interface SessionFilters {
   platform?: string;
   status?: string;
+  agent?: string;
   profile?: string;
   updatedRange?: [string, string];
 }

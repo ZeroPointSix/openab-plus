@@ -3,6 +3,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  UserAddOutlined,
 } from '@ant-design/icons';
 import { Conversations } from '@ant-design/x';
 import {
@@ -15,18 +16,22 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { filterSessions } from '../../lib/session';
+import { filterSessions, matchesSessionKeyword } from '../../lib/session';
 import { formatRelativeTime } from '../../lib/format';
-import { SessionFilters, SessionSnapshot } from '../../types';
+import { AgentProfile, SessionFilters, SessionSnapshot } from '../../types';
 import { EntityMark } from '../EntityMark';
 import { StatusTag } from '../StatusTag';
 
 interface SessionSidebarProps {
   sessions: SessionSnapshot[];
+  profiles?: AgentProfile[];
   loading?: boolean;
   activeSessionId?: string;
+  creatingSession?: boolean;
   onSelect: (sessionId: string) => void;
   onReload?: () => void;
+  onNewAgent?: () => void;
+  onCreateSession?: (profile: AgentProfile) => void;
 }
 
 const statusOptions = [
@@ -56,13 +61,76 @@ function agentGroup(session: SessionSnapshot): string {
 
 export function SessionSidebar({
   sessions,
+  profiles = [],
   loading,
   activeSessionId,
+  creatingSession = false,
   onSelect,
   onReload,
+  onNewAgent,
+  onCreateSession,
 }: SessionSidebarProps) {
   const [search, setSearch] = useState('');
   const [filters, setFilters] = useState<SessionFilters>({});
+
+  const agentScope = filters.profile
+    ? 'profile:' + filters.profile
+    : filters.agent
+      ? 'agent:' + filters.agent
+      : '';
+
+  const agentOptions = useMemo(() => {
+    const agentTypes = Array.from(
+      new Set([
+        ...profiles.map((profile) => profile.agent_type),
+        ...sessions.map((session) => session.agent),
+      ]),
+    )
+      .filter(Boolean)
+      .sort();
+
+    return [
+      { label: '全部 Agent', value: '' },
+      ...agentTypes.map((agentType) => ({
+        label: agentType,
+        options: [
+          { label: `全部 ${agentType} 会话`, value: `agent:${agentType}` },
+          ...profiles
+            .filter((profile) => profile.agent_type === agentType)
+            .map((profile) => ({
+              label: profile.name || profile.id,
+              value: `profile:${profile.id}`,
+              disabled: !profile.enabled,
+            })),
+        ],
+      })),
+    ];
+  }, [profiles, sessions]);
+
+  const selectedProfile = useMemo(() => {
+    if (agentScope.startsWith('profile:')) {
+      const profileId = agentScope.slice('profile:'.length);
+      return profiles.find((profile) => profile.id === profileId && profile.enabled);
+    }
+    if (agentScope.startsWith('agent:')) {
+      const agentType = agentScope.slice('agent:'.length);
+      const enabledProfiles = profiles.filter(
+        (profile) => profile.agent_type === agentType && profile.enabled,
+      );
+      return enabledProfiles.length === 1 ? enabledProfiles[0] : undefined;
+    }
+    return undefined;
+  }, [agentScope, profiles]);
+
+  const selectAgentScope = (value: string) => {
+    setFilters((current) => ({
+      ...current,
+      agent: value.startsWith('agent:') ? value.slice('agent:'.length) : undefined,
+      profile: value.startsWith('profile:')
+        ? value.slice('profile:'.length)
+        : undefined,
+    }));
+  };
 
   const platformOptions = useMemo(() => {
     const platforms = [
@@ -74,27 +142,13 @@ export function SessionSidebar({
     ];
   }, [sessions]);
 
-  const filteredSessions = useMemo(() => {
-    const filtered = filterSessions(sessions, filters);
-    const query = search.trim().toLowerCase();
-    if (!query) return filtered;
-
-    return filtered.filter((session) => {
-      const haystack = [
-        session.session_id,
-        session.agent,
-        session.source?.platform,
-        session.source?.thread_id,
-        session.workdir,
-        session.profile_name,
-        session.profile_id,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(query);
-    });
-  }, [filters, search, sessions]);
+  const filteredSessions = useMemo(
+    () =>
+      filterSessions(sessions, filters).filter((session) =>
+        matchesSessionKeyword(session, search),
+      ),
+    [filters, search, sessions],
+  );
 
   const conversationItems = useMemo(
     () =>
@@ -118,6 +172,10 @@ export function SessionSidebar({
     [filteredSessions],
   );
 
+  const newChatTitle = selectedProfile
+    ? `使用 ${selectedProfile.name || selectedProfile.id} 新建会话`
+    : '请先选择启用的 Profile；若 Agent 只有一个启用 Profile，也可直接新建会话';
+
   return (
     <aside className="workbench-panel workbench-sidebar" aria-label="会话列表">
       <div className="workbench-panel-header">
@@ -139,22 +197,42 @@ export function SessionSidebar({
       </div>
 
       <div className="workbench-sidebar-newchat">
-        <Tooltip title="会话创建将在后续版本开放">
-          <span className="workbench-sidebar-newchat-tooltip">
-            <Button block disabled icon={<PlusOutlined />}>
-              New chat
-            </Button>
-          </span>
-        </Tooltip>
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Button block icon={<UserAddOutlined />} onClick={onNewAgent} disabled={!onNewAgent}>
+            New Agent
+          </Button>
+          <Tooltip title={newChatTitle}>
+            <span className="workbench-sidebar-newchat-tooltip">
+              <Button
+                block
+                type="primary"
+                icon={<PlusOutlined />}
+                disabled={!selectedProfile || !onCreateSession}
+                loading={creatingSession}
+                onClick={() => selectedProfile && onCreateSession?.(selectedProfile)}
+              >
+                New chat
+              </Button>
+            </span>
+          </Tooltip>
+        </Space>
       </div>
 
       <div className="workbench-sidebar-filters">
         <Input
           allowClear
           prefix={<SearchOutlined />}
-          placeholder="搜索会话、Agent、平台…"
+          placeholder="搜索会话、Agent、Profile、平台…"
           value={search}
           onChange={(event) => setSearch(event.target.value)}
+        />
+        <Select
+          size="small"
+          value={agentScope}
+          options={agentOptions}
+          onChange={selectAgentScope}
+          aria-label="按 Agent 或 Profile 筛选"
+          style={{ width: '100%' }}
         />
         <Space wrap size={8}>
           <Select
@@ -203,7 +281,7 @@ export function SessionSidebar({
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             description={
-              search || filters.status || filters.platform
+              search || filters.status || filters.platform || filters.agent || filters.profile
                 ? '没有匹配的会话'
                 : '暂无会话'
             }

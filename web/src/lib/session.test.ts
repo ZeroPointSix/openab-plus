@@ -3,6 +3,7 @@ import {
   applySessionEvent,
   filterSessions,
   initialTimeline,
+  matchesSessionKeyword,
   parseSessionEventPayload,
   sessionMetrics,
   timelineItemFromEvent,
@@ -39,6 +40,19 @@ describe('session helpers', () => {
     expect(
       filterSessions(sessions, { platform: 'slack', profile: 'primary' }),
     ).toHaveLength(1);
+  });
+
+  it('filters by Agent type before rendering grouped history', () => {
+    const matching = filterSessions(sessions, { agent: 'claude' });
+
+    expect(matching).toHaveLength(1);
+    expect(matching[0].session_id).toBe('discord:beta');
+  });
+
+  it('matches keywords across session identity fields', () => {
+    expect(matchesSessionKeyword(sessions[0], 'ALPHA')).toBe(true);
+    expect(matchesSessionKeyword(sessions[0], 'primary')).toBe(true);
+    expect(matchesSessionKeyword(sessions[0], 'not-found')).toBe(false);
   });
 
   it('computes dashboard metrics', () => {

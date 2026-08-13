@@ -7,6 +7,7 @@ describe('profile payload normalization', () => {
       id: ' codex-main ',
       name: ' Codex Main ',
       agent_type: 'codex',
+      command: ' codex-acp ',
       enabled: true,
       workdir_strategy: 'profile_default',
       recovery_strategy: 'resume_session',
@@ -19,6 +20,7 @@ describe('profile payload normalization', () => {
     });
 
     expect(profile.id).toBe('codex-main');
+    expect(profile.command).toBe('codex-acp');
     expect(profile.args).toEqual(['--quiet']);
     expect(profile.env_refs).toEqual({
       OPENAI_API_KEY: 'credstore://openai.key',

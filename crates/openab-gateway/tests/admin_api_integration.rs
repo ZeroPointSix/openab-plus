@@ -170,6 +170,127 @@ async fn sessions_auth_rejects_missing_and_invalid_tokens() {
 }
 
 #[tokio::test]
+async fn session_creation_requires_auth_and_an_enabled_profile() {
+    let env = AdminTestEnv::new().await;
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+
+    let unauthenticated = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .json(&json!({ "profile_id": "missing" }))
+        .send()
+        .await
+        .expect("create without token");
+    assert_eq!(unauthenticated.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let empty_profile = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({ "profile_id": " " }))
+        .send()
+        .await
+        .expect("create without profile");
+    assert_eq!(empty_profile.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        empty_profile
+            .json::<Value>()
+            .await
+            .expect("empty profile error")["error"],
+        "profile_id is required"
+    );
+
+    let unknown_profile = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({ "profile_id": "missing" }))
+        .send()
+        .await
+        .expect("create unknown profile");
+    assert_eq!(unknown_profile.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(unknown_profile
+        .json::<Value>()
+        .await
+        .expect("unknown profile error")["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("agent profile not found")));
+
+    let mut disabled = AgentProfile::new("disabled", "Disabled", "codex");
+    disabled.enabled = false;
+    env.profile_service()
+        .upsert(disabled)
+        .await
+        .expect("save disabled profile");
+    let disabled_profile = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({ "profile_id": "disabled" }))
+        .send()
+        .await
+        .expect("create disabled profile session");
+    assert_eq!(disabled_profile.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert!(disabled_profile
+        .json::<Value>()
+        .await
+        .expect("disabled profile error")["error"]
+        .as_str()
+        .is_some_and(|message| message.contains("agent profile is disabled")));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn session_creation_starts_selected_non_default_agent_profile() {
+    let env = AdminTestEnv::new().await;
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let agent_dir = tempfile::tempdir().expect("fake agent tempdir");
+    let agent_path = agent_dir.path().join("fake_acp_agent.py");
+    std::fs::write(
+        &agent_path,
+        r#"import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "agentInfo": {"name": "fake-claude-acp"},
+            "agentCapabilities": {"loadSession": False},
+        }
+    elif method == "session/new":
+        result = {"sessionId": "fake-claude-session"}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#,
+    )
+    .expect("write fake ACP agent");
+
+    let mut profile = AgentProfile::new("claude-admin", "Claude Admin", "claude");
+    profile.command = Some("python3".into());
+    profile.args = vec![agent_path.to_string_lossy().into_owned()];
+    env.profile_service()
+        .upsert(profile)
+        .await
+        .expect("save selected profile");
+
+    let created = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({ "profile_id": "claude-admin" }))
+        .send()
+        .await
+        .expect("create selected profile session");
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let snapshot = created.json::<Value>().await.expect("created session json");
+    assert_eq!(snapshot["agent"], "claude");
+    assert_eq!(snapshot["profile_id"], "claude-admin");
+    assert!(snapshot["session_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("admin:")));
+}
+
+#[tokio::test]
 async fn profiles_crud_default_and_validate() {
     let env = AdminTestEnv::new().await;
     let server = spawn_admin_server(&env).await;
