@@ -69,6 +69,28 @@ describe('bounded file diff preview', () => {
     }
   });
 
+  it('bounds previews with hundreds of sparse changed hunks', () => {
+    const before = Array.from({ length: 5_001 }, (_, index) => `line ${index + 1}`);
+    const after = [...before];
+    for (let index = 0; index < 500; index += 1) {
+      after[index * 10 + 5] = `changed ${index + 1}`;
+    }
+
+    const preview = buildHunkPreview(before.join('\n'), after.join('\n'));
+    const changed = preview.filter(
+      ({ kind }) => kind === 'removed' || kind === 'added',
+    );
+
+    expect(changed.length).toBeLessThanOrEqual(240);
+    expect(preview.length).toBeLessThan(2_000);
+    expect(preview).toContainEqual(
+      expect.objectContaining({
+        kind: 'omitted',
+        text: expect.stringContaining('changed hunks omitted'),
+      }),
+    );
+  });
+
   it('does not render an unbounded preview for an unchanged snapshot', () => {
     const content = Array.from({ length: 10_000 }, (_, index) => `line ${index + 1}`).join('\n');
 

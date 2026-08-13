@@ -28,6 +28,7 @@ type ChangeCluster = {
 
 const DEFAULT_CONTEXT_LINES = 3;
 const MAX_CHANGED_LINES = 240;
+const MAX_PREVIEW_HUNKS = 64;
 const RESYNC_LOOKAHEAD = 64;
 
 function splitLines(value: string): string[] {
@@ -158,7 +159,7 @@ function boundedCluster(lines: DiffLine[], limit: number): DiffLine[] {
   return [
     ...lines.slice(0, firstCount),
     { kind: 'omitted', text: `… ${omitted} changed lines omitted from this hunk` },
-    ...lines.slice(-lastCount),
+    ...(lastCount ? lines.slice(-lastCount) : []),
   ];
 }
 
@@ -209,15 +210,34 @@ export function buildHunkPreview(
   if (!clusters.length) return [];
 
   const ranges = hunkRanges(operations, clusters, context);
+  const selectedIndexes = (() => {
+    if (clusters.length <= MAX_PREVIEW_HUNKS) {
+      return clusters.map((_, index) => index);
+    }
+    const selected = new Set<number>();
+    const denominator = MAX_PREVIEW_HUNKS - 1;
+    for (let index = 0; index < MAX_PREVIEW_HUNKS; index += 1) {
+      selected.add(Math.round((index * (clusters.length - 1)) / denominator));
+    }
+    return [...selected].sort((a, b) => a - b);
+  })();
   const changedLinesPerHunk = Math.max(
-    2,
-    Math.floor(MAX_CHANGED_LINES / clusters.length),
+    1,
+    Math.floor(MAX_CHANGED_LINES / selectedIndexes.length),
   );
   const preview: DiffLine[] = [];
   let renderedUntil = 0;
+  let previousClusterIndex = -1;
 
-  clusters.forEach((cluster, index) => {
-    const range = ranges[index];
+  selectedIndexes.forEach((clusterIndex) => {
+    const cluster = clusters[clusterIndex];
+    const range = ranges[clusterIndex];
+    if (clusterIndex > previousClusterIndex + 1) {
+      preview.push({
+        kind: 'omitted',
+        text: `… ${clusterIndex - previousClusterIndex - 1} changed hunks omitted`,
+      });
+    }
     if (range.start > renderedUntil) {
       preview.push({
         kind: 'omitted',
@@ -234,8 +254,15 @@ export function buildHunkPreview(
     );
     preview.push(...operations.slice(cluster.end, range.end));
     renderedUntil = range.end;
+    previousClusterIndex = clusterIndex;
   });
 
+  if (previousClusterIndex < clusters.length - 1) {
+    preview.push({
+      kind: 'omitted',
+      text: `… ${clusters.length - previousClusterIndex - 1} changed hunks omitted`,
+    });
+  }
   if (renderedUntil < operations.length) {
     preview.push({
       kind: 'omitted',
