@@ -2004,3 +2004,331 @@ select {
     gap: 4px;
   }
 }
+
+/* ---------- ZER-404 专注式会话工作台 UX ---------- */
+
+.session-workbench-page {
+  min-height: calc(100vh - 64px);
+  padding: 14px 18px 18px;
+  background:
+    radial-gradient(900px 460px at 48% -160px, rgba(69, 104, 220, 0.08), transparent 70%),
+    #f6f8fb;
+}
+
+.session-workbench {
+  grid-template-columns: minmax(232px, 268px) minmax(580px, 1fr) minmax(250px, 292px);
+  min-height: calc(100vh - 96px);
+  max-width: 1680px;
+  margin: 0 auto;
+  border-color: #dfe7f0;
+  border-radius: 14px;
+  box-shadow: 0 14px 42px rgba(29, 45, 67, 0.08), 0 2px 6px rgba(29, 45, 67, 0.04);
+}
+
+.workbench-sidebar,
+.workbench-inspector {
+  background: #fbfcfe;
+}
+
+.workbench-main {
+  background: #ffffff;
+}
+
+.workbench-panel-header {
+  padding: 14px 16px 11px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.workbench-sidebar-filters {
+  gap: 8px;
+  padding: 11px 14px 12px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.session-conversations.ant-conversations {
+  padding: 8px 10px 14px;
+}
+
+.session-conversations .ant-conversations-item {
+  margin-bottom: 3px;
+  border: 1px solid transparent;
+}
+
+.session-conversations .ant-conversations-item-active {
+  border-color: #d9e5ff;
+  box-shadow: inset 3px 0 0 #4d7cfe;
+}
+
+.workbench-status-bar {
+  position: relative;
+  z-index: 2;
+  align-items: center;
+  min-height: 72px;
+  padding: 13px 22px;
+  border-bottom-color: #e6ecf3;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+}
+
+.workbench-status-title.ant-typography {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.workbench-status-copy .ant-typography-secondary {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-status-meta {
+  align-items: center;
+}
+
+.workbench-status-meta .ant-typography-secondary {
+  font-size: 12px;
+}
+
+.workbench-main-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+.workbench-activity-stage {
+  padding: 22px 28px 14px;
+}
+
+.workbench-activity-heading {
+  align-items: flex-start;
+  margin: 0 auto 16px;
+  width: min(100%, 920px);
+}
+
+.workbench-activity-heading .ant-typography h4,
+.workbench-activity-heading .ant-typography.ant-typography-h4 {
+  margin-bottom: 4px;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+
+.workbench-activity-heading > .ant-typography-secondary {
+  flex: 0 0 auto;
+  margin-top: 4px;
+  padding: 3px 8px;
+  border: 1px solid #dfe7f0;
+  border-radius: 999px;
+  background: #f7f9fc;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.session-activity-feed {
+  width: min(100%, 920px);
+  margin: 0 auto;
+}
+
+.activity-feed-caption {
+  padding-bottom: 10px;
+  border-bottom-color: #edf1f5;
+}
+
+.activity-feed-items {
+  padding: 16px 8px 0 26px;
+}
+
+.activity-feed-items::before {
+  top: 22px;
+  bottom: 18px;
+  left: 9px;
+  background: linear-gradient(#dbe5f0 0%, #edf2f7 100%);
+}
+
+.activity-feed-virtual-list {
+  height: clamp(440px, calc(100vh - 286px), 760px);
+  min-height: 0;
+  padding-right: 6px;
+}
+
+.activity-feed-row {
+  padding-bottom: 14px;
+}
+
+.activity-message-row {
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.activity-actor-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  box-shadow: 0 1px 2px rgba(31, 54, 80, 0.06);
+}
+
+.activity-message-content {
+  padding: 1px 2px 4px;
+}
+
+.activity-message-label {
+  margin-bottom: 5px;
+  font-size: 11px;
+  letter-spacing: 0.01em;
+}
+
+.activity-message-content .ant-typography {
+  color: #273447;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.activity-thinking,
+.activity-plan,
+.activity-tool-card {
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(26, 42, 64, 0.025);
+}
+
+.activity-thinking .ant-collapse-header {
+  min-height: 42px;
+  align-items: center !important;
+}
+
+.activity-plan .ant-card-body,
+.activity-tool-card .ant-card-body {
+  padding: 12px 14px;
+}
+
+.activity-tool-summary {
+  gap: 10px;
+}
+
+.activity-tool-details {
+  margin-top: 10px;
+}
+
+.activity-code-block,
+.activity-terminal-output {
+  max-height: 260px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.workbench-readonly-bar {
+  min-height: 54px;
+  padding: 10px 22px;
+  border-top-color: #e6ecf3;
+  background: linear-gradient(180deg, #fbfcfe, #f7f9fc);
+}
+
+.workbench-readonly-lock {
+  color: #5f7693;
+  font-size: 16px;
+}
+
+.workbench-readonly-copy {
+  gap: 0;
+}
+
+.workbench-readonly-copy .ant-typography:first-child {
+  font-size: 12px;
+}
+
+@media (max-width: 1240px) {
+  .session-workbench {
+    grid-template-columns: minmax(220px, 250px) minmax(0, 1fr) minmax(232px, 264px);
+  }
+
+  .workbench-status-meta .workbench-status-workdir,
+  .workbench-status-meta > .ant-typography:nth-of-type(2) {
+    display: none;
+  }
+}
+
+@media (max-width: 1100px) {
+  .session-workbench-page {
+    padding: 0;
+  }
+
+  .session-workbench {
+    min-height: calc(100vh - 64px);
+    border-radius: 0;
+    border-inline: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .session-workbench-page {
+    min-height: 100vh;
+  }
+
+  .workbench-activity-stage {
+    padding: 16px;
+  }
+
+  .activity-feed-items {
+    padding-left: 20px;
+  }
+
+  .activity-feed-virtual-list {
+    height: calc(100vh - 288px);
+  }
+}
+
+/* Virtuoso 将自身高度写为 100%；父级必须是可收缩的 flex 容器。 */
+.workbench-activity-stage .session-activity-feed {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.workbench-activity-stage .activity-feed-items {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.workbench-activity-stage .activity-feed-virtual-list {
+  height: 100% !important;
+}
+
+/* 紧凑侧栏与 Inspector：长运行标识保持可扫读，不挤压中栏。 */
+.session-conversations .ant-conversations-group-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-conversation-title > .ant-typography {
+  min-width: 0;
+}
+
+.workbench-inspector-tabs .ant-tabs-nav {
+  padding-inline: 14px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.workbench-inspector-tabs .ant-tabs-tab {
+  padding-block: 12px 10px;
+}
+
+.inspector-tab-body {
+  padding: 14px 16px 20px;
+}
+
+.inspector-tab-body .ant-descriptions-item-label {
+  width: 64px;
+  color: #718096;
+  font-size: 12px;
+  vertical-align: top;
+}
+
+.inspector-tab-body .ant-descriptions-item-content {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #344256;
+  font-size: 12px;
+}
+
+.inspector-tab-body .ant-typography code {
+  font-size: 11px;
+}

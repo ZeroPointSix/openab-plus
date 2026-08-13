@@ -1,6 +1,7 @@
 import {
   CopyOutlined,
   LinkOutlined,
+  LockOutlined,
   ProfileOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
@@ -192,11 +193,6 @@ export function SessionMainPanel({
                 <Typography.Title level={4}>Agent 活动流</Typography.Title>
                 <Typography.Text type="secondary">
                   连续展示回复、思考、计划、工具调用、终端输出和文件编辑差异
-                  {transcript.latencyMs !== undefined
-                    ? ` · SSE 端到端延迟 ${transcript.latencyMs}ms${
-                        transcript.latencyMs > 2_000 ? '（超过 2s 观测目标）' : ''
-                      }`
-                    : ''}
                 </Typography.Text>
               </div>
               <Typography.Text type="secondary">仅观测</Typography.Text>
@@ -207,9 +203,7 @@ export function SessionMainPanel({
       </div>
 
       <footer className="workbench-readonly-bar" aria-label="只读观测提示">
-        <span className="workbench-readonly-lock" aria-hidden="true">
-          🔒
-        </span>
+        <LockOutlined className="workbench-readonly-lock" aria-hidden="true" />
         <div className="workbench-readonly-copy">
           <Typography.Text strong>只读观测</Typography.Text>
           <Typography.Text type="secondary">

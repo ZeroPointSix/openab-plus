@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { PageContainer } from '@ant-design/pro-components';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Drawer } from 'antd';
@@ -95,11 +94,7 @@ export function SessionWorkbenchPage() {
   );
 
   return (
-    <PageContainer
-      title="会话工作台"
-      subTitle="只读观测 Agent 会话 · 不提供发送或控制入口"
-      className="page-container session-workbench-page"
-    >
+    <main className="session-workbench-page" aria-label="只读 Agent 会话工作台">
       <div className="session-workbench">
         {compact ? (
           <Drawer
@@ -137,6 +132,6 @@ export function SessionWorkbenchPage() {
           inspector
         )}
       </div>
-    </PageContainer>
+    </main>
   );
 }
