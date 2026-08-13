@@ -39,6 +39,11 @@ export function SessionWorkbenchPage() {
   });
 
   const sessions = sessionsQuery.data || [];
+  const selectedSession = sessionQuery.data;
+  const sidebarSessions = selectedSession &&
+    !sessions.some((session) => session.session_id === selectedSession.session_id)
+    ? [selectedSession, ...sessions]
+    : sessions;
 
   useEffect(() => {
     if (sessionId || sessionsQuery.isLoading || sessionsQuery.isFetching) {
@@ -77,7 +82,7 @@ export function SessionWorkbenchPage() {
 
   const sidebar = (
     <SessionSidebar
-      sessions={sessions}
+      sessions={sidebarSessions}
       loading={sessionsQuery.isLoading}
       activeSessionId={sessionId || undefined}
       onSelect={selectSession}
@@ -87,7 +92,7 @@ export function SessionWorkbenchPage() {
 
   const inspector = (
     <SessionInspector
-      session={sessionQuery.data}
+      session={selectedSession}
       timeline={timeline}
       hasSelection={Boolean(sessionId)}
     />
@@ -111,8 +116,9 @@ export function SessionWorkbenchPage() {
           sidebar
         )}
         <SessionMainPanel
-          session={sessionQuery.data}
+          session={selectedSession}
           loading={Boolean(sessionId) && sessionQuery.isLoading}
+          loadError={sessionQuery.isError ? '无法加载该深链会话，请确认会话仍存在后重试' : undefined}
           hasSelection={Boolean(sessionId)}
           onOpenSidebar={compact ? () => setSidebarOpen(true) : undefined}
           onOpenInspector={compact ? () => setInspectorOpen(true) : undefined}

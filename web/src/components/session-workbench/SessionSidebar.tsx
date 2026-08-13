@@ -13,8 +13,8 @@ import {
   Spin,
   Typography,
 } from 'antd';
-import { filterSessions } from '../../lib/session';
-import { formatRelativeTime } from '../../lib/format';
+import { filterSessions, matchesSessionKeyword } from '../../lib/session';
+import { agentDisplayName, formatRelativeTime } from '../../lib/format';
 import { SessionFilters, SessionSnapshot } from '../../types';
 import { EntityMark } from '../EntityMark';
 import { StatusTag } from '../StatusTag';
@@ -47,7 +47,7 @@ function sessionTitle(session: SessionSnapshot): string {
 }
 
 function agentGroup(session: SessionSnapshot): string {
-  const agent = session.agent || '未知 Agent';
+  const agent = agentDisplayName(session.agent);
   const profile = session.profile_name || session.profile_id;
   return profile ? profile + ' · ' + agent : agent;
 }
@@ -74,24 +74,7 @@ export function SessionSidebar({
 
   const filteredSessions = useMemo(() => {
     const filtered = filterSessions(sessions, filters);
-    const query = search.trim().toLowerCase();
-    if (!query) return filtered;
-
-    return filtered.filter((session) => {
-      const haystack = [
-        session.session_id,
-        session.agent,
-        session.source?.platform,
-        session.source?.thread_id,
-        session.workdir,
-        session.profile_name,
-        session.profile_id,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
-      return haystack.includes(query);
-    });
+    return filtered.filter((session) => matchesSessionKeyword(session, search));
   }, [filters, search, sessions]);
 
   const conversationItems = useMemo(

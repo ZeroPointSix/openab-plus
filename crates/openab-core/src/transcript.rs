@@ -346,7 +346,12 @@ impl SessionTranscriptStore {
                 entry.tool_call = Some(merge_tool_payload(entry.tool_call.take(), payload.clone()));
                 entry.status = Some(status.clone());
                 if update.completed {
-                    entry.tool_result = Some(merge_tool_payload(entry.tool_result.take(), payload));
+                    // ACP tool_call_update notifications are patch-like. A terminal
+                    // status update may contain only `status`, while output/diff data
+                    // arrived in an earlier in-progress update. Build the final
+                    // result from the fully accumulated tool payload so consumers do
+                    // not lose those earlier fields.
+                    entry.tool_result = entry.tool_call.clone();
                 }
                 let event = entry.clone();
                 session.push_event(event.clone());
@@ -551,6 +556,58 @@ mod tests {
             "clean"
         );
         assert_eq!(entry.tool_result.as_ref().unwrap()["diff"]["after"], "new");
+    }
+
+    #[test]
+    fn terminal_status_only_update_preserves_earlier_tool_result_payload() {
+        let store = store(8);
+        store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "Edit file".into(),
+                status: "running".into(),
+                completed: false,
+                payload: json!({
+                    "sessionUpdate": "tool_call",
+                    "rawInput": {"path": "src/lib.rs"}
+                }),
+            },
+        );
+        store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "".into(),
+                status: "running".into(),
+                completed: false,
+                payload: json!({
+                    "sessionUpdate": "tool_call_update",
+                    "content": [{"type": "text", "text": "updated"}],
+                    "diff": {"path": "src/lib.rs", "before": "old", "after": "new"}
+                }),
+            },
+        );
+        store.upsert_tool_call(
+            "session",
+            ToolTranscriptUpdate {
+                tool_call_id: "tool-1".into(),
+                title: "".into(),
+                status: "completed".into(),
+                completed: true,
+                payload: json!({
+                    "sessionUpdate": "tool_call_update",
+                    "status": "completed"
+                }),
+            },
+        );
+
+        let snapshot = store.snapshot("session", None);
+        let result = snapshot.entries[0].tool_result.as_ref().unwrap();
+        assert_eq!(result["rawInput"]["path"], "src/lib.rs");
+        assert_eq!(result["content"][0]["text"], "updated");
+        assert_eq!(result["diff"]["after"], "new");
+        assert_eq!(result["status"], "completed");
     }
 
     #[test]

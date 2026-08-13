@@ -36,6 +36,28 @@ export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
   );
 }
 
+export function matchesSessionKeyword(
+  session: SessionSnapshot,
+  keyword: string,
+): boolean {
+  const query = keyword.trim().toLowerCase();
+  if (!query) return true;
+  return [
+    session.session_id,
+    session.agent,
+    session.source?.platform,
+    session.source?.thread_id,
+    session.workdir,
+    session.profile_name,
+    session.profile_id,
+    session.model,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(query);
+}
+
 export function filterSessions(
   sessions: SessionSnapshot[],
   filters: SessionFilters,

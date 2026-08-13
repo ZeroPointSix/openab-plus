@@ -102,6 +102,26 @@ export function formatRelativeTime(value?: string): string {
   return formatter.format(Math.round(diff / 86_400_000), 'day');
 }
 
+export function sourcePlatformLabel(platform?: string): string {
+  const labels: Record<string, string> = {
+    slack: 'Slack',
+    discord: 'Discord',
+    webhook: 'Webhook',
+    admin: 'Admin',
+  };
+  return platform ? labels[platform.toLowerCase()] || platform : '';
+}
+
+export function agentDisplayName(agent?: string): string {
+  if (!agent) return '未知 Agent';
+  const packageName = agent.split('/').at(-1) || agent;
+  return packageName
+    .replace(/-agent-acp$/i, '')
+    .replace(/-acp$/i, '')
+    .replaceAll('-', ' ')
+    .replace(/\b\w/g, (value) => value.toUpperCase());
+}
+
 export function eventLabel(event: string): string {
   const labels: Record<string, string> = {
     'session.created': '会话创建',

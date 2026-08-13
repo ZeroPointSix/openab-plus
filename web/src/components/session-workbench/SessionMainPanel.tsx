@@ -7,7 +7,11 @@ import {
 } from '@ant-design/icons';
 import { Alert, Button, Empty, Space, Spin, Typography, message } from 'antd';
 import { useMemo } from 'react';
-import { formatRelativeTime, sourcePlatformLabel } from '../../lib/format';
+import {
+  agentDisplayName,
+  formatRelativeTime,
+  sourcePlatformLabel,
+} from '../../lib/format';
 import { activityEntriesFromTranscript } from '../../lib/transcript';
 import { useSessionTranscript } from '../../hooks/useSessionTranscript';
 import { SessionSnapshot } from '../../types';
@@ -18,6 +22,7 @@ import { SessionActivityFeed } from '../activity/SessionActivityFeed';
 interface SessionMainPanelProps {
   session?: SessionSnapshot;
   loading?: boolean;
+  loadError?: string;
   hasSelection: boolean;
   onOpenSidebar?: () => void;
   onOpenInspector?: () => void;
@@ -35,6 +40,7 @@ const transcriptStatusLabels = {
 export function SessionMainPanel({
   session,
   loading,
+  loadError,
   hasSelection,
   onOpenSidebar,
   onOpenInspector,
@@ -89,7 +95,7 @@ export function SessionMainPanel({
             <EntityMark name={session.agent} size={28} />
             <div className="workbench-status-copy">
               <Typography.Title level={5} className="workbench-status-title">
-                {session.agent || '未知 Agent'}
+                {agentDisplayName(session.agent)}
               </Typography.Title>
               <Typography.Text type="secondary" code copyable>
                 {session.session_id}
@@ -151,7 +157,9 @@ export function SessionMainPanel({
           </div>
         ) : !session ? (
           <div className="workbench-main-empty">
-            <Empty description="未找到该会话，可能已结束或 ID 无效" />
+            <Empty
+              description={loadError || '未找到该会话，可能已结束或 ID 无效'}
+            />
           </div>
         ) : (
           <section className="workbench-activity-stage" aria-label="Agent 活动流">

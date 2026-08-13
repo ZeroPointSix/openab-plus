@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Adapted from AionUi packages/desktop/src/renderer/pages/conversation/Messages/acp/MessageAcpToolCall.tsx.
- * Modified for OpenAB Plus: browser-only, read-only bounded hunk preview.
+ * Modified for OpenAB Plus: browser-only, read-only bounded multi-hunk preview.
  */
 
 import { FileTextOutlined } from '@ant-design/icons';
@@ -21,8 +21,14 @@ export interface DiffLine {
   newNumber?: number;
 }
 
+type ChangeCluster = {
+  start: number;
+  end: number;
+};
+
 const DEFAULT_CONTEXT_LINES = 3;
 const MAX_CHANGED_LINES = 240;
+const RESYNC_LOOKAHEAD = 64;
 
 function splitLines(value: string): string[] {
   if (!value) return [];
@@ -31,107 +37,213 @@ function splitLines(value: string): string[] {
   return lines;
 }
 
-function pairedContext(
-  before: string[],
-  after: string[],
-  oldStart: number,
-  newStart: number,
-  count: number,
-): DiffLine[] {
-  return before.slice(oldStart, oldStart + count).map((text, index) => ({
-    kind: 'context',
-    text,
-    oldNumber: oldStart + index + 1,
-    newNumber: newStart + index + 1,
-  }));
+function findWithin(lines: string[], value: string, start: number): number | undefined {
+  const end = Math.min(lines.length, start + RESYNC_LOOKAHEAD);
+  for (let index = start; index < end; index += 1) {
+    if (lines[index] === value) return index;
+  }
+  return undefined;
 }
 
-function boundedChanges(lines: DiffLine[]): DiffLine[] {
-  if (lines.length <= MAX_CHANGED_LINES) return lines;
-  const firstCount = Math.ceil(MAX_CHANGED_LINES / 2);
-  const lastCount = Math.floor(MAX_CHANGED_LINES / 2);
+function buildLineOperations(before: string[], after: string[]): DiffLine[] {
+  const operations: DiffLine[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+
+  while (oldIndex < before.length || newIndex < after.length) {
+    if (
+      oldIndex < before.length &&
+      newIndex < after.length &&
+      before[oldIndex] === after[newIndex]
+    ) {
+      operations.push({
+        kind: 'context',
+        text: before[oldIndex],
+        oldNumber: oldIndex + 1,
+        newNumber: newIndex + 1,
+      });
+      oldIndex += 1;
+      newIndex += 1;
+      continue;
+    }
+
+    if (oldIndex >= before.length) {
+      operations.push({
+        kind: 'added',
+        text: after[newIndex],
+        newNumber: newIndex + 1,
+      });
+      newIndex += 1;
+      continue;
+    }
+
+    if (newIndex >= after.length) {
+      operations.push({
+        kind: 'removed',
+        text: before[oldIndex],
+        oldNumber: oldIndex + 1,
+      });
+      oldIndex += 1;
+      continue;
+    }
+
+    const nextNewMatch = findWithin(after, before[oldIndex], newIndex + 1);
+    const nextOldMatch = findWithin(before, after[newIndex], oldIndex + 1);
+    const addedDistance = nextNewMatch === undefined ? Infinity : nextNewMatch - newIndex;
+    const removedDistance = nextOldMatch === undefined ? Infinity : nextOldMatch - oldIndex;
+
+    if (addedDistance < removedDistance) {
+      operations.push({
+        kind: 'added',
+        text: after[newIndex],
+        newNumber: newIndex + 1,
+      });
+      newIndex += 1;
+      continue;
+    }
+
+    if (removedDistance < addedDistance) {
+      operations.push({
+        kind: 'removed',
+        text: before[oldIndex],
+        oldNumber: oldIndex + 1,
+      });
+      oldIndex += 1;
+      continue;
+    }
+
+    operations.push(
+      {
+        kind: 'removed',
+        text: before[oldIndex],
+        oldNumber: oldIndex + 1,
+      },
+      {
+        kind: 'added',
+        text: after[newIndex],
+        newNumber: newIndex + 1,
+      },
+    );
+    oldIndex += 1;
+    newIndex += 1;
+  }
+
+  return operations;
+}
+
+function changeClusters(operations: DiffLine[]): ChangeCluster[] {
+  const clusters: ChangeCluster[] = [];
+  let start: number | undefined;
+
+  operations.forEach((line, index) => {
+    if (line.kind !== 'context') {
+      start ??= index;
+      return;
+    }
+    if (start !== undefined) {
+      clusters.push({ start, end: index });
+      start = undefined;
+    }
+  });
+
+  if (start !== undefined) clusters.push({ start, end: operations.length });
+  return clusters;
+}
+
+function boundedCluster(lines: DiffLine[], limit: number): DiffLine[] {
+  if (lines.length <= limit) return lines;
+  const firstCount = Math.ceil(limit / 2);
+  const lastCount = Math.floor(limit / 2);
   const omitted = lines.length - firstCount - lastCount;
   return [
     ...lines.slice(0, firstCount),
-    { kind: 'omitted', text: `… ${omitted} changed lines omitted from preview` },
+    { kind: 'omitted', text: `… ${omitted} changed lines omitted from this hunk` },
     ...lines.slice(-lastCount),
   ];
 }
 
+function hunkRanges(
+  operations: DiffLine[],
+  clusters: ChangeCluster[],
+  context: number,
+): Array<ChangeCluster> {
+  return clusters.map((cluster, index) => {
+    let start = cluster.start;
+    let end = cluster.end;
+
+    if (index === 0) {
+      start = Math.max(0, cluster.start - context);
+    } else {
+      const previous = clusters[index - 1];
+      const gap = cluster.start - previous.end;
+      start = cluster.start - Math.min(context, Math.floor(gap / 2));
+    }
+
+    if (index === clusters.length - 1) {
+      end = Math.min(operations.length, cluster.end + context);
+    } else {
+      const next = clusters[index + 1];
+      const gap = next.start - cluster.end;
+      end = cluster.end + Math.min(context, Math.ceil(gap / 2));
+    }
+
+    return { start, end };
+  });
+}
+
 /**
- * Builds a bounded unified hunk around the changed region. This intentionally
- * avoids a full O(n×m) LCS matrix: a transcript diff snapshot already carries
- * both sides, so preserving common prefix/suffix context is sufficient for a
- * readable, safe preview and always retains the changed lines.
+ * Builds a bounded multi-hunk preview without an O(n×m) LCS matrix. A small
+ * resynchronization window handles insertions and deletions, while each sparse
+ * changed region receives its own context so a distant middle edit cannot be
+ * hidden by a global prefix/suffix truncation.
  */
 export function buildHunkPreview(
   oldText: string,
   newText: string,
   context = DEFAULT_CONTEXT_LINES,
 ): DiffLine[] {
-  const before = splitLines(oldText);
-  const after = splitLines(newText);
-  let prefix = 0;
-  const sharedLimit = Math.min(before.length, after.length);
-  while (prefix < sharedLimit && before[prefix] === after[prefix]) prefix += 1;
+  if (oldText === newText) return [];
 
-  let suffix = 0;
-  while (
-    suffix < before.length - prefix &&
-    suffix < after.length - prefix &&
-    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
-  ) {
-    suffix += 1;
-  }
+  const operations = buildLineOperations(splitLines(oldText), splitLines(newText));
+  const clusters = changeClusters(operations);
+  if (!clusters.length) return [];
 
-  if (prefix === before.length && prefix === after.length) {
-    return pairedContext(before, after, 0, 0, before.length);
-  }
+  const ranges = hunkRanges(operations, clusters, context);
+  const changedLinesPerHunk = Math.max(
+    2,
+    Math.floor(MAX_CHANGED_LINES / clusters.length),
+  );
+  const preview: DiffLine[] = [];
+  let renderedUntil = 0;
 
-  const oldChangedEnd = before.length - suffix;
-  const newChangedEnd = after.length - suffix;
-  const leadingStart = Math.max(0, prefix - context);
-  const leadingCount = prefix - leadingStart;
-  const trailingCount = Math.min(context, suffix);
-  const lines: DiffLine[] = [];
+  clusters.forEach((cluster, index) => {
+    const range = ranges[index];
+    if (range.start > renderedUntil) {
+      preview.push({
+        kind: 'omitted',
+        text: `… ${range.start - renderedUntil} unchanged lines omitted`,
+      });
+    }
 
-  if (leadingStart > 0) {
-    lines.push({ kind: 'omitted', text: `… ${leadingStart} unchanged lines omitted` });
-  }
-  lines.push(...pairedContext(before, after, leadingStart, leadingStart, leadingCount));
-
-  const changed = [
-    ...before.slice(prefix, oldChangedEnd).map((text, index) => ({
-      kind: 'removed' as const,
-      text,
-      oldNumber: prefix + index + 1,
-    })),
-    ...after.slice(prefix, newChangedEnd).map((text, index) => ({
-      kind: 'added' as const,
-      text,
-      newNumber: prefix + index + 1,
-    })),
-  ];
-  lines.push(...boundedChanges(changed));
-
-  if (trailingCount) {
-    lines.push(
-      ...pairedContext(
-        before,
-        after,
-        oldChangedEnd,
-        newChangedEnd,
-        trailingCount,
+    preview.push(...operations.slice(range.start, cluster.start));
+    preview.push(
+      ...boundedCluster(
+        operations.slice(cluster.start, cluster.end),
+        changedLinesPerHunk,
       ),
     );
-  }
-  if (suffix > trailingCount) {
-    lines.push({
+    preview.push(...operations.slice(cluster.end, range.end));
+    renderedUntil = range.end;
+  });
+
+  if (renderedUntil < operations.length) {
+    preview.push({
       kind: 'omitted',
-      text: `… ${suffix - trailingCount} unchanged lines omitted`,
+      text: `… ${operations.length - renderedUntil} unchanged lines omitted`,
     });
   }
-  return lines;
+
+  return preview;
 }
 
 export function FileDiff({ diff }: { diff: FileDiffPayload }) {

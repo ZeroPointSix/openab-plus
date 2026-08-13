@@ -41,4 +41,37 @@ describe('bounded file diff preview', () => {
       expect.objectContaining({ kind: 'omitted', text: expect.stringContaining('changed lines omitted') }),
     );
   });
+
+  it('keeps every sparse changed region visible in a large file', () => {
+    const before = Array.from({ length: 1000 }, (_, index) => `line ${index + 1}`);
+    const after = [...before];
+    after[99] = 'line 100 changed';
+    after[499] = 'line 500 changed';
+    after[899] = 'line 900 changed';
+
+    const preview = buildHunkPreview(before.join('\n'), after.join('\n'));
+
+    for (const line of [100, 500, 900]) {
+      expect(preview).toContainEqual(
+        expect.objectContaining({
+          kind: 'removed',
+          oldNumber: line,
+          text: `line ${line}`,
+        }),
+      );
+      expect(preview).toContainEqual(
+        expect.objectContaining({
+          kind: 'added',
+          newNumber: line,
+          text: `line ${line} changed`,
+        }),
+      );
+    }
+  });
+
+  it('does not render an unbounded preview for an unchanged snapshot', () => {
+    const content = Array.from({ length: 10_000 }, (_, index) => `line ${index + 1}`).join('\n');
+
+    expect(buildHunkPreview(content, content)).toEqual([]);
+  });
 });

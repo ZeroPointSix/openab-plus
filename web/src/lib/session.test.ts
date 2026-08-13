@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
+  matchesSessionKeyword,
   mergeTimelineItem,
   parseSessionEventPayload,
   sessionMetrics,
@@ -40,6 +41,14 @@ describe('session helpers', () => {
     expect(
       filterSessions(sessions, { platform: 'slack', profile: 'primary' }),
     ).toHaveLength(1);
+  });
+
+  it('matches keywords across session identity and model metadata', () => {
+    const modeled = { ...sessions[0], model: 'claude-opus-5' };
+
+    expect(matchesSessionKeyword(modeled, 'opus')).toBe(true);
+    expect(matchesSessionKeyword(modeled, '/workspace/alpha')).toBe(true);
+    expect(matchesSessionKeyword(modeled, 'discord')).toBe(false);
   });
 
   it('derives completed state display, filters, and metrics from one mapping', () => {

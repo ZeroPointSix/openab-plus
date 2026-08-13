@@ -2283,12 +2283,16 @@ select {
 }
 
 .workbench-activity-stage .activity-feed-items {
+  display: flex;
   min-height: 0;
   flex: 1 1 auto;
+  flex-direction: column;
 }
 
 .workbench-activity-stage .activity-feed-virtual-list {
-  height: 100% !important;
+  min-height: 0;
+  flex: 1 1 auto;
+  height: auto !important;
 }
 
 /* 紧凑侧栏与 Inspector：长运行标识保持可扫读，不挤压中栏。 */

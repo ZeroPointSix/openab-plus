@@ -4,7 +4,7 @@ import {
   ProfileOutlined,
 } from '@ant-design/icons';
 import { Alert, Descriptions, Empty, Space, Tabs, Typography } from 'antd';
-import { formatDateTime } from '../../lib/format';
+import { agentDisplayName, formatDateTime } from '../../lib/format';
 import { SessionSnapshot, SessionTimelineItem } from '../../types';
 import { StatusTag } from '../StatusTag';
 import { SessionEventTimeline } from './SessionEventTimeline';
@@ -87,7 +87,7 @@ export function SessionInspector({
           </div>
           <Descriptions column={1} size="small" colon={false}>
             <Descriptions.Item label="Agent">
-              {session.agent || '-'}
+              {agentDisplayName(session.agent)}
             </Descriptions.Item>
             <Descriptions.Item label="平台">
               {session.source.platform || '-'}
