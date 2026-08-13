@@ -13,6 +13,7 @@ import {
   message,
 } from 'antd';
 import { ApiError, adminApi } from '../lib/api';
+import { agentLaunchDefinition } from '../lib/agentLaunch';
 import {
   normalizeProfilePayload,
   ProfileFormValues,
@@ -108,25 +109,37 @@ export function NewAgentWizard({
 
   useEffect(() => {
     if (!open) return;
+    const initialAgentType = agentTypes[0] || 'codex';
+    const launch = agentLaunchDefinition(initialAgentType);
     setStep(0);
     form.resetFields();
     form.setFieldsValue({
       id: '',
       name: '',
-      agent_type: agentTypes[0] || 'codex',
+      agent_type: initialAgentType,
+      command: launch?.command,
+      args: launch?.args || [],
       enabled: true,
       workdir_strategy: 'system_default',
       recovery_strategy: 'resume_session',
-      args: [],
       inherit_env: [],
       config_options: {},
       env_ref_entries: [],
     });
   }, [agentTypes, form, open]);
 
+  const applyAgentLaunch = (nextAgentType: string) => {
+    const launch = agentLaunchDefinition(nextAgentType);
+    form.setFieldsValue({
+      agent_type: nextAgentType,
+      command: launch?.command,
+      args: launch?.args || [],
+    });
+  };
+
   const next = async () => {
     const fields = [
-      ['id', 'name', 'agent_type'],
+      ['id', 'name', 'agent_type', 'command'],
       ['default_model'],
       ['reasoning_effort', 'config_options'],
       ['workdir_strategy', 'working_dir'],
@@ -137,7 +150,8 @@ export function NewAgentWizard({
   };
 
   const dynamicFields = (schemaQuery.data?.fields || []).filter(
-    (field) => !['model', 'reasoning_effort'].includes(field.id),
+    (field) =>
+      field.dynamic && !['model', 'reasoning_effort'].includes(field.id),
   );
 
   const content = [
@@ -173,8 +187,37 @@ export function NewAgentWizard({
         <Select
           showSearch
           options={agentTypes.map((value) => ({ label: value, value }))}
+          onChange={applyAgentLaunch}
         />
       </Form.Item>
+      <Form.Item
+        name="command"
+        label="ACP 启动命令"
+        rules={[{ required: true, message: '请选择上游后确认启动命令' }]}
+        extra="已按镜像中的官方 ACP adapter 预填。未知上游必须明确填写可执行的 ACP 命令。"
+      >
+        <Input autoComplete="off" placeholder="例如 claude-agent-acp" />
+      </Form.Item>
+      <Form.List name="args">
+        {(fields, { add, remove }) => (
+          <Space direction="vertical" size={4} className="agent-wizard-command-args">
+            <Typography.Text type="secondary">启动参数</Typography.Text>
+            {fields.map((field) => (
+              <Space key={field.key} align="start">
+                <Form.Item name={field.name} rules={[{ required: true, message: '参数不能为空' }]}>
+                  <Input autoComplete="off" placeholder="例如 --acp" />
+                </Form.Item>
+                <Button type="link" danger onClick={() => remove(field.name)}>
+                  删除
+                </Button>
+              </Space>
+            ))}
+            <Button onClick={() => add()} block>
+              添加启动参数
+            </Button>
+          </Space>
+        )}
+      </Form.List>
     </Space>,
     <Space key="model" direction="vertical" size={8} className="agent-wizard-step">
       <Typography.Paragraph type="secondary">
