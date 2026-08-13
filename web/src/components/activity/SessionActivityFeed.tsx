@@ -7,6 +7,7 @@ import {
   UserOutlined,
 } from '@ant-design/icons';
 import { Alert, Card, Collapse, Empty, List, Tag, Typography } from 'antd';
+import { Virtuoso } from 'react-virtuoso';
 import type { ActivityEntry } from '../../types';
 import { AcpToolCallCard } from './AcpToolCallCard';
 import { TerminalOutput } from './TerminalOutput';
@@ -39,6 +40,75 @@ function ActorMessage({
   );
 }
 
+function ActivityFeedItem({ entry }: { entry: ActivityEntry }) {
+  switch (entry.type) {
+    case 'turn':
+      return (
+        <div className="activity-turn-divider">
+          <span>{entry.label}</span>
+        </div>
+      );
+    case 'user':
+    case 'assistant':
+      return <ActorMessage actor={entry.type} text={entry.text} />;
+    case 'thinking':
+      return (
+        <Collapse
+          className="activity-thinking"
+          items={[
+            {
+              key: 'thinking',
+              label: (
+                <span>
+                  <FireOutlined /> 思考过程
+                </span>
+              ),
+              children: <Typography.Paragraph>{entry.text}</Typography.Paragraph>,
+            },
+          ]}
+        />
+      );
+    case 'plan':
+      return (
+        <Card className="activity-plan" size="small">
+          <div className="activity-plan-heading">
+            <ScheduleOutlined />
+            <Typography.Text strong>{entry.title}</Typography.Text>
+          </div>
+          <List
+            size="small"
+            split={false}
+            dataSource={entry.items}
+            renderItem={(item) => (
+              <List.Item>
+                <span className={item.done ? 'activity-plan-done' : undefined}>
+                  <CheckCircleOutlined /> {item.text}
+                </span>
+              </List.Item>
+            )}
+          />
+        </Card>
+      );
+    case 'tool':
+      return <AcpToolCallCard tool={entry.tool} />;
+    case 'terminal':
+      return <TerminalOutput terminal={entry.terminal} />;
+    case 'error':
+      return (
+        <Alert
+          className="activity-error"
+          type="error"
+          showIcon
+          icon={<ExclamationCircleOutlined />}
+          message="活动流错误"
+          description={entry.message}
+        />
+      );
+    default:
+      return null;
+  }
+}
+
 export function SessionActivityFeed({ entries, source }: SessionActivityFeedProps) {
   if (!entries.length) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无活动记录" />;
@@ -50,79 +120,21 @@ export function SessionActivityFeed({ entries, source }: SessionActivityFeedProp
         <Typography.Text type="secondary">
           {source === 'mock' ? '固定 mock transcript · 等待 W3 快照接口接入' : '实时 transcript 快照'}
         </Typography.Text>
-        <Tag color={source === 'mock' ? 'gold' : 'green'}>{source === 'mock' ? 'Mock' : 'Live'}</Tag>
+        <Tag color={source === 'mock' ? 'gold' : 'green'}>
+          {source === 'mock' ? 'Mock' : 'Live'}
+        </Tag>
       </div>
       <div className="activity-feed-items">
-        {entries.map((entry) => {
-          switch (entry.type) {
-            case 'turn':
-              return (
-                <div className="activity-turn-divider" key={entry.id}>
-                  <span>{entry.label}</span>
-                </div>
-              );
-            case 'user':
-            case 'assistant':
-              return <ActorMessage actor={entry.type} text={entry.text} key={entry.id} />;
-            case 'thinking':
-              return (
-                <Collapse
-                  className="activity-thinking"
-                  key={entry.id}
-                  items={[
-                    {
-                      key: 'thinking',
-                      label: (
-                        <span>
-                          <FireOutlined /> 思考过程
-                        </span>
-                      ),
-                      children: <Typography.Paragraph>{entry.text}</Typography.Paragraph>,
-                    },
-                  ]}
-                />
-              );
-            case 'plan':
-              return (
-                <Card className="activity-plan" key={entry.id} size="small">
-                  <div className="activity-plan-heading">
-                    <ScheduleOutlined />
-                    <Typography.Text strong>{entry.title}</Typography.Text>
-                  </div>
-                  <List
-                    size="small"
-                    split={false}
-                    dataSource={entry.items}
-                    renderItem={(item) => (
-                      <List.Item>
-                        <span className={item.done ? 'activity-plan-done' : undefined}>
-                          <CheckCircleOutlined /> {item.text}
-                        </span>
-                      </List.Item>
-                    )}
-                  />
-                </Card>
-              );
-            case 'tool':
-              return <AcpToolCallCard key={entry.id} tool={entry.tool} />;
-            case 'terminal':
-              return <TerminalOutput key={entry.id} terminal={entry.terminal} />;
-            case 'error':
-              return (
-                <Alert
-                  className="activity-error"
-                  key={entry.id}
-                  type="error"
-                  showIcon
-                  icon={<ExclamationCircleOutlined />}
-                  message="活动流错误"
-                  description={entry.message}
-                />
-              );
-            default:
-              return null;
-          }
-        })}
+        <Virtuoso
+          className="activity-feed-virtual-list"
+          data={entries}
+          computeItemKey={(_, entry) => entry.id}
+          itemContent={(_, entry) => (
+            <div className="activity-feed-row">
+              <ActivityFeedItem entry={entry} />
+            </div>
+          )}
+        />
       </div>
     </section>
   );

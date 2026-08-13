@@ -1,10 +1,7 @@
-import { useEffect } from 'react';
 import {
   ArrowLeftOutlined,
   BranchesOutlined,
-  ClockCircleOutlined,
   CopyOutlined,
-  ExclamationCircleFilled,
   LinkOutlined,
   ProfileOutlined,
 } from '@ant-design/icons';
@@ -16,47 +13,33 @@ import {
   Empty,
   Space,
   Spin,
-  Timeline,
   Typography,
   message,
 } from 'antd';
-import {
-  useQuery,
-  useQueryClient,
-} from '@tanstack/react-query';
+import { useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { adminApi } from '../lib/api';
-import { eventLabel, formatDateTime, sourcePlatformLabel } from '../lib/format';
-import { initialTimeline, visibleTimelineItems } from '../lib/session';
-import { SessionTimelineItem } from '../types';
+import { formatDateTime, sourcePlatformLabel } from '../lib/format';
 import { StatusTag } from '../components/StatusTag';
+import { SessionActivityFeed } from '../components/activity/SessionActivityFeed';
+import { useSessionTranscript } from '../hooks/useSessionTranscript';
+import { activityEntriesFromTranscript } from '../lib/transcript';
 
 export function SessionDetailPage() {
   const params = useParams<{ id: string }>();
   const sessionId = params.id || '';
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
+  const transcript = useSessionTranscript(sessionId);
+  const activityEntries = useMemo(
+    () => activityEntriesFromTranscript(transcript.entries),
+    [transcript.entries],
+  );
   const sessionQuery = useQuery({
     queryKey: ['session', sessionId],
     queryFn: () => adminApi.session(sessionId),
     enabled: Boolean(sessionId),
   });
-  const timelineQuery = useQuery<SessionTimelineItem[]>({
-    queryKey: ['sessionTimeline', sessionId],
-    queryFn: async () => [],
-    enabled: false,
-    initialData: [],
-  });
-
-  useEffect(() => {
-    if (!sessionQuery.data) return;
-    queryClient.setQueryData<SessionTimelineItem[]>(
-      ['sessionTimeline', sessionId],
-      (current = []) =>
-        current.length ? current : initialTimeline(sessionQuery.data),
-    );
-  }, [queryClient, sessionId, sessionQuery.data]);
-
   if (sessionQuery.isLoading) {
     return (
       <div className="page-loading">
@@ -76,7 +59,6 @@ export function SessionDetailPage() {
   }
 
   const session = sessionQuery.data;
-  const timeline = visibleTimelineItems(timelineQuery.data || []);
   const metadataSourceLabel =
     session.metadata_source === 'acp'
       ? 'ACP 运行时'
@@ -140,59 +122,51 @@ export function SessionDetailPage() {
           className="detail-alert"
         />
       ) : null}
+      {transcript.recovery ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="活动流需要恢复"
+          description={
+            <Space direction="vertical" size={8}>
+              <span>{transcript.recovery.message}</span>
+              {transcript.recovery.oldestSequence !== undefined ? (
+                <Typography.Text type="secondary">
+                  可恢复记录起点：{transcript.recovery.oldestSequence}
+                  {transcript.recovery.nextSequence !== undefined
+                    ? `；服务端下一序号：${transcript.recovery.nextSequence}`
+                    : ''}
+                </Typography.Text>
+              ) : null}
+              <Button type="primary" size="small" onClick={transcript.reload}>
+                重新拉取 transcript 快照
+              </Button>
+            </Space>
+          }
+          className="detail-alert"
+        />
+      ) : null}
       <div className="session-detail-grid">
-        <section className="detail-panel timeline-panel">
+        <section className="detail-panel activity-panel">
           <div className="panel-heading">
             <div className="panel-heading-title">
               <span className="panel-icon blue" aria-hidden="true">
                 <BranchesOutlined />
               </span>
               <div>
-                <Typography.Title level={4}>事件时间线</Typography.Title>
+                <Typography.Title level={4}>Agent 活动流</Typography.Title>
                 <Typography.Text type="secondary">
-                  实时状态事件，最多保留当前会话最近 60 条
+                  连续展示回复、思考、计划、工具调用、终端输出和文件编辑差异
+                  {transcript.latencyMs !== undefined
+                    ? ` · SSE 端到端延迟 ${transcript.latencyMs}ms${
+                        transcript.latencyMs > 2_000 ? '（超过 2s 观测目标）' : ''
+                      }`
+                    : ''}
                 </Typography.Text>
               </div>
             </div>
           </div>
-          {timeline.length ? (
-            <Timeline
-              items={[...timeline].reverse().map((item) => ({
-                color:
-                  item.status === 'error'
-                    ? 'red'
-                    : item.status === 'running'
-                      ? 'green'
-                      : 'blue',
-                dot:
-                  item.status === 'error' ? (
-                    <ExclamationCircleFilled />
-                  ) : (
-                    <ClockCircleOutlined />
-                  ),
-                children: (
-                  <div className="timeline-entry">
-                    <div className="timeline-title">
-                      <Typography.Text strong>
-                        {eventLabel(item.event)}
-                      </Typography.Text>
-                      <StatusTag status={item.status} />
-                    </div>
-                    <Typography.Text type="secondary">
-                      {formatDateTime(item.at)}
-                    </Typography.Text>
-                    {item.error ? (
-                      <Typography.Paragraph type="danger">
-                        {item.error}
-                      </Typography.Paragraph>
-                    ) : null}
-                  </div>
-                ),
-              }))}
-            />
-          ) : (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无事件" />
-          )}
+          <SessionActivityFeed entries={activityEntries} source="live" />
         </section>
 
         <aside className="detail-panel metadata-panel">
