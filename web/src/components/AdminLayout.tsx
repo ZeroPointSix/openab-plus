@@ -42,6 +42,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
   const navigate = useNavigate();
   const streamStatus = useSessionStream(true);
   const [collapsed, setCollapsed] = useState(readCollapsedPreference);
+  const isSessionWorkbench = location.pathname.startsWith('/sessions');
 
   useEffect(() => {
     try {
@@ -90,14 +91,15 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
     <ProLayout
       title="OpenAB Plus"
       logo={<img className="layout-logo" src={openabLogo} alt="" />}
-      layout="mix"
+      layout={isSessionWorkbench ? 'top' : 'mix'}
       navTheme="light"
       fixedHeader
-      fixSiderbar
+      fixSiderbar={!isSessionWorkbench}
       breakpoint="lg"
-      siderWidth={236}
-      collapsed={collapsed}
+      siderWidth={isSessionWorkbench ? 0 : 236}
+      collapsed={isSessionWorkbench || collapsed}
       onCollapse={setCollapsed}
+      menuRender={isSessionWorkbench ? false : undefined}
       route={route}
       location={{ pathname: location.pathname }}
       headerTitleRender={(logo, _title, props) => (
