@@ -851,7 +851,6 @@ impl McpRuntimeManager {
                 options.timeout = Some(timeout);
                 let request =
                     rmcp::model::ClientRequest::PingRequest(rmcp::model::PingRequest::default());
-                let failure_epoch = manager.breaker.failure_epoch(&name);
                 let outcome = match client.send_request_with_option(request, options).await {
                     Ok(handle) => handle.await_response().await,
                     Err(e) => Err(e),
@@ -861,9 +860,6 @@ impl McpRuntimeManager {
                         manager.breaker.record_success(&name);
                     }
                     Ok(other) => {
-                        // Any wire-level response proves the transport is
-                        // alive, even when its result variant is unexpected.
-                        manager.breaker.record_success(&name);
                         tracing::warn!(
                             target: "mcp.ping",
                             server = %name,
@@ -883,9 +879,7 @@ impl McpRuntimeManager {
                         // pings here would clobber the in-flight probe flag and
                         // re-arm the cooldown (C4 / #969 F1).
                         if !manager.breaker.is_tripped(&name) {
-                            manager
-                                .breaker
-                                .record_failure_if_current(&name, failure_epoch);
+                            manager.breaker.record_failure(&name);
                         }
                         // Once the breaker is open the transport is presumed
                         // dead. Tear the stale client down so connect()'s
@@ -1359,11 +1353,6 @@ impl McpRuntimeManager {
     /// `NeedsAuth` and returns an error pointing the caller at the login
     /// subcommand rather than attempting an unauthenticated dial.
     pub async fn connect(&self, name: &str) -> Result<()> {
-        // Capture before waiting on the per-server connect lock. Concurrent
-        // callers therefore share one failure epoch: if the serialized dial
-        // fails for all of them, the breaker counts that parallel wave once.
-        // A later retry enters after the epoch advances and counts normally.
-        let failure_epoch = self.breaker.failure_epoch(name);
         // Serialize connects per server (#969 A2/C3): hold the named server's
         // lock across the whole dial so two concurrent callers can't both dial
         // + spawn a duplicate child / ping loop. The second waiter proceeds
@@ -1533,7 +1522,7 @@ impl McpRuntimeManager {
                     super::redact_secrets(&format!("{e:#}"))
                 );
                 handle.status = ServerStatus::Failed(super::concise_error_message(&e));
-                self.breaker.record_failure_if_current(name, failure_epoch);
+                self.breaker.record_failure(name);
                 Err(anyhow!(super::concise_error_message(&e)))
             }
         }
@@ -1553,27 +1542,18 @@ impl McpRuntimeManager {
             .clone()
     }
 
-    /// Capture the failure epoch for a transport request immediately before
-    /// it is sent. Requests issued in parallel from the same healthy state
-    /// share an epoch, so their duplicate failure callbacks count once.
-    pub fn failure_epoch(&self, name: &str) -> u64 {
-        self.breaker.failure_epoch(name)
-    }
-
-    /// Record a transport outcome on the breaker. Called from `meta_tool`
-    /// after a wire request returns. `failure_epoch` must be the value captured
-    /// immediately before that request was sent.
+    /// Record a tool-call outcome on the breaker. Called from
+    /// `meta_tool::call_tool` after `peer.call_tool().await` returns.
     /// Wire-level `Ok` resets the counter regardless of `CallToolResult.is_error`
     /// (the `isError` bit is protocol-normal payload, not a transport fault).
     /// Wire-level `Err` is a transport-level failure and increments the
     /// counter — matching the single-counter / transport-only model from
     /// the #966 design decisions.
-    pub fn record_tool_call_outcome(&self, name: &str, failure_epoch: u64, ok: bool) -> bool {
+    pub fn record_tool_call_outcome(&self, name: &str, ok: bool) {
         if ok {
             self.breaker.record_success(name);
-            true
         } else {
-            self.breaker.record_failure_if_current(name, failure_epoch)
+            self.breaker.record_failure(name);
         }
     }
 
@@ -2154,18 +2134,6 @@ mod tests {
         assert!(mgr.is_empty().await);
         assert!(mgr.statuses().await.is_empty());
         assert!(mgr.catalog().is_empty());
-    }
-
-    #[test]
-    fn stale_tool_failure_is_not_actionable_after_success() {
-        let mgr = McpRuntimeManager::from_config(McpConfig::default());
-        let stale_epoch = mgr.failure_epoch("foo");
-
-        assert!(mgr.record_tool_call_outcome("foo", stale_epoch, true));
-        assert!(
-            !mgr.record_tool_call_outcome("foo", stale_epoch, false),
-            "a late failure from an older epoch must not trigger transport teardown"
-        );
     }
 
     #[test]

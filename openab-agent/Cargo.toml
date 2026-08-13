@@ -1,6 +1,6 @@
 [package]
 name = "openab-agent"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Native Rust coding agent with built-in ACP support"
