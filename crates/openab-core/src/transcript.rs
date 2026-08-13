@@ -377,13 +377,17 @@ impl SessionTranscriptStore {
 
     pub fn finish_assistant_turn(&self, session_id: &str) -> Option<TranscriptEvent> {
         self.try_mutate(session_id, |session| {
-            let sequence = session.allocate_sequence();
-            let now = Utc::now();
-            let entry = session.entries.back_mut().filter(|entry| {
+            // Thinking or plan entries may arrive after the final text chunk. Find
+            // the latest active assistant text entry rather than assuming it is at
+            // the back of the display queue.
+            let entry_index = session.entries.iter().rposition(|entry| {
                 entry.role == TranscriptRole::Assistant
                     && entry.status.as_deref() == Some("streaming")
                     && entry.tool_call_id.is_none()
             })?;
+            let sequence = session.allocate_sequence();
+            let now = Utc::now();
+            let entry = session.entries.get_mut(entry_index)?;
             entry.sequence = sequence;
             entry.timestamp = now;
             entry.status = Some("completed".to_string());
@@ -556,6 +560,21 @@ mod tests {
             "clean"
         );
         assert_eq!(entry.tool_result.as_ref().unwrap()["diff"]["after"], "new");
+    }
+
+    #[test]
+    fn finishes_streaming_text_when_thinking_arrives_after_it() {
+        let store = store(8);
+        store.append_assistant_text("session", "answer");
+        store.append_thinking("session", "checking");
+
+        let finished = store.finish_assistant_turn("session").unwrap();
+
+        assert_eq!(finished.entry.content.as_deref(), Some("answer"));
+        assert_eq!(finished.entry.status.as_deref(), Some("completed"));
+        let snapshot = store.snapshot("session", None);
+        assert_eq!(snapshot.entries[0].status.as_deref(), Some("completed"));
+        assert_eq!(snapshot.entries[1].status.as_deref(), Some("thinking"));
     }
 
     #[test]
