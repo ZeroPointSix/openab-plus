@@ -100,7 +100,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       collapsed={isSessionWorkbench || collapsed}
       onCollapse={setCollapsed}
       menuRender={isSessionWorkbench ? false : undefined}
-      route={route}
+      route={isSessionWorkbench ? { path: '/', routes: [] } : route}
       location={{ pathname: location.pathname }}
       headerTitleRender={(logo, _title, props) => (
         <button
