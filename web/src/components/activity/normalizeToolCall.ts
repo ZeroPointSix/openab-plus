@@ -123,12 +123,25 @@ function diffFromContent(content: unknown): FileDiffPayload | undefined {
   if (!record) return undefined;
   if (
     typeof record.path === 'string' &&
-    (typeof record.old_text === 'string' || typeof record.new_text === 'string')
+    (typeof record.old_text === 'string' ||
+      typeof record.new_text === 'string' ||
+      typeof record.before === 'string' ||
+      typeof record.after === 'string')
   ) {
     return {
       path: record.path,
-      old_text: typeof record.old_text === 'string' ? record.old_text : '',
-      new_text: typeof record.new_text === 'string' ? record.new_text : '',
+      old_text:
+        typeof record.old_text === 'string'
+          ? record.old_text
+          : typeof record.before === 'string'
+            ? record.before
+            : '',
+      new_text:
+        typeof record.new_text === 'string'
+          ? record.new_text
+          : typeof record.after === 'string'
+            ? record.after
+            : '',
     };
   }
   return undefined;
@@ -136,12 +149,14 @@ function diffFromContent(content: unknown): FileDiffPayload | undefined {
 
 function diffsFromContent(content: unknown): FileDiffPayload[] {
   if (Array.isArray(content)) {
-    return content
-      .map((item) => diffFromContent(item))
-      .filter((diff): diff is FileDiffPayload => diff !== undefined);
+    return content.flatMap((item) => diffsFromContent(item));
   }
-  const diff = diffFromContent(content);
-  return diff ? [diff] : [];
+  const record = asRecord(content);
+  if (!record) return [];
+  const direct = diffFromContent(record);
+  const nested = diffsFromContent(record.diff);
+  const nestedMany = diffsFromContent(record.diffs);
+  return [...(direct ? [direct] : []), ...nested, ...nestedMany];
 }
 
 function terminalFromContent(content: unknown): TerminalOutputPayload | undefined {

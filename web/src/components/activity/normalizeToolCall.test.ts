@@ -78,6 +78,28 @@ describe('activity tool-call normalization', () => {
 
 
 describe('ACP file diff normalization', () => {
+  it('normalizes an accumulated ACP output.diff using before/after fields', () => {
+    const tool = normalizeToolCall({
+      call_id: 'acp-diff-accumulated',
+      title: '编辑文件',
+      kind: 'edit',
+      status: 'completed',
+      rawInput: { path: 'src/lib.rs' },
+      output: {
+        status: 'completed',
+        diff: {
+          path: 'src/lib.rs',
+          before: 'old',
+          after: 'new',
+        },
+      },
+    });
+
+    expect(tool?.diffs).toEqual([
+      { path: 'src/lib.rs', old_text: 'old', new_text: 'new' },
+    ]);
+  });
+
   it('preserves every diff item reported through update.content', () => {
     const tool = normalizeAcpToolCall({
       content: {
