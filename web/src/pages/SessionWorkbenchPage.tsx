@@ -226,15 +226,29 @@ export function SessionWorkbenchPage() {
               : undefined
           }
           hasSelection={Boolean(sessionId)}
-          onOpenSidebar={
+          onToggleSidebar={
             compact
               ? () => setSidebarOpen(true)
               : () => setSidebarCollapsed((current) => !current)
           }
-          onOpenInspector={
+          onToggleInspector={
             compact
               ? () => setInspectorOpen(true)
               : () => setInspectorCollapsed((current) => !current)
+          }
+          sidebarToggleLabel={
+            compact
+              ? '打开会话列表'
+              : sidebarCollapsed
+                ? '展开会话列表'
+                : '折叠会话列表'
+          }
+          inspectorToggleLabel={
+            compact
+              ? '打开会话详情'
+              : inspectorCollapsed
+                ? '展开会话详情'
+                : '折叠会话详情'
           }
         />
         {compact ? (

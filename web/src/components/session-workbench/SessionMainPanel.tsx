@@ -30,8 +30,15 @@ interface SessionMainPanelProps {
   loading?: boolean;
   loadError?: string;
   hasSelection: boolean;
-  onOpenSidebar?: () => void;
-  onOpenInspector?: () => void;
+  /**
+   * Desktop collapse/expand or mobile open. The page owns the real action and
+   * must pass matching labels so screen readers do not hear “打开” when the
+   * button will fold an already-visible panel.
+   */
+  onToggleSidebar?: () => void;
+  onToggleInspector?: () => void;
+  sidebarToggleLabel?: string;
+  inspectorToggleLabel?: string;
 }
 
 export function SessionMainPanel({
@@ -40,38 +47,40 @@ export function SessionMainPanel({
   loading,
   loadError,
   hasSelection,
-  onOpenSidebar,
-  onOpenInspector,
+  onToggleSidebar,
+  onToggleInspector,
+  sidebarToggleLabel = '打开会话列表',
+  inspectorToggleLabel = '打开会话详情',
 }: SessionMainPanelProps) {
   const activityEntries = useMemo(
     () => activityEntriesFromTranscript(transcript.entries),
     [transcript.entries],
   );
   const showSession = Boolean(hasSelection && session && !loading);
-  const hasToggles = Boolean(onOpenSidebar || onOpenInspector);
+  const hasToggles = Boolean(onToggleSidebar || onToggleInspector);
   const sourcePlatform = sourcePlatformLabel(session?.source?.platform);
   const streamClass =
     transcript.status === 'recovery_needed' ? 'offline' : transcript.status;
 
-  const sidebarToggle = onOpenSidebar ? (
+  const sidebarToggle = onToggleSidebar ? (
     <Button
       type="text"
       size="small"
       className="workbench-status-toggle"
       icon={<UnorderedListOutlined />}
-      aria-label="打开会话列表"
-      onClick={onOpenSidebar}
+      aria-label={sidebarToggleLabel}
+      onClick={onToggleSidebar}
     />
   ) : null;
 
-  const inspectorToggle = onOpenInspector ? (
+  const inspectorToggle = onToggleInspector ? (
     <Button
       type="text"
       size="small"
       className="workbench-status-toggle"
       icon={<ProfileOutlined />}
-      aria-label="打开会话详情"
-      onClick={onOpenInspector}
+      aria-label={inspectorToggleLabel}
+      onClick={onToggleInspector}
     />
   ) : null;
 
