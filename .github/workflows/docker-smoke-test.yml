@@ -78,6 +78,38 @@ jobs:
           docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' openab-test-codex \
             | grep -Fx 'OPENAB_AGENT_COMMAND=codex-acp'
 
+      - name: Verify Codex healthcheck decision matrix
+        if: matrix.variant.suffix == '-codex'
+        run: |
+          set -euo pipefail
+          # Dry-run only: assert probe mode/port without starting openab.
+          # OPENAB_ADMIN_ENABLED=false must stay process mode (not HTTP).
+          out=$(docker run --rm \
+            -e OPENAB_HEALTHCHECK_DRY_RUN=1 \
+            -e OPENAB_ADMIN_ENABLED=false \
+            --entrypoint /usr/local/bin/openab-healthcheck.sh \
+            openab-test-codex)
+          echo "false flag => $out"
+          test "$out" = "mode=process process=openab"
+
+          out=$(docker run --rm \
+            -e OPENAB_HEALTHCHECK_DRY_RUN=1 \
+            -e OPENAB_ADMIN_ENABLED=true \
+            -e GATEWAY_LISTEN=0.0.0.0:8081 \
+            --entrypoint /usr/local/bin/openab-healthcheck.sh \
+            openab-test-codex)
+          echo "custom listen => $out"
+          test "$out" = "mode=http port=8081 url=http://127.0.0.1:8081/health"
+
+          out=$(docker run --rm \
+            -e OPENAB_HEALTHCHECK_DRY_RUN=1 \
+            -e OPENAB_ADMIN_TOKEN=secret \
+            --entrypoint /usr/local/bin/openab-healthcheck.sh \
+            openab-test-codex)
+          echo "token => $out"
+          test "$out" = "mode=http port=8080 url=http://127.0.0.1:8080/health"
+          echo "✅ Codex healthcheck decision matrix ok"
+
       - name: Verify bumped runtime versions
         if: matrix.variant.suffix == '' || matrix.variant.suffix == '-unified' || matrix.variant.suffix == '-copilot' || matrix.variant.suffix == '-devin' || matrix.variant.suffix == '-antigravity'
         shell: bash

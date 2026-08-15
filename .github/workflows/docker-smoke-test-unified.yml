@@ -109,6 +109,28 @@ jobs:
           docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' openab-unified-codex:test \
             | grep -Fx 'OPENAB_AGENT_COMMAND=codex-acp'
 
+      - name: Verify Codex healthcheck decision matrix
+        if: matrix.target.name == 'codex'
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm \
+            -e OPENAB_HEALTHCHECK_DRY_RUN=1 \
+            -e OPENAB_ADMIN_ENABLED=false \
+            --entrypoint /usr/local/bin/openab-healthcheck.sh \
+            openab-unified-codex:test)
+          echo "false flag => $out"
+          test "$out" = "mode=process process=openab"
+
+          out=$(docker run --rm \
+            -e OPENAB_HEALTHCHECK_DRY_RUN=1 \
+            -e OPENAB_ADMIN_ENABLED=true \
+            -e GATEWAY_LISTEN=0.0.0.0:8081 \
+            --entrypoint /usr/local/bin/openab-healthcheck.sh \
+            openab-unified-codex:test)
+          echo "custom listen => $out"
+          test "$out" = "mode=http port=8081 url=http://127.0.0.1:8081/health"
+          echo "✅ Codex healthcheck decision matrix ok"
+
       - name: Verify Codex ACP handshake
         if: matrix.target.name == 'codex'
         run: |

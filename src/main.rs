@@ -1610,13 +1610,25 @@ mod tests {
     fn admin_http_starts_for_explicit_flag_or_configured_token() {
         assert!(!admin_http_enabled_from_values(None, None, None));
         assert!(admin_http_enabled_from_values(Some("true"), None, None));
+        assert!(admin_http_enabled_from_values(Some("TRUE"), None, None));
         assert!(admin_http_enabled_from_values(Some("1"), None, None));
         assert!(admin_http_enabled_from_values(None, Some("token"), None));
         assert!(admin_http_enabled_from_values(None, None, Some("token")));
+        // Explicit false must not enable Admin by itself. Docker HEALTHCHECK
+        // used to treat any non-empty OPENAB_ADMIN_ENABLED as on; keep Rust
+        // and the shell probe aligned on this matrix.
         assert!(!admin_http_enabled_from_values(
             Some("false"),
             Some(""),
             Some("")
+        ));
+        assert!(!admin_http_enabled_from_values(Some("0"), None, None));
+        // A non-empty token still enables Admin even when the flag is false,
+        // matching production "token present => Admin on" behavior.
+        assert!(admin_http_enabled_from_values(
+            Some("false"),
+            Some("token"),
+            None
         ));
     }
 
