@@ -84,7 +84,6 @@ describe('transcript activity adapters', () => {
     });
   });
 
-
   it('coalesces consecutive thinking chunks into one readable block', () => {
     const entries = activityEntriesFromTranscript([
       entry({ entry_id: 't1', status: 'thinking', content: 'Inspecting' }),
@@ -98,23 +97,42 @@ describe('transcript activity adapters', () => {
     expect(entries[1]).toMatchObject({ type: 'user', text: 'go' });
   });
 
-  it('merges live thinking revisions onto the last thinking entry', () => {
-    const first = entry({ entry_id: 'think-a', status: 'thinking', content: 'Hello' });
-    const second = entry({
+  it('keeps distinct thinking ids revisable and only coalesces at render time', () => {
+    const first = entry({
+      entry_id: 'think-a',
+      status: 'thinking',
+      content: 'Hello',
+    });
+    const partial = entry({
       entry_id: 'think-b',
       sequence: 2,
+      status: 'thinking',
+      content: 'wor',
+    });
+    const revised = entry({
+      entry_id: 'think-b',
+      sequence: 3,
       status: 'thinking',
       content: 'world',
     });
 
-    expect(upsertTranscriptEntry([first], second)).toEqual([
-      {
-        ...first,
-        content: 'Hello world',
-        sequence: 2,
-      },
+    const afterPartial = applyTranscriptEntries([], [first, partial]);
+    expect(afterPartial).toEqual([first, partial]);
+    expect(activityEntriesFromTranscript(afterPartial)).toMatchObject([
+      { type: 'thinking', text: 'Hello wor' },
+    ]);
+
+    const afterRevision = upsertTranscriptEntry(afterPartial, revised);
+    expect(afterRevision.map((item) => item.entry_id)).toEqual([
+      'think-a',
+      'think-b',
+    ]);
+    expect(afterRevision[1]).toEqual(revised);
+    expect(activityEntriesFromTranscript(afterRevision)).toMatchObject([
+      { type: 'thinking', text: 'Hello world' },
     ]);
   });
+
   it('accepts transcript SSE events and ignores lifecycle payloads', () => {
     expect(
       parseTranscriptStreamEvent(

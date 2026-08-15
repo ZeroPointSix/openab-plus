@@ -130,8 +130,8 @@ export function activityEntryFromTranscript(
 /**
  * Applies an entry revision in place. Stable `entry_id` values let streaming
  * text and tool lifecycle updates replace their prior visible entry instead of
- * growing one row per chunk. Consecutive thinking chunks with different ids
- * are folded into the last thinking entry so one thought stays one block.
+ * growing one row per chunk. Consecutive thinking fragments stay as separate
+ * revisable rows here and are only joined in the activity-feed view model.
  */
 export function upsertTranscriptEntry(
   entries: TranscriptEntry[],
@@ -146,18 +146,6 @@ export function upsertTranscriptEntry(
 
   if (isBlankThinking(incoming)) {
     return entries;
-  }
-
-  const last = entries[entries.length - 1];
-  if (last && isThinkingEntry(last) && isThinkingEntry(incoming)) {
-    const next = [...entries];
-    next[next.length - 1] = {
-      ...last,
-      content: joinThinkingText(last.content || '', incoming.content || ''),
-      sequence: incoming.sequence,
-      timestamp: incoming.timestamp,
-    };
-    return next;
   }
 
   return [...entries, incoming];

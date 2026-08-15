@@ -52,7 +52,6 @@ describe('activity tool-call normalization', () => {
     });
   });
 
-
   it('maps execute tools to bash when the payload has no name', () => {
     const tool = normalizeToolCall({
       call_id: 'bash-1',
@@ -63,6 +62,21 @@ describe('activity tool-call normalization', () => {
     expect(tool?.name).toBe('bash');
     expect(tool?.description).toBe('ls');
   });
+
+  it.each(['execute', 'exec'] as const)(
+    'maps an explicit %s name to bash', 
+    (name) => {
+      const tool = normalizeToolCall({
+        call_id: `${name}-named`,
+        name,
+        status: 'completed',
+        rawInput: { command: 'ls' },
+      });
+      expect(tool?.name).toBe('bash');
+      expect(tool?.description).toBe('ls');
+    },
+  );
+
   it('normalizes ACP updates and text output', () => {
     const tool = normalizeAcpToolCall({
       content: {

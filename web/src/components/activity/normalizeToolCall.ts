@@ -189,6 +189,15 @@ function outputFromContent(content: unknown): string | undefined {
     .join('\n') || undefined;
 }
 
+function canonicalToolName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed || /^tool call$/i.test(trimmed)) return '';
+  if (trimmed.toLowerCase() === 'execute' || trimmed.toLowerCase() === 'exec') {
+    return 'bash';
+  }
+  return trimmed;
+}
+
 export function normalizeToolCall(message: ToolCallLike): NormalizedToolCall | undefined {
   const rawInput = message.rawInput ?? message.raw_input ?? message.args;
   const contentRecord = asRecord(message.content);
@@ -198,16 +207,13 @@ export function normalizeToolCall(message: ToolCallLike): NormalizedToolCall | u
   const key = message.call_id || message.id;
   if (!key) return undefined;
   const explicitName =
-    typeof message.name === 'string' ? message.name.trim() : '';
-  const kindName = typeof kind === 'string' ? kind.trim() : '';
+    typeof message.name === 'string' ? message.name : '';
+  const kindName = typeof kind === 'string' ? kind : '';
   const titleName =
     typeof message.title === 'string' ? message.title.trim() : '';
   const toolName =
-    (explicitName && !/^tool call$/i.test(explicitName) && explicitName) ||
-    (kindName &&
-    (kindName.toLowerCase() === 'execute' || kindName.toLowerCase() === 'exec'
-      ? 'bash'
-      : kindName)) ||
+    canonicalToolName(explicitName) ||
+    canonicalToolName(kindName) ||
     titleName ||
     'bash';
 
