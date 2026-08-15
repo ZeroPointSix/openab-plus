@@ -15,14 +15,20 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { filterSessions, matchesSessionKeyword, sessionListSubtitle, sessionListTitle } from '../../lib/session';
+import {
+  filterSessions,
+  matchesSessionKeyword,
+  sessionListSubtitle,
+  sessionListTitle,
+  sessionProjectGroup,
+} from '../../lib/session';
 import {
   agentDisplayName,
   formatRelativeTime,
+  sessionStatusDisplay,
   sessionStatusOptions,
 } from '../../lib/format';
 import { AgentProfile, SessionFilters, SessionSnapshot } from '../../types';
-import { StatusTag } from '../StatusTag';
 
 interface SessionSidebarProps {
   sessions: SessionSnapshot[];
@@ -30,6 +36,7 @@ interface SessionSidebarProps {
   loading?: boolean;
   creatingSession?: boolean;
   activeSessionId?: string;
+  activeSessionTitle?: string;
   onSelect: (sessionId: string) => void;
   onReload?: () => void;
   onNewAgent?: () => void;
@@ -41,16 +48,13 @@ const statusOptions = [
   ...sessionStatusOptions.filter((option) => option.value !== 'unknown'),
 ];
 
-function agentGroup(session: SessionSnapshot): string {
-  return agentDisplayName(session.agent);
-}
-
 export function SessionSidebar({
   sessions,
   profiles = [],
   loading,
   creatingSession = false,
   activeSessionId,
+  activeSessionTitle,
   onSelect,
   onReload,
   onNewAgent,
@@ -97,10 +101,12 @@ export function SessionSidebar({
     });
   }, [agentScope, filters, search, sessions]);
 
+  // ZER-715 P0-2: group by project (working directory) instead of agent type,
+  // so the tree reads like a task list rather than a list of runtimes.
   const groupedSessions = useMemo(() => {
     const groups = new Map<string, SessionSnapshot[]>();
     for (const session of filteredSessions) {
-      const key = agentGroup(session);
+      const key = sessionProjectGroup(session);
       const list = groups.get(key) || [];
       list.push(session);
       groups.set(key, list);
@@ -118,7 +124,7 @@ export function SessionSidebar({
         <div>
           <Typography.Text strong>会话历史</Typography.Text>
           <Typography.Text type="secondary" className="workbench-panel-caption">
-            按 Agent 分组 · {filteredSessions.length} 条
+            按项目分组 · {filteredSessions.length} 条
           </Typography.Text>
         </div>
         <Space size={2} wrap>
@@ -205,13 +211,16 @@ export function SessionSidebar({
             <Spin />
           </div>
         ) : groupedSessions.length ? (
-          <nav className="session-tree" aria-label="按 Agent 分组的会话">
+          <nav className="session-tree" aria-label="按项目分组的会话">
             {groupedSessions.map(([group, items]) => (
               <section key={group} className="session-tree-group">
                 <h3 className="session-tree-group-title">{group}</h3>
                 <ul className="session-tree-list">
                   {items.map((session) => {
                     const active = session.session_id === activeSessionId;
+                    const status =
+                      sessionStatusDisplay[session.status] ||
+                      sessionStatusDisplay.unknown;
                     return (
                       <li key={session.session_id}>
                         <button
@@ -222,9 +231,23 @@ export function SessionSidebar({
                           }
                           onClick={() => onSelect(session.session_id)}
                         >
+                          <span
+                            className={
+                              'session-tree-status is-' + session.status
+                            }
+                            title={status.label}
+                            aria-label={status.label}
+                          />
                           <span className="session-tree-copy">
                             <span className="session-tree-title">
-                              {sessionListTitle(session)}
+                              {sessionListTitle(
+                                session,
+                                // Active session may still stream a fresher title
+                                // from its transcript; every other row must use the
+                                // stable list-API title so same-profile sessions
+                                // stay distinguishable without being selected.
+                                active ? activeSessionTitle : session.title,
+                              )}
                             </span>
                             <span className="session-tree-subtitle">
                               {sessionListSubtitle(session)}
@@ -233,7 +256,6 @@ export function SessionSidebar({
                               </span>
                             </span>
                           </span>
-                          <StatusTag status={session.status} />
                         </button>
                       </li>
                     );

@@ -1,6 +1,5 @@
 import { Tag } from 'antd';
 import {
-  CheckCircleFilled,
   CloseCircleFilled,
   LoadingOutlined,
   MinusCircleFilled,
@@ -12,7 +11,7 @@ import { sessionStatusDisplay } from '../lib/format';
 const statusIcons: Record<SessionStatus, React.ReactNode> = {
   starting: <LoadingOutlined spin />,
   idle: <MinusCircleFilled />,
-  running: <CheckCircleFilled />,
+  running: <LoadingOutlined spin />,
   suspended: <PauseCircleFilled />,
   error: <CloseCircleFilled />,
   exited: <MinusCircleFilled />,

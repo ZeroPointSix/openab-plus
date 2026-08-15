@@ -3,8 +3,13 @@ import {
   SessionFilters,
   SessionSnapshot,
   SessionTimelineItem,
+  TranscriptEntry,
 } from '../types';
-import { sessionStatusDisplay } from './format';
+import {
+  agentDisplayName,
+  sessionStatusDisplay,
+  sourcePlatformLabel,
+} from './format';
 
 export function parseSessionEventPayload(
   data: string,
@@ -30,13 +35,69 @@ function sessionTimestamp(session: SessionSnapshot): number {
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
+const SESSION_ID_PREVIEW_LENGTH = 8;
+const SESSION_TITLE_MAX_LENGTH = 48;
 
-export function sessionListTitle(session: SessionSnapshot): string {
-  return session.session_id;
+/** Short, readable form of an otherwise opaque session id. */
+export function shortSessionId(sessionId: string): string {
+  const tail = sessionId.trim().split(':').at(-1) || sessionId.trim();
+  return tail.length > SESSION_ID_PREVIEW_LENGTH
+    ? tail.slice(0, SESSION_ID_PREVIEW_LENGTH)
+    : tail;
+}
+
+/**
+ * Derive a human task title from the first user turn of a transcript.
+ *
+ * ZER-715: the list API exposes this derived value on `SessionSnapshot.title`;
+ * the transcript helper keeps detail-view derivation consistent with that contract.
+ */
+export function titleFromTranscript(
+  entries: TranscriptEntry[],
+): string | undefined {
+  const firstUserTurn = entries.find(
+    (entry) => entry.role === 'user' && entry.content?.trim(),
+  );
+  const firstLine = firstUserTurn?.content
+    ?.split('\n')
+    .map((line) => line.trim())
+    .find(Boolean);
+  if (!firstLine) return undefined;
+  return firstLine.length > SESSION_TITLE_MAX_LENGTH
+    ? firstLine.slice(0, SESSION_TITLE_MAX_LENGTH) + '…'
+    : firstLine;
+}
+
+/** Group sessions by project (working directory) rather than by agent type. */
+export function sessionProjectGroup(session: SessionSnapshot): string {
+  const workdir = session.workdir?.trim();
+  if (!workdir) return '未归类项目';
+  const segments = workdir.split(/[/\\]+/).filter(Boolean);
+  return segments.at(-1) || workdir;
+}
+
+export function sessionListTitle(
+  session: SessionSnapshot,
+  derivedTitle?: string,
+): string {
+  const title = derivedTitle?.trim() || session.title?.trim();
+  if (title) return title;
+  const profileName = session.profile_name?.trim();
+  if (profileName) return profileName;
+  return (
+    agentDisplayName(session.agent) +
+    ' · ' +
+    shortSessionId(session.session_id)
+  );
 }
 
 export function sessionListSubtitle(session: SessionSnapshot): string {
-  return session.source?.thread_id?.trim() || session.session_id;
+  const platform = sourcePlatformLabel(session.source?.platform);
+  const thread = session.source?.thread_id?.trim();
+  return (
+    [platform, thread].filter(Boolean).join(' · ') ||
+    shortSessionId(session.session_id)
+  );
 }
 
 export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
@@ -57,6 +118,7 @@ export function matchesSessionKeyword(
     session.source?.platform,
     session.source?.thread_id,
     session.workdir,
+    session.title,
     session.profile_name,
     session.profile_id,
     session.model,
@@ -117,7 +179,12 @@ export function applySessionEvent(
     (session) => session.session_id === event.snapshot?.session_id,
   );
   if (index === -1) sessions.push(event.snapshot);
-  else sessions[index] = event.snapshot;
+  else {
+    sessions[index] = {
+      ...event.snapshot,
+      title: event.snapshot.title || sessions[index].title,
+    };
+  }
   return sortSessions(sessions);
 }
 
@@ -148,30 +215,4 @@ export function timelineItemFromEvent(
     error: event.snapshot.last_error,
     sequence: event.sequence,
   };
-}
-
-export function initialTimeline(
-  session: SessionSnapshot,
-): SessionTimelineItem[] {
-  const items: SessionTimelineItem[] = [
-    {
-      id: 'initial:created',
-      event: 'session.created',
-      status: 'idle',
-      at: session.created_at,
-    },
-  ];
-  if (
-    session.updated_at !== session.created_at ||
-    session.status !== 'idle'
-  ) {
-    items.push({
-      id: 'initial:current',
-      event: 'current',
-      status: session.status,
-      at: session.updated_at,
-      error: session.last_error,
-    });
-  }
-  return items;
 }

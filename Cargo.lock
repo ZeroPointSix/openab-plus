@@ -2236,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "openab-core"
-version = "0.8.14"
+version = "0.8.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2286,7 +2286,7 @@ dependencies = [
 
 [[package]]
 name = "openab-gateway"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "aes",
  "anyhow",
@@ -3897,7 +3897,6 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
 
 [[package]]
 name = "unicode-width"

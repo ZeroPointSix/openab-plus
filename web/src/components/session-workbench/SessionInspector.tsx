@@ -1,34 +1,19 @@
-import {
-  AlertOutlined,
-  BranchesOutlined,
-  ProfileOutlined,
-} from '@ant-design/icons';
+import { BranchesOutlined, ProfileOutlined } from '@ant-design/icons';
 import { Alert, Descriptions, Empty, Space, Tabs, Typography } from 'antd';
 import { agentDisplayName, formatDateTime } from '../../lib/format';
-import { SessionSnapshot, SessionTimelineItem } from '../../types';
+import { SessionSnapshot, TranscriptEntry } from '../../types';
 import { StatusTag } from '../StatusTag';
 import { SessionEventLog } from './SessionEventLog';
 
 interface SessionInspectorProps {
   session?: SessionSnapshot;
-  timeline: SessionTimelineItem[];
+  entries: TranscriptEntry[];
   hasSelection: boolean;
-}
-
-type AlertItem = {
-  key: string;
-  type: 'error' | 'warning';
-  message: string;
-  description: string;
-};
-
-function isAlertItem(item: AlertItem | null): item is AlertItem {
-  return item !== null;
 }
 
 export function SessionInspector({
   session,
-  timeline,
+  entries,
   hasSelection,
 }: SessionInspectorProps) {
   if (!hasSelection) {
@@ -37,7 +22,7 @@ export function SessionInspector({
         <div className="workbench-inspector-empty">
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="选择会话后查看元数据、告警与执行日志"
+            description="选择会话后查看元数据与执行日志"
           />
         </div>
       </aside>
@@ -54,22 +39,10 @@ export function SessionInspector({
     );
   }
 
-  const alertItems = [
-    session.last_error
-      ? {
-          key: 'last-error',
-          type: 'error' as const,
-          message: '会话异常',
-          description: session.last_error,
-        }
-      : null,
-    ...(session.profile_config_errors || []).map((error) => ({
-      key: error.config_id,
-      type: 'warning' as const,
-      message: 'Profile 配置告警 · ' + error.config_id,
-      description: error.error,
-    })),
-  ].filter(isAlertItem);
+  // ZER-715 P1-4: the standalone 告警 tab duplicated the inline alert already
+  // rendered in the main panel and was empty in practice. Profile config
+  // warnings now live next to the metadata they describe.
+  const configErrors = session.profile_config_errors || [];
 
   const tabItems = [
     {
@@ -85,6 +58,16 @@ export function SessionInspector({
           <div className="inspector-section-heading">
             <StatusTag status={session.status} />
           </div>
+          {configErrors.map((error) => (
+            <Alert
+              key={error.config_id}
+              type="warning"
+              showIcon
+              message={'Profile 配置告警 · ' + error.config_id}
+              description={error.error}
+              className="inspector-alert"
+            />
+          ))}
           <Descriptions column={1} size="small" colon={false}>
             <Descriptions.Item label="Agent">
               {agentDisplayName(session.agent)}
@@ -134,49 +117,19 @@ export function SessionInspector({
       ),
     },
     {
-      key: 'alerts',
-      label: (
-        <span className="inspector-tab-label">
-          <AlertOutlined />
-          告警
-          {alertItems.length ? (
-            <span className="inspector-tab-badge">{alertItems.length}</span>
-          ) : null}
-        </span>
-      ),
-      children: (
-        <div className="inspector-tab-body">
-          {alertItems.length ? (
-            alertItems.map((item) => (
-              <Alert
-                key={item.key}
-                type={item.type}
-                showIcon
-                message={item.message}
-                description={item.description}
-                className="inspector-alert"
-              />
-            ))
-          ) : (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description="暂无告警"
-            />
-          )}
-        </div>
-      ),
-    },
-    {
       key: 'events',
       label: (
         <span className="inspector-tab-label">
           <BranchesOutlined />
           日志
+          {entries.length ? (
+            <span className="inspector-tab-badge">{entries.length}</span>
+          ) : null}
         </span>
       ),
       children: (
         <div className="inspector-tab-body">
-          <SessionEventLog timeline={timeline} />
+          <SessionEventLog entries={entries} />
         </div>
       ),
     },

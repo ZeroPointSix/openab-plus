@@ -84,6 +84,8 @@ async fn sessions_list_and_detail_happy_path() {
         None,
     ))
     .await;
+    pool.transcript_store()
+        .record_user_text("slack:thread-1", "Review the workbench polish");
 
     let server = spawn_admin_server(&env).await;
     let client = reqwest::Client::new();
@@ -98,7 +100,9 @@ async fn sessions_list_and_detail_happy_path() {
         .await
         .expect("sessions json");
     assert_eq!(list.len(), 2);
-    assert!(list.iter().any(|row| row["session_id"] == "slack:thread-1"));
+    assert!(list.iter().any(|row| {
+        row["session_id"] == "slack:thread-1" && row["title"] == "Review the workbench polish"
+    }));
     assert!(list
         .iter()
         .any(|row| row["session_id"] == "discord:thread-2"));
@@ -283,7 +287,10 @@ for line in sys.stdin:
         .expect("create selected profile session");
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let snapshot = created.json::<Value>().await.expect("created session json");
-    assert_eq!(snapshot["agent"], "claude");
+    // SessionSnapshot.agent is the ACP agentInfo.name reported by the process,
+    // not the profile's agent_type slug. The fake agent above announces
+    // "fake-claude-acp"; the profile binding is checked via profile_id.
+    assert_eq!(snapshot["agent"], "fake-claude-acp");
     assert_eq!(snapshot["profile_id"], "claude-admin");
     assert!(snapshot["session_id"]
         .as_str()

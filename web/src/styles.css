@@ -594,14 +594,33 @@ select {
 }
 
 .session-workbench {
+  /* ZER-715 P0-1: both side columns share one width token so the layout is
+     symmetric. Previously they were minmax(260px, 300px) and
+     minmax(280px, 340px), which never lined up. */
+  --workbench-side-width: 300px;
+  --workbench-rail-width: 44px;
+  --workbench-seam: 1px solid #e8eef4;
   display: grid;
-  grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(280px, 340px);
+  grid-template-columns:
+    var(--workbench-left-width, var(--workbench-side-width))
+    minmax(0, 1fr)
+    var(--workbench-right-width, var(--workbench-side-width));
   min-height: calc(100vh - 180px);
   border: 1px solid #e6edf4;
   border-radius: 12px;
   overflow: hidden;
   background: #ffffff;
   box-shadow: 0 1px 2px rgba(16, 27, 41, 0.04);
+}
+
+/* Collapsed side panels fall back to a narrow rail so the activity feed can
+   take the full width. */
+.session-workbench.is-sidebar-collapsed {
+  --workbench-left-width: var(--workbench-rail-width);
+}
+
+.session-workbench.is-inspector-collapsed {
+  --workbench-right-width: var(--workbench-rail-width);
 }
 
 .workbench-panel {
@@ -612,13 +631,22 @@ select {
   background: #ffffff;
 }
 
-.workbench-sidebar,
-.workbench-inspector {
-  border-inline-end: 1px solid #e8eef4;
+/* ZER-715 P0-1: exactly one seam on each side of the centre column. The
+   inspector used to clear its own end border, which left the centre/right
+   edge with no seam while the left seam stayed visible. */
+.workbench-sidebar {
+  border-inline-end: var(--workbench-seam);
 }
 
 .workbench-inspector {
-  border-inline-end: 0;
+  border-inline-start: var(--workbench-seam);
+}
+
+.workbench-rail {
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0;
+  background: #fcfdfe;
 }
 
 .workbench-panel-header {
@@ -870,6 +898,92 @@ select {
 .workbench-stream-status.is-connecting,
 .workbench-stream-status.is-reconnecting {
   color: #8a5a0b;
+}
+
+.workbench-status-toggle {
+  color: #6b7785;
+}
+
+/* ZER-715 P0-3: a compact run indicator replaces the 运行中 / 空闲 tag pair. */
+.session-run-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #667380;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.session-run-indicator.is-running {
+  color: #1668dc;
+}
+
+.session-run-indicator.is-failed {
+  color: #cf1322;
+}
+
+.session-run-indicator-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.75;
+}
+
+.session-run-indicator-label {
+  line-height: 1;
+}
+
+/* The sidebar row already shows a relative time, so status is a dot instead of
+   a full tag. */
+.session-tree-status {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #b9c3cf;
+}
+
+.session-tree-status.is-starting,
+.session-tree-status.is-running {
+  background: #1668dc;
+}
+
+.session-tree-status.is-suspended {
+  background: #d48806;
+}
+
+.session-tree-status.is-error {
+  background: #cf1322;
+}
+
+.session-tree-copy {
+  flex: 1 1 auto;
+}
+
+.session-event-log {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-event-log-body {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #eef2f7;
+  border-radius: 8px;
+  background: #fbfcfe;
+  color: #3b4757;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-event-log-empty {
+  margin: 16px 0;
 }
 
 .workbench-mobile-drawer .ant-drawer-body {

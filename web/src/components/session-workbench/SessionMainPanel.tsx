@@ -16,56 +16,71 @@ import { activityEntriesFromTranscript } from '../../lib/transcript';
 import { useSessionTranscript } from '../../hooks/useSessionTranscript';
 import { SessionSnapshot } from '../../types';
 import { EntityMark } from '../EntityMark';
-import { StatusTag } from '../StatusTag';
 import { SessionActivityFeed } from '../activity/SessionActivityFeed';
+import { SessionRunIndicator } from './SessionRunIndicator';
 
 interface SessionMainPanelProps {
   session?: SessionSnapshot;
+  /**
+   * ZER-715: the transcript stream is owned by the page so the activity feed
+   * and the inspector log share a single SSE connection. Calling the hook in
+   * both places would open the stream twice.
+   */
+  transcript: ReturnType<typeof useSessionTranscript>;
   loading?: boolean;
   loadError?: string;
   hasSelection: boolean;
-  onOpenSidebar?: () => void;
-  onOpenInspector?: () => void;
+  /**
+   * Desktop collapse/expand or mobile open. The page owns the real action and
+   * must pass matching labels so screen readers do not hear “打开” when the
+   * button will fold an already-visible panel.
+   */
+  onToggleSidebar?: () => void;
+  onToggleInspector?: () => void;
+  sidebarToggleLabel?: string;
+  inspectorToggleLabel?: string;
 }
 
 export function SessionMainPanel({
   session,
+  transcript,
   loading,
   loadError,
   hasSelection,
-  onOpenSidebar,
-  onOpenInspector,
+  onToggleSidebar,
+  onToggleInspector,
+  sidebarToggleLabel = '打开会话列表',
+  inspectorToggleLabel = '打开会话详情',
 }: SessionMainPanelProps) {
-  const transcript = useSessionTranscript(session?.session_id || '');
   const activityEntries = useMemo(
     () => activityEntriesFromTranscript(transcript.entries),
     [transcript.entries],
   );
   const showSession = Boolean(hasSelection && session && !loading);
-  const hasToggles = Boolean(onOpenSidebar || onOpenInspector);
+  const hasToggles = Boolean(onToggleSidebar || onToggleInspector);
   const sourcePlatform = sourcePlatformLabel(session?.source?.platform);
   const streamClass =
     transcript.status === 'recovery_needed' ? 'offline' : transcript.status;
 
-  const sidebarToggle = onOpenSidebar ? (
+  const sidebarToggle = onToggleSidebar ? (
     <Button
       type="text"
       size="small"
       className="workbench-status-toggle"
       icon={<UnorderedListOutlined />}
-      aria-label="打开会话列表"
-      onClick={onOpenSidebar}
+      aria-label={sidebarToggleLabel}
+      onClick={onToggleSidebar}
     />
   ) : null;
 
-  const inspectorToggle = onOpenInspector ? (
+  const inspectorToggle = onToggleInspector ? (
     <Button
       type="text"
       size="small"
       className="workbench-status-toggle"
       icon={<ProfileOutlined />}
-      aria-label="打开会话详情"
-      onClick={onOpenInspector}
+      aria-label={inspectorToggleLabel}
+      onClick={onToggleInspector}
     />
   ) : null;
 
@@ -96,7 +111,7 @@ export function SessionMainPanel({
             </div>
           </div>
           <Space wrap size={[8, 8]} className="workbench-status-meta">
-            <StatusTag status={session.status} />
+            <SessionRunIndicator session={session} />
             <span className={'workbench-stream-status is-' + streamClass}>
               <span className="stream-dot" aria-hidden="true" />
               <span className="stream-label">
@@ -203,12 +218,6 @@ export function SessionMainPanel({
             本页不提供发送、插话、停止或参数修改
           </Typography.Text>
         </div>
-        <span className={'workbench-stream-status is-' + streamClass}>
-          <span className="stream-dot" aria-hidden="true" />
-          <span className="stream-label">
-            {transcriptStatusLabel(transcript.status)}
-          </span>
-        </span>
       </footer>
     </main>
   );
