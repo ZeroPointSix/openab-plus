@@ -49,9 +49,8 @@ export function shortSessionId(sessionId: string): string {
 /**
  * Derive a human task title from the first user turn of a transcript.
  *
- * ZER-715: `SessionSnapshot` carries no title field, so what the user first
- * asked for is the closest thing available to a real session name. A proper
- * backend `title` field is tracked as a follow-up.
+ * ZER-715: the list API exposes this derived value on `SessionSnapshot.title`;
+ * the transcript helper keeps detail-view derivation consistent with that contract.
  */
 export function titleFromTranscript(
   entries: TranscriptEntry[],
@@ -81,7 +80,7 @@ export function sessionListTitle(
   session: SessionSnapshot,
   derivedTitle?: string,
 ): string {
-  const title = derivedTitle?.trim();
+  const title = derivedTitle?.trim() || session.title?.trim();
   if (title) return title;
   const profileName = session.profile_name?.trim();
   if (profileName) return profileName;
@@ -119,6 +118,7 @@ export function matchesSessionKeyword(
     session.source?.platform,
     session.source?.thread_id,
     session.workdir,
+    session.title,
     session.profile_name,
     session.profile_id,
     session.model,
@@ -179,7 +179,12 @@ export function applySessionEvent(
     (session) => session.session_id === event.snapshot?.session_id,
   );
   if (index === -1) sessions.push(event.snapshot);
-  else sessions[index] = event.snapshot;
+  else {
+    sessions[index] = {
+      ...event.snapshot,
+      title: event.snapshot.title || sessions[index].title,
+    };
+  }
   return sortSessions(sessions);
 }
 

@@ -9,7 +9,8 @@ use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
 use openab_core::agent_profile::ProfileSessionOverrides;
 use openab_core::session_event::{SessionStreamBus, SessionStreamEvent, SessionStreamReplay};
-use serde::Deserialize;
+use openab_core::session_snapshot::SessionSnapshot;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -75,11 +76,29 @@ where
         )
 }
 
+#[derive(Serialize)]
+struct SessionListItem {
+    #[serde(flatten)]
+    snapshot: SessionSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+}
+
 async fn list_sessions(headers: HeaderMap, pool: CoreSessionPool) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
-    Json(pool.list_session_snapshots().await).into_response()
+    let transcripts = pool.transcript_store();
+    let sessions = pool
+        .list_session_snapshots()
+        .await
+        .into_iter()
+        .map(|snapshot| {
+            let title = transcripts.session_title(&snapshot.session_id);
+            SessionListItem { snapshot, title }
+        })
+        .collect::<Vec<_>>();
+    Json(sessions).into_response()
 }
 
 async fn get_session(headers: HeaderMap, session_id: String, pool: CoreSessionPool) -> Response {

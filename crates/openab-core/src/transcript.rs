@@ -7,6 +7,7 @@ use std::env;
 use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_TRANSCRIPT_CAPACITY: usize = 1000;
+const SESSION_TITLE_MAX_CHARS: usize = 48;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +91,7 @@ pub struct TranscriptSnapshot {
 #[derive(Debug)]
 struct TranscriptSession {
     capacity: usize,
+    title: Option<String>,
     next_sequence: u64,
     next_entry_id: u64,
     /// The current, de-duplicated display state. Assistant text chunks and a
@@ -105,6 +107,7 @@ impl TranscriptSession {
     fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
+            title: None,
             next_sequence: 1,
             next_entry_id: 1,
             entries: VecDeque::new(),
@@ -202,6 +205,15 @@ impl SessionTranscriptStore {
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|capacity| *capacity > 0)
             .unwrap_or(DEFAULT_TRANSCRIPT_CAPACITY)
+    }
+
+    pub fn session_title(&self, session_id: &str) -> Option<String> {
+        self.inner
+            .lock()
+            .expect("session transcript store lock")
+            .sessions
+            .get(session_id)
+            .and_then(|session| session.title.clone())
     }
 
     pub fn snapshot(&self, session_id: &str, after: Option<u64>) -> TranscriptSnapshot {
@@ -407,6 +419,9 @@ impl SessionTranscriptStore {
 
     fn append_entry(&self, session_id: &str, draft: TranscriptEntryDraft) -> TranscriptEvent {
         self.mutate(session_id, move |session| {
+            if session.title.is_none() && matches!(draft.role, TranscriptRole::User) {
+                session.title = draft.content.as_deref().and_then(title_from_content);
+            }
             let entry = TranscriptEntry {
                 entry_id: session.allocate_entry_id(),
                 sequence: session.allocate_sequence(),
@@ -464,6 +479,20 @@ impl SessionTranscriptStore {
                 }),
         )
     }
+}
+
+fn title_from_content(content: &str) -> Option<String> {
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut chars = first_line.chars();
+    let title: String = chars.by_ref().take(SESSION_TITLE_MAX_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{title}…")
+    } else {
+        title
+    })
 }
 
 fn tool_call_payload(mut payload: Value, tool_call_id: &str, title: &str) -> Value {
@@ -730,6 +759,35 @@ mod tests {
             Some(store.stream.generation())
         );
         assert_eq!(snapshot.stream_next_sequence, Some(2));
+    }
+
+    #[test]
+    fn derives_a_bounded_title_from_the_first_user_turn() {
+        let store = store(8);
+        store.append_assistant_text("session", "boot");
+        store.record_user_text("session", "  优化前端效果\n第二行应当忽略  ");
+        store.record_user_text("session", "later");
+
+        assert_eq!(
+            store.session_title("session").as_deref(),
+            Some("优化前端效果")
+        );
+        for index in 0..store.capacity + 1 {
+            store.append_assistant_text("session", format!("reply {index}"));
+            store.finish_assistant_turn("session");
+        }
+        assert_eq!(
+            store.session_title("session").as_deref(),
+            Some("优化前端效果")
+        );
+        assert_eq!(store.session_title("missing"), None);
+
+        let long_title = "a".repeat(SESSION_TITLE_MAX_CHARS + 1);
+        store.record_user_text("long", long_title);
+        assert_eq!(
+            store.session_title("long"),
+            Some(format!("{}…", "a".repeat(SESSION_TITLE_MAX_CHARS)))
+        );
     }
 
     #[test]

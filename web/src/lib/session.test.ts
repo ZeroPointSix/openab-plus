@@ -42,6 +42,9 @@ const sessions: SessionSnapshot[] = [
 
 describe('session helpers', () => {
   it('prefers a readable task title over the raw session id', () => {
+    expect(sessionListTitle({ ...sessions[0], title: '修复列表标题' })).toBe(
+      '修复列表标题',
+    );
     expect(sessionListTitle(sessions[0])).toBe('Primary');
     expect(sessionListTitle(sessions[0], '  优化前端效果  ')).toBe(
       '优化前端效果',
@@ -100,9 +103,14 @@ describe('session helpers', () => {
   });
 
   it('matches keywords across session identity and model metadata', () => {
-    const modeled = { ...sessions[0], model: 'claude-opus-5' };
+    const modeled = {
+      ...sessions[0],
+      model: 'claude-opus-5',
+      title: '修复列表标题',
+    };
 
     expect(matchesSessionKeyword(modeled, 'opus')).toBe(true);
+    expect(matchesSessionKeyword(modeled, '列表标题')).toBe(true);
     expect(matchesSessionKeyword(modeled, '/workspace/alpha')).toBe(true);
     expect(matchesSessionKeyword(modeled, 'discord')).toBe(false);
   });
@@ -145,15 +153,19 @@ describe('session helpers', () => {
     expect(oldest.session_id).toBe('discord:oldest');
   });
 
-  it('upserts a snapshot received from SSE', () => {
-    const next = applySessionEvent(sessions, {
+  it('upserts a snapshot received from SSE without dropping its list title', () => {
+    const titledSessions = [
+      { ...sessions[0], title: '优化前端效果' },
+      sessions[1],
+    ];
+    const next = applySessionEvent(titledSessions, {
       sequence: 42,
       event: 'status_changed',
       snapshot: { ...sessions[0], status: 'idle' },
     });
-    expect(next.find((item) => item.session_id === 'slack:alpha')?.status).toBe(
-      'idle',
-    );
+    const updated = next.find((item) => item.session_id === 'slack:alpha');
+    expect(updated?.status).toBe('idle');
+    expect(updated?.title).toBe('优化前端效果');
   });
 
   it('distinguishes a session error event from a stream diagnostic', () => {

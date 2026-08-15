@@ -84,6 +84,8 @@ async fn sessions_list_and_detail_happy_path() {
         None,
     ))
     .await;
+    pool.transcript_store()
+        .record_user_text("slack:thread-1", "Review the workbench polish");
 
     let server = spawn_admin_server(&env).await;
     let client = reqwest::Client::new();
@@ -98,7 +100,9 @@ async fn sessions_list_and_detail_happy_path() {
         .await
         .expect("sessions json");
     assert_eq!(list.len(), 2);
-    assert!(list.iter().any(|row| row["session_id"] == "slack:thread-1"));
+    assert!(list.iter().any(|row| {
+        row["session_id"] == "slack:thread-1" && row["title"] == "Review the workbench polish"
+    }));
     assert!(list
         .iter()
         .any(|row| row["session_id"] == "discord:thread-2"));

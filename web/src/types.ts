@@ -23,6 +23,7 @@ export interface SessionSnapshot {
   agent: string;
   source: SessionSource;
   workdir: string;
+  title?: string;
   profile_id?: string;
   profile_name?: string;
   profile_status?: 'active' | 'deleted';
