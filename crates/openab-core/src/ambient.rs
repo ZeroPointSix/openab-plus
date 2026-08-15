@@ -605,7 +605,10 @@ async fn ambient_consumer_loop(
         }
 
         // Ensure session exists.
-        if let Err(e) = target.ensure_session(&session_key, None, None, None).await {
+        if let Err(e) = target
+            .ensure_session(&session_key, None, None, None, None)
+            .await
+        {
             warn!(
                 channel_id = %channel_id,
                 error = %e,

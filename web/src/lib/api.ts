@@ -3,6 +3,7 @@ import {
   AgentProfile,
   AgentProfileDocument,
   AgentSummary,
+  CreateSessionRequest,
   ConfigDocument,
   ConfigReloadResponse,
   ConfigStatus,
@@ -11,6 +12,7 @@ import {
   ConfigValues,
   ProfileValidationResult,
   SessionSnapshot,
+  TranscriptSnapshot,
 } from '../types';
 import { notifyUnauthorized, readAdminToken } from './auth';
 
@@ -93,6 +95,18 @@ export const adminApi = {
     apiRequest<SessionSnapshot>(
       '/api/v1/sessions/' + encodeURIComponent(id),
     ),
+  transcript: (id: string, after?: number) =>
+    apiRequest<TranscriptSnapshot>(
+      '/api/v1/sessions/' +
+        encodeURIComponent(id) +
+        '/transcript' +
+        (after === undefined ? '' : '?after=' + encodeURIComponent(after)),
+    ),
+  createSession: (request: CreateSessionRequest) =>
+    apiRequest<SessionSnapshot>('/api/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }),
   profiles: () =>
     apiRequest<AgentProfileDocument>('/api/v1/agent-profiles'),
   agents: () => apiRequest<AgentSummary[]>('/api/v1/agents'),

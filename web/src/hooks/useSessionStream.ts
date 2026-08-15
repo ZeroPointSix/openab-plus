@@ -5,13 +5,10 @@ import {
   SessionSnapshot,
   SessionTimelineItem,
 } from '../types';
-import {
-  LAST_EVENT_ID_KEY,
-  notifyUnauthorized,
-  readAdminToken,
-} from '../lib/auth';
+import { notifyUnauthorized, readAdminToken } from '../lib/auth';
 import {
   applySessionEvent,
+  mergeTimelineItem,
   parseSessionEventPayload,
   timelineItemFromEvent,
 } from '../lib/session';
@@ -27,7 +24,10 @@ function wait(milliseconds: number): Promise<void> {
 export function useSessionStream(enabled: boolean): StreamStatus {
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<StreamStatus>('offline');
-  const lastEventId = useRef(sessionStorage.getItem(LAST_EVENT_ID_KEY) || '');
+  // A reload starts without a cursor so the one app-wide SSE connection replays
+  // session history before it switches to live delivery. The ref still preserves
+  // the cursor for reconnects within the current page lifetime.
+  const lastEventId = useRef('');
 
   useEffect(() => {
     if (!enabled) {
@@ -72,26 +72,25 @@ export function useSessionStream(enabled: boolean): StreamStatus {
             onmessage(message) {
               if (message.id) {
                 lastEventId.current = message.id;
-                sessionStorage.setItem(LAST_EVENT_ID_KEY, message.id);
               }
 
               const event = parseSessionEventPayload(message.data);
               if (!event) {
-                queryClient.setQueriesData<SessionTimelineItem[]>(
-                  { queryKey: ['sessionTimeline'] },
-                  [],
-                );
-                void queryClient.invalidateQueries({ queryKey: ['sessions'] });
-                void queryClient.invalidateQueries({ queryKey: ['session'] });
+                // Cursor reset and replay diagnostics contain no session snapshot.
+                // Re-sync the server state without discarding any timeline already
+                // displayed for another session.
+                if (
+                  message.event === 'cursor_reset' ||
+                  message.event === 'error'
+                ) {
+                  void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+                  void queryClient.invalidateQueries({ queryKey: ['session'] });
+                }
                 return;
               }
 
               if (event.sequence && !message.id) {
                 lastEventId.current = String(event.sequence);
-                sessionStorage.setItem(
-                  LAST_EVENT_ID_KEY,
-                  lastEventId.current,
-                );
               }
               queryClient.setQueryData<SessionSnapshot[]>(
                 ['sessions'],
@@ -109,14 +108,7 @@ export function useSessionStream(enabled: boolean): StreamStatus {
                 if (timelineItem) {
                   queryClient.setQueryData<SessionTimelineItem[]>(
                     ['sessionTimeline', event.snapshot.session_id],
-                    (current = []) => {
-                      if (
-                        current.some((item) => item.id === timelineItem.id)
-                      ) {
-                        return current;
-                      }
-                      return [...current, timelineItem].slice(-60);
-                    },
+                    (current) => mergeTimelineItem(current, timelineItem),
                   );
                 }
               }

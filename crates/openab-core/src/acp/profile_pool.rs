@@ -3,8 +3,9 @@ use super::pool;
 use super::protocol::ConfigOption;
 use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy};
 use crate::config::AgentConfig;
-use crate::session_event::{SessionEventBus, SessionEventKind};
+use crate::session_event::{SessionEventBus, SessionEventKind, SessionStreamBus};
 use crate::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
+use crate::transcript::SessionTranscriptStore;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::env;
@@ -32,6 +33,8 @@ pub struct SessionPool {
     thread_policies: RwLock<HashMap<String, ThreadProfilePolicy>>,
     thread_gates: RwLock<HashMap<String, Arc<Mutex<()>>>>,
     session_events: SessionEventBus,
+    session_stream: SessionStreamBus,
+    transcripts: SessionTranscriptStore,
     snapshots: RwLock<HashMap<String, SessionSnapshot>>,
     external_base_url: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
@@ -54,6 +57,13 @@ impl SessionPool {
         let mut pools = HashMap::new();
         pools.insert("system".to_string(), system_pool);
         let external_base_url = session_external_base_url_from_env();
+        let transcript_capacity = SessionTranscriptStore::capacity_from_env();
+        // Transcript retention is configurable independently from the existing
+        // lifecycle event history. Keep the lifecycle/SSE replay buffer at its
+        // established default rather than changing it with transcript tuning.
+        let session_stream = SessionStreamBus::default();
+        let session_events = SessionEventBus::new_with_stream(session_stream.clone());
+        let transcripts = SessionTranscriptStore::new(transcript_capacity, session_stream.clone());
         Self {
             base_config: config,
             max_sessions,
@@ -64,7 +74,9 @@ impl SessionPool {
             thread_pools: RwLock::new(HashMap::new()),
             thread_policies: RwLock::new(HashMap::new()),
             thread_gates: RwLock::new(HashMap::new()),
-            session_events: SessionEventBus::default(),
+            session_events,
+            session_stream,
+            transcripts,
             snapshots: RwLock::new(HashMap::new()),
             external_base_url,
             #[cfg(any(test, feature = "test-support"))]
@@ -83,6 +95,16 @@ impl SessionPool {
 
     pub fn session_event_bus(&self) -> SessionEventBus {
         self.session_events.clone()
+    }
+
+    /// Unified, read-only cursor source for status and transcript SSE events.
+    pub fn session_stream_bus(&self) -> SessionStreamBus {
+        self.session_stream.clone()
+    }
+
+    /// Independent per-session ring buffers for ACP transcript data.
+    pub fn transcript_store(&self) -> SessionTranscriptStore {
+        self.transcripts.clone()
     }
 
     /// Seed a session snapshot and emit `session.created` for integration tests.
@@ -125,13 +147,35 @@ impl SessionPool {
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
     ) -> Result<bool> {
+        self.get_or_create_with_profile_and_source(
+            thread_id,
+            working_dir_override,
+            profile_id,
+            overrides,
+            None,
+        )
+        .await
+    }
+
+    pub async fn get_or_create_with_profile_and_source(
+        &self,
+        thread_id: &str,
+        working_dir_override: Option<&str>,
+        profile_id: Option<&str>,
+        overrides: Option<&ProfileSessionOverrides>,
+        source_permalink: Option<&str>,
+    ) -> Result<bool> {
         let gate = self.thread_gate(thread_id).await;
         let _guard = gate.lock().await;
 
         if let Some(pool) = self.existing_pool(thread_id).await {
             let result = pool.get_or_create(thread_id, working_dir_override).await;
             return match result {
-                Ok(outcome) => Ok(self.apply_ensure_outcome(thread_id, outcome).await),
+                Ok(outcome) => {
+                    self.backfill_source_permalink(thread_id, source_permalink)
+                        .await;
+                    Ok(self.apply_ensure_outcome(thread_id, outcome).await)
+                }
                 Err(err) => {
                     self.mark_session_error(thread_id, err.to_string()).await;
                     Err(err)
@@ -210,6 +254,7 @@ impl SessionPool {
                         self.external_base_url.as_deref(),
                     );
                     snapshot.replace_runtime_metadata(runtime_metadata);
+                    snapshot.set_source_permalink(source_permalink);
                     if !profile_config_errors.is_empty() {
                         snapshot.set_profile_config_errors(profile_config_errors);
                     }
@@ -481,6 +526,21 @@ impl SessionPool {
             .insert(snapshot.session_id.clone(), snapshot.clone());
         self.session_events
             .publish(SessionEventKind::SessionCreated, snapshot);
+    }
+
+    async fn backfill_source_permalink(&self, thread_id: &str, permalink: Option<&str>) {
+        let snapshot = {
+            let mut snapshots = self.snapshots.write().await;
+            let Some(snapshot) = snapshots.get_mut(thread_id) else {
+                return;
+            };
+            if !snapshot.set_source_permalink(permalink) {
+                return;
+            }
+            snapshot.clone()
+        };
+        self.session_events
+            .publish(SessionEventKind::SourceChanged, snapshot);
     }
 
     async fn update_snapshot<F>(&self, thread_id: &str, kind: SessionEventKind, apply: F)
@@ -992,7 +1052,9 @@ mod tests {
         ));
         outer.seed_session_snapshot_for_test(snapshot).await;
 
-        outer.record_session_config_update("slack:thread", &[]).await;
+        outer
+            .record_session_config_update("slack:thread", &[])
+            .await;
 
         let snapshot = outer
             .session_snapshot("slack:thread")

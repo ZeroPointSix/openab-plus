@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest';
 import {
   applySessionEvent,
   filterSessions,
+  matchesSessionKeyword,
+  mergeTimelineItem,
   parseSessionEventPayload,
+  sessionListSubtitle,
+  sessionListTitle,
   sessionMetrics,
+  sortSessions,
   timelineItemFromEvent,
 } from './session';
 import { SessionSnapshot } from '../types';
+import { sessionStatusDisplay, sessionStatusOptions } from './format';
 
 const sessions: SessionSnapshot[] = [
   {
@@ -33,19 +39,72 @@ const sessions: SessionSnapshot[] = [
 ];
 
 describe('session helpers', () => {
+
+  it('keeps the full session title and puts thread on the subtitle', () => {
+    expect(sessionListTitle(sessions[0])).toBe('slack:alpha');
+    expect(sessionListSubtitle(sessions[0])).toBe('alpha');
+  });
+
+  it('uses 空闲 for idle sessions instead of 等待中', () => {
+    expect(sessionStatusDisplay.idle.label).toBe('空闲');
+  });
   it('filters by platform and profile', () => {
     expect(
       filterSessions(sessions, { platform: 'slack', profile: 'primary' }),
     ).toHaveLength(1);
   });
 
-  it('computes dashboard metrics', () => {
-    expect(sessionMetrics(sessions)).toEqual({
-      total: 2,
+  it('filters by Agent type before rendering grouped history', () => {
+    const matching = filterSessions(sessions, { agent: 'claude' });
+
+    expect(matching).toHaveLength(1);
+    expect(matching[0].session_id).toBe('discord:beta');
+  });
+
+  it('matches keywords across session identity and model metadata', () => {
+    const modeled = { ...sessions[0], model: 'claude-opus-5' };
+
+    expect(matchesSessionKeyword(modeled, 'opus')).toBe(true);
+    expect(matchesSessionKeyword(modeled, '/workspace/alpha')).toBe(true);
+    expect(matchesSessionKeyword(modeled, 'discord')).toBe(false);
+  });
+
+  it('derives completed state display, filters, and metrics from one mapping', () => {
+    const completed: SessionSnapshot = {
+      ...sessions[0],
+      session_id: 'discord:completed',
+      status: 'exited',
+    };
+
+    expect(sessionStatusDisplay.exited.label).toBe('已完成');
+    expect(sessionStatusOptions).toContainEqual({
+      label: '已完成',
+      value: 'exited',
+    });
+    expect(sessionMetrics([...sessions, completed])).toEqual({
+      total: 3,
       active: 1,
       running: 1,
       failed: 1,
     });
+  });
+
+  it('sorts by the instant represented by timestamps across time zones', () => {
+    const [newest, oldest] = sortSessions([
+      {
+        ...sessions[0],
+        session_id: 'slack:newest',
+        updated_at: '2026-08-12T06:43:22Z',
+      },
+      {
+        ...sessions[1],
+        session_id: 'discord:oldest',
+        updated_at: '2026-08-12T14:42:22+08:00',
+      },
+    ]);
+
+    expect(newest.session_id).toBe('slack:newest');
+    expect(oldest.session_id).toBe('discord:oldest');
   });
 
   it('upserts a snapshot received from SSE', () => {
@@ -74,6 +133,26 @@ describe('session helpers', () => {
         JSON.stringify({ error: 'event history unavailable' }),
       ),
     ).toBeNull();
+  });
+
+  it('replaces temporary detail seeds when real history arrives', () => {
+    const initial = [
+      {
+        id: 'initial:created',
+        event: 'session.created',
+        status: 'idle' as const,
+        at: sessions[0].created_at,
+      },
+    ];
+    const historical = {
+      id: 'generation-a:1:session.created',
+      event: 'session.created',
+      status: 'idle' as const,
+      at: sessions[0].created_at,
+    };
+
+    expect(mergeTimelineItem(initial, historical)).toEqual([historical]);
+    expect(mergeTimelineItem([historical], historical)).toEqual([historical]);
   });
 
   it('uses the full SSE id to disambiguate timeline events across restarts', () => {

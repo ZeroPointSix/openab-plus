@@ -17,21 +17,15 @@ import {
   confirmRouteNavigation,
 } from '../lib/navigationGuard';
 import openabLogo from '../assets/openab-logo.png?inline';
+import { useSessionStream } from '../hooks/useSessionStream';
 import {
-  StreamStatus,
-  useSessionStream,
-} from '../hooks/useSessionStream';
+  StreamStatusContext,
+  streamStatusLabels,
+} from '../hooks/streamStatusContext';
 
 interface AdminLayoutProps {
   onLogout: () => void;
 }
-
-const streamLabels: Record<StreamStatus, string> = {
-  connecting: '正在连接',
-  live: '实时连接',
-  reconnecting: '正在重连',
-  offline: '离线',
-};
 
 const COLLAPSE_STORAGE_KEY = 'openab.admin.sider-collapsed';
 
@@ -48,6 +42,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
   const navigate = useNavigate();
   const streamStatus = useSessionStream(true);
   const [collapsed, setCollapsed] = useState(readCollapsedPreference);
+  const isSessionWorkbench = location.pathname.startsWith('/sessions');
 
   useEffect(() => {
     try {
@@ -96,15 +91,16 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
     <ProLayout
       title="OpenAB Plus"
       logo={<img className="layout-logo" src={openabLogo} alt="" />}
-      layout="mix"
+      layout={isSessionWorkbench ? 'top' : 'mix'}
       navTheme="light"
       fixedHeader
-      fixSiderbar
+      fixSiderbar={!isSessionWorkbench}
       breakpoint="lg"
-      siderWidth={236}
-      collapsed={collapsed}
+      siderWidth={isSessionWorkbench ? 0 : 236}
+      collapsed={isSessionWorkbench || collapsed}
       onCollapse={setCollapsed}
-      route={route}
+      menuRender={isSessionWorkbench ? false : undefined}
+      route={isSessionWorkbench ? { path: '/', routes: [] } : route}
       location={{ pathname: location.pathname }}
       headerTitleRender={(logo, _title, props) => (
         <button
@@ -155,7 +151,7 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           {props?.collapsed ? null : (
             <span className="sider-footer-text">
               <span className="sider-footer-label">
-                {streamLabels[streamStatus]}
+                {streamStatusLabels[streamStatus]}
               </span>
               <span className="sider-footer-version">
                 v{__APP_VERSION__}
@@ -167,13 +163,13 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       avatarProps={false}
       actionsRender={() => [
         <Tooltip
-          title={'实时通道：' + streamLabels[streamStatus]}
+          title={'实时通道：' + streamStatusLabels[streamStatus]}
           key="stream"
         >
           <span className={'stream-status is-' + streamStatus}>
             <span className="stream-dot" aria-hidden="true" />
             <span className="stream-label">
-              {streamLabels[streamStatus]}
+              {streamStatusLabels[streamStatus]}
             </span>
           </span>
         </Tooltip>,
@@ -223,7 +219,9 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
       }}
     >
       <div className="app-content">
-        <Outlet />
+        <StreamStatusContext.Provider value={streamStatus}>
+          <Outlet />
+        </StreamStatusContext.Provider>
       </div>
     </ProLayout>
   );

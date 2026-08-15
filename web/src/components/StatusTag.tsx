@@ -7,26 +7,27 @@ import {
   PauseCircleFilled,
 } from '@ant-design/icons';
 import { SessionStatus } from '../types';
-import { statusLabels } from '../lib/format';
+import { sessionStatusDisplay } from '../lib/format';
 
-const statusConfig: Record<
-  SessionStatus,
-  { color: string; icon: React.ReactNode }
-> = {
-  starting: { color: 'processing', icon: <LoadingOutlined spin /> },
-  idle: { color: 'default', icon: <MinusCircleFilled /> },
-  running: { color: 'success', icon: <CheckCircleFilled /> },
-  suspended: { color: 'warning', icon: <PauseCircleFilled /> },
-  error: { color: 'error', icon: <CloseCircleFilled /> },
-  exited: { color: 'default', icon: <MinusCircleFilled /> },
-  unknown: { color: 'default', icon: <MinusCircleFilled /> },
+const statusIcons: Record<SessionStatus, React.ReactNode> = {
+  starting: <LoadingOutlined spin />,
+  idle: <MinusCircleFilled />,
+  running: <CheckCircleFilled />,
+  suspended: <PauseCircleFilled />,
+  error: <CloseCircleFilled />,
+  exited: <MinusCircleFilled />,
+  unknown: <MinusCircleFilled />,
 };
 
 export function StatusTag({ status }: { status: SessionStatus }) {
-  const config = statusConfig[status] || statusConfig.unknown;
+  const display = sessionStatusDisplay[status] || sessionStatusDisplay.unknown;
   return (
-    <Tag color={config.color} icon={config.icon} className="status-tag">
-      {statusLabels[status] || statusLabels.unknown}
+    <Tag
+      color={display.tagColor}
+      icon={statusIcons[status] || statusIcons.unknown}
+      className="status-tag"
+    >
+      {display.label}
     </Tag>
   );
 }
