@@ -8,8 +8,10 @@ import {
   sessionListSubtitle,
   sessionListTitle,
   sessionMetrics,
+  sessionProjectGroup,
   sortSessions,
   timelineItemFromEvent,
+  titleFromTranscript,
 } from './session';
 import { SessionSnapshot } from '../types';
 import { sessionStatusDisplay, sessionStatusOptions } from './format';
@@ -39,15 +41,51 @@ const sessions: SessionSnapshot[] = [
 ];
 
 describe('session helpers', () => {
+  it('prefers a readable task title over the raw session id', () => {
+    expect(sessionListTitle(sessions[0])).toBe('Primary');
+    expect(sessionListTitle(sessions[0], '  优化前端效果  ')).toBe(
+      '优化前端效果',
+    );
+    expect(sessionListTitle(sessions[1])).toBe('Claude · beta');
+  });
 
-  it('keeps the full session title and puts thread on the subtitle', () => {
-    expect(sessionListTitle(sessions[0])).toBe('slack:alpha');
-    expect(sessionListSubtitle(sessions[0])).toBe('alpha');
+  it('describes the source on the subtitle instead of repeating the id', () => {
+    expect(sessionListSubtitle(sessions[0])).toBe('Slack · alpha');
+  });
+
+  it('derives a session title from the first user turn', () => {
+    expect(
+      titleFromTranscript([
+        {
+          entry_id: 'e0',
+          sequence: 0,
+          timestamp: '2026-08-02T10:00:00Z',
+          role: 'system',
+          content: 'boot',
+        },
+        {
+          entry_id: 'e1',
+          sequence: 1,
+          timestamp: '2026-08-02T10:00:01Z',
+          role: 'user',
+          content: '  优化前端效果\n第二行应当忽略  ',
+        },
+      ]),
+    ).toBe('优化前端效果');
+    expect(titleFromTranscript([])).toBeUndefined();
+  });
+
+  it('groups sessions by project directory rather than agent type', () => {
+    expect(sessionProjectGroup(sessions[0])).toBe('alpha');
+    expect(sessionProjectGroup({ ...sessions[0], workdir: '' })).toBe(
+      '未归类项目',
+    );
   });
 
   it('uses 空闲 for idle sessions instead of 等待中', () => {
     expect(sessionStatusDisplay.idle.label).toBe('空闲');
   });
+
   it('filters by platform and profile', () => {
     expect(
       filterSessions(sessions, { platform: 'slack', profile: 'primary' }),

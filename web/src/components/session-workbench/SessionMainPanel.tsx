@@ -16,11 +16,17 @@ import { activityEntriesFromTranscript } from '../../lib/transcript';
 import { useSessionTranscript } from '../../hooks/useSessionTranscript';
 import { SessionSnapshot } from '../../types';
 import { EntityMark } from '../EntityMark';
-import { StatusTag } from '../StatusTag';
 import { SessionActivityFeed } from '../activity/SessionActivityFeed';
+import { SessionRunIndicator } from './SessionRunIndicator';
 
 interface SessionMainPanelProps {
   session?: SessionSnapshot;
+  /**
+   * ZER-715: the transcript stream is owned by the page so the activity feed
+   * and the inspector log share a single SSE connection. Calling the hook in
+   * both places would open the stream twice.
+   */
+  transcript: ReturnType<typeof useSessionTranscript>;
   loading?: boolean;
   loadError?: string;
   hasSelection: boolean;
@@ -30,13 +36,13 @@ interface SessionMainPanelProps {
 
 export function SessionMainPanel({
   session,
+  transcript,
   loading,
   loadError,
   hasSelection,
   onOpenSidebar,
   onOpenInspector,
 }: SessionMainPanelProps) {
-  const transcript = useSessionTranscript(session?.session_id || '');
   const activityEntries = useMemo(
     () => activityEntriesFromTranscript(transcript.entries),
     [transcript.entries],
@@ -96,7 +102,7 @@ export function SessionMainPanel({
             </div>
           </div>
           <Space wrap size={[8, 8]} className="workbench-status-meta">
-            <StatusTag status={session.status} />
+            <SessionRunIndicator session={session} />
             <span className={'workbench-stream-status is-' + streamClass}>
               <span className="stream-dot" aria-hidden="true" />
               <span className="stream-label">
@@ -203,12 +209,6 @@ export function SessionMainPanel({
             本页不提供发送、插话、停止或参数修改
           </Typography.Text>
         </div>
-        <span className={'workbench-stream-status is-' + streamClass}>
-          <span className="stream-dot" aria-hidden="true" />
-          <span className="stream-label">
-            {transcriptStatusLabel(transcript.status)}
-          </span>
-        </span>
       </footer>
     </main>
   );
