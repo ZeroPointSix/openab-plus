@@ -242,7 +242,11 @@ export function SessionSidebar({
                             <span className="session-tree-title">
                               {sessionListTitle(
                                 session,
-                                active ? activeSessionTitle : undefined,
+                                // Active session may still stream a fresher title
+                                // from its transcript; every other row must use the
+                                // stable list-API title so same-profile sessions
+                                // stay distinguishable without being selected.
+                                active ? activeSessionTitle : session.title,
                               )}
                             </span>
                             <span className="session-tree-subtitle">

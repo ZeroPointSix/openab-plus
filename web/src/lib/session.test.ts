@@ -52,6 +52,29 @@ describe('session helpers', () => {
     expect(sessionListTitle(sessions[1])).toBe('Claude · beta');
   });
 
+  it('keeps same-profile sessions distinguishable by their list titles', () => {
+    const first = {
+      ...sessions[0],
+      session_id: 'slack:task-a',
+      title: '优化前端效果',
+      profile_name: 'Primary',
+    };
+    const second = {
+      ...sessions[0],
+      session_id: 'slack:task-b',
+      title: '修复回归缺陷',
+      profile_name: 'Primary',
+    };
+
+    // Mirrors SessionSidebar: only the active row gets a live transcript title.
+    expect(sessionListTitle(first, undefined)).toBe('优化前端效果');
+    expect(sessionListTitle(second, undefined)).toBe('修复回归缺陷');
+    expect(sessionListTitle(first, '优化前端效果')).toBe('优化前端效果');
+    expect(sessionListTitle(second, undefined)).not.toBe(
+      sessionListTitle(first, undefined),
+    );
+  });
+
   it('describes the source on the subtitle instead of repeating the id', () => {
     expect(sessionListSubtitle(sessions[0])).toBe('Slack · alpha');
   });
