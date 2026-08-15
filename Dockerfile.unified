@@ -156,7 +156,7 @@ COPY --from=builder --chown=node:node /build/target/release/openab /usr/local/bi
 RUN mkdir -p /home/node/.codex && chown -R node:node /home/node
 USER node
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD pgrep -x openab || exit 1
+  CMD if [ -n "${OPENAB_ADMIN_ENABLED:-}${OPENAB_ADMIN_TOKEN:-}${GATEWAY_ADMIN_TOKEN:-}" ]; then curl -fsS http://127.0.0.1:8080/health; else pgrep -x openab; fi
 ENV OPENAB_AGENT_COMMAND="codex-acp"
 ENV OPENAB_AGENT_AUTH_COMMAND="codex login --device-auth"
 ENTRYPOINT ["tini", "--"]
