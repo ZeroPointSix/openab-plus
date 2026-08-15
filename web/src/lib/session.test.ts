@@ -5,6 +5,8 @@ import {
   matchesSessionKeyword,
   mergeTimelineItem,
   parseSessionEventPayload,
+  sessionListSubtitle,
+  sessionListTitle,
   sessionMetrics,
   sortSessions,
   timelineItemFromEvent,
@@ -37,6 +39,15 @@ const sessions: SessionSnapshot[] = [
 ];
 
 describe('session helpers', () => {
+
+  it('keeps the full session title and puts thread on the subtitle', () => {
+    expect(sessionListTitle(sessions[0])).toBe('slack:alpha');
+    expect(sessionListSubtitle(sessions[0])).toBe('alpha');
+  });
+
+  it('uses 空闲 for idle sessions instead of 等待中', () => {
+    expect(sessionStatusDisplay.idle.label).toBe('空闲');
+  });
   it('filters by platform and profile', () => {
     expect(
       filterSessions(sessions, { platform: 'slack', profile: 'primary' }),

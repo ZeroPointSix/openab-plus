@@ -197,10 +197,23 @@ export function normalizeToolCall(message: ToolCallLike): NormalizedToolCall | u
   const kind = message.kind || message.name;
   const key = message.call_id || message.id;
   if (!key) return undefined;
+  const explicitName =
+    typeof message.name === 'string' ? message.name.trim() : '';
+  const kindName = typeof kind === 'string' ? kind.trim() : '';
+  const titleName =
+    typeof message.title === 'string' ? message.title.trim() : '';
+  const toolName =
+    (explicitName && !/^tool call$/i.test(explicitName) && explicitName) ||
+    (kindName &&
+    (kindName.toLowerCase() === 'execute' || kindName.toLowerCase() === 'exec'
+      ? 'bash'
+      : kindName)) ||
+    titleName ||
+    'bash';
 
   return {
     key,
-    name: message.title || message.name || kind || 'Tool call',
+    name: toolName,
     kind,
     status: normalizeToolStatus(message.status),
     description: message.description || buildParamSummary(kind, rawInput),

@@ -19,7 +19,7 @@ export const sessionStatusDisplay: Record<SessionStatus, SessionStatusDisplay> =
     failed: false,
   },
   idle: {
-    label: '等待中',
+    label: '空闲',
     tagColor: 'default',
     timelineColor: 'gray',
     active: true,
@@ -120,6 +120,21 @@ export function agentDisplayName(agent?: string): string {
     .replace(/-acp$/i, '')
     .replaceAll('-', ' ')
     .replace(/\b\w/g, (value) => value.toUpperCase());
+}
+
+export const transcriptStatusLabels = {
+  loading: '正在加载历史',
+  connecting: '正在连接',
+  live: '已连接',
+  reconnecting: '正在重连',
+  offline: '离线',
+  recovery_needed: '需要恢复',
+} as const;
+
+export type TranscriptStatusKey = keyof typeof transcriptStatusLabels;
+
+export function transcriptStatusLabel(status: TranscriptStatusKey): string {
+  return transcriptStatusLabels[status];
 }
 
 export function eventLabel(event: string): string {

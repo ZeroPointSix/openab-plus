@@ -6,15 +6,19 @@ import {
   ScheduleOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import { Alert, Card, Collapse, Empty, List, Tag, Typography } from 'antd';
+import { Alert, Card, Collapse, Empty, List, Typography } from 'antd';
 import { Virtuoso } from 'react-virtuoso';
 import type { ActivityEntry } from '../../types';
+import {
+  transcriptStatusLabel,
+  type TranscriptStatusKey,
+} from '../../lib/format';
 import { AcpToolCallCard } from './AcpToolCallCard';
 import { TerminalOutput } from './TerminalOutput';
 
 interface SessionActivityFeedProps {
   entries: ActivityEntry[];
-  source: 'mock' | 'live';
+  streamStatus: TranscriptStatusKey;
 }
 
 function ActorMessage({
@@ -109,20 +113,25 @@ function ActivityFeedItem({ entry }: { entry: ActivityEntry }) {
   }
 }
 
-export function SessionActivityFeed({ entries, source }: SessionActivityFeedProps) {
+export function SessionActivityFeed({
+  entries,
+  streamStatus,
+}: SessionActivityFeedProps) {
   if (!entries.length) {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无活动记录" />;
   }
 
+  const statusClass =
+    streamStatus === 'recovery_needed' ? 'offline' : streamStatus;
+
   return (
     <section className="session-activity-feed" aria-label="Agent 活动流">
       <div className="activity-feed-caption">
-        <Typography.Text type="secondary">
-          {source === 'mock' ? '固定 mock transcript · 等待 W3 快照接口接入' : '实时 transcript 快照'}
-        </Typography.Text>
-        <Tag color={source === 'mock' ? 'gold' : 'green'}>
-          {source === 'mock' ? 'Mock' : 'Live'}
-        </Tag>
+        <Typography.Text type="secondary">活动流</Typography.Text>
+        <span className={'workbench-stream-status is-' + statusClass}>
+          <span className="stream-dot" aria-hidden="true" />
+          <span className="stream-label">{transcriptStatusLabel(streamStatus)}</span>
+        </span>
       </div>
       <div className="activity-feed-items">
         <Virtuoso

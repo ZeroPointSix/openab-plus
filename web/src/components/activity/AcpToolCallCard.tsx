@@ -4,18 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Adapted from AionUi packages/desktop/src/renderer/pages/conversation/Messages/acp/MessageAcpToolCall.tsx.
- * Modified for OpenAB Plus: read-only Ant Design activity feed with normalized tool snapshots.
+ * Modified for OpenAB Plus: read-only one-line ink summary with expandable details.
  */
 
 import {
-  CheckCircleFilled,
+  CheckCircleOutlined,
   ClockCircleOutlined,
-  CloseCircleFilled,
+  CloseCircleOutlined,
   LoadingOutlined,
-  StopFilled,
+  StopOutlined,
   ToolOutlined,
 } from '@ant-design/icons';
-import { Card, Collapse, Tag, Typography } from 'antd';
+import { Collapse, Typography } from 'antd';
 import type { NormalizedToolCall } from '../../types';
 import { FileDiff } from './FileDiff';
 import { TerminalOutput } from './TerminalOutput';
@@ -23,15 +23,15 @@ import { TerminalOutput } from './TerminalOutput';
 function statusMeta(status: NormalizedToolCall['status']) {
   switch (status) {
     case 'completed':
-      return { color: 'success' as const, label: '成功', icon: <CheckCircleFilled /> };
+      return { label: '完成', icon: <CheckCircleOutlined /> };
     case 'error':
-      return { color: 'error' as const, label: '失败', icon: <CloseCircleFilled /> };
+      return { label: '失败', icon: <CloseCircleOutlined /> };
     case 'canceled':
-      return { color: 'warning' as const, label: '已取消', icon: <StopFilled /> };
+      return { label: '已取消', icon: <StopOutlined /> };
     case 'running':
-      return { color: 'processing' as const, label: '运行中', icon: <LoadingOutlined spin /> };
+      return { label: '运行中', icon: <LoadingOutlined spin /> };
     default:
-      return { color: 'default' as const, label: '等待中', icon: <ClockCircleOutlined /> };
+      return { label: '待执行', icon: <ClockCircleOutlined /> };
   }
 }
 
@@ -47,62 +47,72 @@ function CodeBlock({ children }: { children: string }) {
 
 export function AcpToolCallCard({ tool }: { tool: NormalizedToolCall }) {
   const status = statusMeta(tool.status);
-  const summary = tool.description || tool.kind || '无参数摘要';
+  const summary = tool.description || tool.kind || '';
   const duration = durationText(tool.duration_ms);
   const diffs = tool.diffs || (tool.diff ? [tool.diff] : []);
   const hasDetails = Boolean(tool.input || tool.output || diffs.length || tool.terminal);
+  const title = tool.name || tool.kind || 'bash';
 
   return (
-    <Card size="small" className={`activity-tool-card ${tool.status}`}>
-      <div className="activity-tool-summary">
-        <ToolOutlined className="activity-tool-icon" aria-hidden="true" />
-        <div className="activity-tool-title">
-          <Typography.Text strong>{tool.name}</Typography.Text>
-          <Typography.Text type="secondary" ellipsis={{ tooltip: summary }}>
-            {summary}
-          </Typography.Text>
-        </div>
-        {duration ? <Typography.Text type="secondary">{duration}</Typography.Text> : null}
-        <Tag icon={status.icon} color={status.color}>
-          {status.label}
-        </Tag>
-      </div>
-
-      {hasDetails ? (
-        <Collapse
-          ghost
-          className="activity-tool-details"
-          items={[
-            {
-              key: 'details',
-              label: '查看参数与结果',
-              children: (
-                <div className="activity-tool-detail-content">
-                  {tool.input ? (
-                    <section>
-                      <Typography.Text type="secondary">参数</Typography.Text>
-                      <CodeBlock>{tool.input}</CodeBlock>
-                    </section>
+    <article className={`activity-tool-row ${tool.status}`}>
+      <Collapse
+        ghost
+        className="activity-tool-details"
+        items={[
+          {
+            key: 'details',
+            showArrow: hasDetails,
+            collapsible: hasDetails ? 'header' : 'disabled',
+            label: (
+              <div className="activity-tool-summary">
+                <ToolOutlined className="activity-tool-icon" aria-hidden="true" />
+                <div className="activity-tool-title">
+                  <Typography.Text strong className="activity-tool-name">
+                    {title}
+                  </Typography.Text>
+                  {summary ? (
+                    <Typography.Text type="secondary" ellipsis={{ tooltip: summary }}>
+                      {summary}
+                    </Typography.Text>
                   ) : null}
-                  {tool.output ? (
-                    <section>
-                      <Typography.Text type="secondary">结果</Typography.Text>
-                      <CodeBlock>{tool.output}</CodeBlock>
-                    </section>
-                  ) : null}
-                  {tool.truncated ? (
-                    <Typography.Text type="warning">结果已截断，仅显示安全预览。</Typography.Text>
-                  ) : null}
-                  {tool.terminal ? <TerminalOutput terminal={tool.terminal} /> : null}
-                  {diffs.map((diff, index) => (
-                    <FileDiff diff={diff} key={`${diff.path}-${index}`} />
-                  ))}
                 </div>
-              ),
-            },
-          ]}
-        />
-      ) : null}
-    </Card>
+                {duration ? (
+                  <Typography.Text type="secondary">{duration}</Typography.Text>
+                ) : null}
+                <span className={'activity-tool-status is-' + tool.status}>
+                  {status.icon}
+                  {status.label}
+                </span>
+              </div>
+            ),
+            children: hasDetails ? (
+              <div className="activity-tool-detail-content">
+                {tool.input ? (
+                  <section>
+                    <Typography.Text type="secondary">参数</Typography.Text>
+                    <CodeBlock>{tool.input}</CodeBlock>
+                  </section>
+                ) : null}
+                {tool.output ? (
+                  <section>
+                    <Typography.Text type="secondary">结果</Typography.Text>
+                    <CodeBlock>{tool.output}</CodeBlock>
+                  </section>
+                ) : null}
+                {tool.truncated ? (
+                  <Typography.Text type="warning">
+                    结果已截断，仅显示安全预览。
+                  </Typography.Text>
+                ) : null}
+                {tool.terminal ? <TerminalOutput terminal={tool.terminal} /> : null}
+                {diffs.map((diff, index) => (
+                  <FileDiff diff={diff} key={`${diff.path}-${index}`} />
+                ))}
+              </div>
+            ) : null,
+          },
+        ]}
+      />
+    </article>
   );
 }

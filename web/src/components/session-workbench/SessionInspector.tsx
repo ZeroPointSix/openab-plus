@@ -7,7 +7,7 @@ import { Alert, Descriptions, Empty, Space, Tabs, Typography } from 'antd';
 import { agentDisplayName, formatDateTime } from '../../lib/format';
 import { SessionSnapshot, SessionTimelineItem } from '../../types';
 import { StatusTag } from '../StatusTag';
-import { SessionEventTimeline } from './SessionEventTimeline';
+import { SessionEventLog } from './SessionEventLog';
 
 interface SessionInspectorProps {
   session?: SessionSnapshot;
@@ -37,7 +37,7 @@ export function SessionInspector({
         <div className="workbench-inspector-empty">
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}
-            description="选择会话后查看元数据、告警与事件"
+            description="选择会话后查看元数据、告警与执行日志"
           />
         </div>
       </aside>
@@ -171,15 +171,12 @@ export function SessionInspector({
       label: (
         <span className="inspector-tab-label">
           <BranchesOutlined />
-          事件
+          日志
         </span>
       ),
       children: (
         <div className="inspector-tab-body">
-          <Typography.Text type="secondary" className="inspector-events-caption">
-            实时状态事件，最多保留最近 60 条
-          </Typography.Text>
-          <SessionEventTimeline timeline={timeline} compact />
+          <SessionEventLog timeline={timeline} />
         </div>
       ),
     },

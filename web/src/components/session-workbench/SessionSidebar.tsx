@@ -5,7 +5,6 @@ import {
   SearchOutlined,
   UserAddOutlined,
 } from '@ant-design/icons';
-import { Conversations } from '@ant-design/x';
 import {
   Button,
   Empty,
@@ -16,14 +15,13 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
-import { filterSessions, matchesSessionKeyword } from '../../lib/session';
+import { filterSessions, matchesSessionKeyword, sessionListSubtitle, sessionListTitle } from '../../lib/session';
 import {
   agentDisplayName,
   formatRelativeTime,
   sessionStatusOptions,
 } from '../../lib/format';
 import { AgentProfile, SessionFilters, SessionSnapshot } from '../../types';
-import { EntityMark } from '../EntityMark';
 import { StatusTag } from '../StatusTag';
 
 interface SessionSidebarProps {
@@ -43,19 +41,8 @@ const statusOptions = [
   ...sessionStatusOptions.filter((option) => option.value !== 'unknown'),
 ];
 
-function sessionTitle(session: SessionSnapshot): string {
-  const platform = session.source?.platform || '未知平台';
-  const thread = session.source?.thread_id;
-  if (thread) {
-    return platform + ' · ' + thread.slice(0, 12);
-  }
-  return platform + ' · ' + session.session_id.slice(0, 12);
-}
-
 function agentGroup(session: SessionSnapshot): string {
-  const agent = agentDisplayName(session.agent);
-  const profile = session.profile_name || session.profile_id;
-  return profile ? profile + ' · ' + agent : agent;
+  return agentDisplayName(session.agent);
 }
 
 export function SessionSidebar({
@@ -84,96 +71,54 @@ export function SessionSidebar({
   }, [sessions]);
 
   const agentOptions = useMemo(() => {
-    const agentTypes = Array.from(
-      new Set([
-        ...profiles.map((profile) => profile.agent_type),
-        ...sessions.map((session) => session.agent),
-      ]),
-    )
-      .filter(Boolean)
-      .sort();
-
+    const names = Array.from(
+      new Set(sessions.map((session) => agentDisplayName(session.agent))),
+    ).sort();
     return [
       { label: '全部 Agent', value: '' },
-      ...agentTypes.map((agentType) => ({
-        label: agentType,
-        options: [
-          { label: `全部 ${agentType} 会话`, value: `agent:${agentType}` },
-          ...profiles
-            .filter((profile) => profile.agent_type === agentType)
-            .map((profile) => ({
-              label: profile.name || profile.id,
-              value: `profile:${profile.id}`,
-              disabled: !profile.enabled,
-            })),
-        ],
-      })),
+      ...names.map((name) => ({ label: name, value: name })),
     ];
-  }, [profiles, sessions]);
+  }, [sessions]);
 
   const selectedProfile = useMemo(() => {
     if (agentScope.startsWith('profile:')) {
       const profileId = agentScope.slice('profile:'.length);
       return profiles.find((profile) => profile.id === profileId && profile.enabled);
     }
-    if (agentScope.startsWith('agent:')) {
-      const agentType = agentScope.slice('agent:'.length);
-      const enabledProfiles = profiles.filter(
-        (profile) => profile.agent_type === agentType && profile.enabled,
-      );
-      return enabledProfiles.length === 1 ? enabledProfiles[0] : undefined;
-    }
-    return undefined;
+    return profiles.find((profile) => profile.enabled);
   }, [agentScope, profiles]);
 
   const filteredSessions = useMemo(() => {
-    const nextFilters: SessionFilters = {
-      ...filters,
-      agent: agentScope.startsWith('agent:')
-        ? agentScope.slice('agent:'.length)
-        : undefined,
-      profile: agentScope.startsWith('profile:')
-        ? agentScope.slice('profile:'.length)
-        : filters.profile,
-    };
-    return filterSessions(sessions, nextFilters).filter((session) =>
-      matchesSessionKeyword(session, search),
-    );
+    return filterSessions(sessions, filters).filter((session) => {
+      if (agentScope && agentDisplayName(session.agent) !== agentScope) {
+        return false;
+      }
+      return matchesSessionKeyword(session, search);
+    });
   }, [agentScope, filters, search, sessions]);
 
-  const conversationItems = useMemo(
-    () =>
-      filteredSessions.map((session) => ({
-        key: session.session_id,
-        group: agentGroup(session),
-        timestamp: new Date(session.updated_at || session.created_at).getTime(),
-        icon: <EntityMark name={session.agent} size={22} />,
-        label: (
-          <div className="session-conversation-label">
-            <div className="session-conversation-title">
-              <Typography.Text ellipsis>{sessionTitle(session)}</Typography.Text>
-              <StatusTag status={session.status} />
-            </div>
-            <Typography.Text type="secondary" className="session-conversation-meta">
-              {formatRelativeTime(session.updated_at)}
-            </Typography.Text>
-          </div>
-        ),
-      })),
-    [filteredSessions],
-  );
+  const groupedSessions = useMemo(() => {
+    const groups = new Map<string, SessionSnapshot[]>();
+    for (const session of filteredSessions) {
+      const key = agentGroup(session);
+      const list = groups.get(key) || [];
+      list.push(session);
+      groups.set(key, list);
+    }
+    return [...groups.entries()];
+  }, [filteredSessions]);
 
   const newChatTitle = selectedProfile
     ? `使用 ${selectedProfile.name || selectedProfile.id} 新建会话`
-    : '请先选择一个启用的 Profile；选择 Agent 类型时仅在该类型只有一个启用 Profile 时可直接新建会话';
+    : '请先准备一个启用的 Profile';
 
   return (
     <aside className="workbench-panel workbench-sidebar" aria-label="会话列表">
       <div className="workbench-panel-header">
         <div>
-          <Typography.Text strong>Agent 会话</Typography.Text>
+          <Typography.Text strong>会话历史</Typography.Text>
           <Typography.Text type="secondary" className="workbench-panel-caption">
-            按 Profile / Agent 分组 · {filteredSessions.length} 条
+            按 Agent 分组 · {filteredSessions.length} 条
           </Typography.Text>
         </div>
         <Space size={2} wrap>
@@ -217,7 +162,7 @@ export function SessionSidebar({
           options={agentOptions}
           onChange={setAgentScope}
           className="session-agent-filter"
-          aria-label="按 Agent 或 Profile 切换会话"
+          aria-label="按 Agent 筛选会话"
         />
         <Input
           allowClear
@@ -259,16 +204,44 @@ export function SessionSidebar({
           <div className="workbench-sidebar-loading">
             <Spin />
           </div>
-        ) : conversationItems.length ? (
-          <Conversations
-            className="session-conversations"
-            items={conversationItems}
-            activeKey={activeSessionId}
-            onActiveChange={(key) => {
-              if (key) onSelect(key);
-            }}
-            groupable
-          />
+        ) : groupedSessions.length ? (
+          <nav className="session-tree" aria-label="按 Agent 分组的会话">
+            {groupedSessions.map(([group, items]) => (
+              <section key={group} className="session-tree-group">
+                <h3 className="session-tree-group-title">{group}</h3>
+                <ul className="session-tree-list">
+                  {items.map((session) => {
+                    const active = session.session_id === activeSessionId;
+                    return (
+                      <li key={session.session_id}>
+                        <button
+                          type="button"
+                          className={
+                            'session-tree-item' +
+                            (active ? ' is-active' : '')
+                          }
+                          onClick={() => onSelect(session.session_id)}
+                        >
+                          <span className="session-tree-copy">
+                            <span className="session-tree-title">
+                              {sessionListTitle(session)}
+                            </span>
+                            <span className="session-tree-subtitle">
+                              {sessionListSubtitle(session)}
+                              <span className="session-tree-time">
+                                {formatRelativeTime(session.updated_at)}
+                              </span>
+                            </span>
+                          </span>
+                          <StatusTag status={session.status} />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
+            ))}
+          </nav>
         ) : (
           <Empty
             image={Empty.PRESENTED_IMAGE_SIMPLE}

@@ -34,6 +34,24 @@ function planItems(content: string): Array<{ text: string; done?: boolean }> {
     .filter((item) => item.text.length > 0);
 }
 
+export function isThinkingEntry(entry: TranscriptEntry): boolean {
+  return entry.status === 'thinking';
+}
+
+export function isBlankThinking(entry: TranscriptEntry): boolean {
+  return isThinkingEntry(entry) && !(entry.content || '').trim();
+}
+
+export function joinThinkingText(left: string, right: string): string {
+  const a = left || '';
+  const b = right || '';
+  if (!a) return b;
+  if (!b) return a;
+  if (/\s$/.test(a) || /^\s/.test(b)) return a + b;
+  if (/^[,.;:!?)]/.test(b) || /[(['"]$/.test(a)) return a + b;
+  return `${a} ${b}`;
+}
+
 function toToolEntry(entry: TranscriptEntry): ActivityEntry {
   const call = asRecord(entry.tool_call) || {};
   const result = entry.tool_result;
@@ -44,10 +62,12 @@ function toToolEntry(entry: TranscriptEntry): ActivityEntry {
       entry.tool_call_id ||
       entry.entry_id,
     id: entry.entry_id,
+    name: typeof call.name === 'string' ? call.name : undefined,
+    kind: typeof call.kind === 'string' ? call.kind : undefined,
     title:
       (typeof call.title === 'string' && call.title) ||
       entry.content ||
-      '工具调用',
+      undefined,
     status: entry.status,
     output: result,
   } as ToolCallLike);
@@ -110,17 +130,37 @@ export function activityEntryFromTranscript(
 /**
  * Applies an entry revision in place. Stable `entry_id` values let streaming
  * text and tool lifecycle updates replace their prior visible entry instead of
- * growing one row per chunk.
+ * growing one row per chunk. Consecutive thinking chunks with different ids
+ * are folded into the last thinking entry so one thought stays one block.
  */
 export function upsertTranscriptEntry(
   entries: TranscriptEntry[],
   incoming: TranscriptEntry,
 ): TranscriptEntry[] {
   const index = entries.findIndex((entry) => entry.entry_id === incoming.entry_id);
-  if (index < 0) return [...entries, incoming];
-  const next = [...entries];
-  next[index] = incoming;
-  return next;
+  if (index >= 0) {
+    const next = [...entries];
+    next[index] = incoming;
+    return next;
+  }
+
+  if (isBlankThinking(incoming)) {
+    return entries;
+  }
+
+  const last = entries[entries.length - 1];
+  if (last && isThinkingEntry(last) && isThinkingEntry(incoming)) {
+    const next = [...entries];
+    next[next.length - 1] = {
+      ...last,
+      content: joinThinkingText(last.content || '', incoming.content || ''),
+      sequence: incoming.sequence,
+      timestamp: incoming.timestamp,
+    };
+    return next;
+  }
+
+  return [...entries, incoming];
 }
 
 export function applyTranscriptEntries(
@@ -133,7 +173,20 @@ export function applyTranscriptEntries(
 export function activityEntriesFromTranscript(
   entries: TranscriptEntry[],
 ): ActivityEntry[] {
-  return entries.map(activityEntryFromTranscript);
+  const coalesced: ActivityEntry[] = [];
+  for (const raw of entries) {
+    if (isBlankThinking(raw)) continue;
+    const entry = activityEntryFromTranscript(raw);
+    const last = coalesced[coalesced.length - 1];
+    if (entry.type === 'thinking' && last?.type === 'thinking') {
+      last.text = joinThinkingText(last.text, entry.text);
+      last.created_at = entry.created_at;
+      continue;
+    }
+    if (entry.type === 'thinking' && !entry.text.trim()) continue;
+    coalesced.push(entry);
+  }
+  return coalesced;
 }
 
 function isTranscriptEntry(value: unknown): value is TranscriptEntry {

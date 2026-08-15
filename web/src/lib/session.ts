@@ -30,6 +30,15 @@ function sessionTimestamp(session: SessionSnapshot): number {
   return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
+
+export function sessionListTitle(session: SessionSnapshot): string {
+  return session.session_id;
+}
+
+export function sessionListSubtitle(session: SessionSnapshot): string {
+  return session.source?.thread_id?.trim() || session.session_id;
+}
+
 export function sortSessions(sessions: SessionSnapshot[]): SessionSnapshot[] {
   return [...sessions].sort(
     (a, b) => sessionTimestamp(b) - sessionTimestamp(a),

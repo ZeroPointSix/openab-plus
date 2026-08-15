@@ -52,6 +52,17 @@ describe('activity tool-call normalization', () => {
     });
   });
 
+
+  it('maps execute tools to bash when the payload has no name', () => {
+    const tool = normalizeToolCall({
+      call_id: 'bash-1',
+      kind: 'execute',
+      status: 'completed',
+      rawInput: { command: 'ls' },
+    });
+    expect(tool?.name).toBe('bash');
+    expect(tool?.description).toBe('ls');
+  });
   it('normalizes ACP updates and text output', () => {
     const tool = normalizeAcpToolCall({
       content: {
@@ -68,7 +79,7 @@ describe('activity tool-call normalization', () => {
 
     expect(tool).toMatchObject({
       key: 'acp-1',
-      name: '搜索会话事件',
+      name: 'search',
       status: 'running',
       description: '“SSE” in web/src',
       output: '已找到 3 处匹配。',

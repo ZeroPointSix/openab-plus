@@ -9,8 +9,8 @@ import { Alert, Button, Empty, Space, Spin, Typography, message } from 'antd';
 import { useMemo } from 'react';
 import {
   agentDisplayName,
-  formatRelativeTime,
   sourcePlatformLabel,
+  transcriptStatusLabel,
 } from '../../lib/format';
 import { activityEntriesFromTranscript } from '../../lib/transcript';
 import { useSessionTranscript } from '../../hooks/useSessionTranscript';
@@ -28,15 +28,6 @@ interface SessionMainPanelProps {
   onOpenInspector?: () => void;
 }
 
-const transcriptStatusLabels = {
-  loading: '正在加载历史',
-  connecting: '正在连接',
-  live: '实时连接',
-  reconnecting: '正在重连',
-  offline: '离线',
-  recovery_needed: '需要恢复',
-} as const;
-
 export function SessionMainPanel({
   session,
   loading,
@@ -53,6 +44,8 @@ export function SessionMainPanel({
   const showSession = Boolean(hasSelection && session && !loading);
   const hasToggles = Boolean(onOpenSidebar || onOpenInspector);
   const sourcePlatform = sourcePlatformLabel(session?.source?.platform);
+  const streamClass =
+    transcript.status === 'recovery_needed' ? 'offline' : transcript.status;
 
   const sidebarToggle = onOpenSidebar ? (
     <Button
@@ -97,30 +90,23 @@ export function SessionMainPanel({
               <Typography.Title level={5} className="workbench-status-title">
                 {agentDisplayName(session.agent)}
               </Typography.Title>
-              <Typography.Text type="secondary" code copyable>
+              <Typography.Text type="secondary" ellipsis>
                 {session.session_id}
               </Typography.Text>
             </div>
           </div>
-          <Space wrap size={[12, 8]} className="workbench-status-meta">
+          <Space wrap size={[8, 8]} className="workbench-status-meta">
             <StatusTag status={session.status} />
-            <Typography.Text type="secondary">
-              Profile {session.profile_name || session.profile_id || '-'}
-            </Typography.Text>
-            <Typography.Text type="secondary">模型 {session.model || '-'}</Typography.Text>
-            <Typography.Text
-              type="secondary"
-              className="workbench-status-workdir"
-              ellipsis={{ tooltip: session.workdir || '-' }}
-            >
-              目录 <Typography.Text code>{session.workdir || '-'}</Typography.Text>
-            </Typography.Text>
-            <Typography.Text type="secondary">
-              更新 {formatRelativeTime(session.updated_at)}
-            </Typography.Text>
+            <span className={'workbench-stream-status is-' + streamClass}>
+              <span className="stream-dot" aria-hidden="true" />
+              <span className="stream-label">
+                {transcriptStatusLabel(transcript.status)}
+              </span>
+            </span>
             {session.source?.permalink ? (
               <Button
                 size="small"
+                type="text"
                 icon={<LinkOutlined />}
                 href={session.source.permalink}
                 target="_blank"
@@ -130,8 +116,13 @@ export function SessionMainPanel({
               </Button>
             ) : null}
             {session.external_url ? (
-              <Button size="small" icon={<CopyOutlined />} onClick={copySessionLink}>
-                复制会话链接
+              <Button
+                size="small"
+                type="text"
+                icon={<CopyOutlined />}
+                onClick={copySessionLink}
+              >
+                复制链接
               </Button>
             ) : null}
             {inspectorToggle}
@@ -140,7 +131,7 @@ export function SessionMainPanel({
       ) : hasToggles ? (
         <div className="workbench-status-bar">
           <div className="workbench-status-primary">{sidebarToggle}</div>
-          <Space wrap size={[12, 8]} className="workbench-status-meta">
+          <Space wrap size={[8, 8]} className="workbench-status-meta">
             {inspectorToggle}
           </Space>
         </div>
@@ -196,16 +187,10 @@ export function SessionMainPanel({
                 }
               />
             ) : null}
-            <div className="workbench-activity-heading">
-              <div>
-                <Typography.Title level={4}>Agent 活动流</Typography.Title>
-                <Typography.Text type="secondary">
-                  连续展示回复、思考、计划、工具调用、终端输出和文件编辑差异
-                </Typography.Text>
-              </div>
-              <Typography.Text type="secondary">仅观测</Typography.Text>
-            </div>
-            <SessionActivityFeed entries={activityEntries} source="live" />
+            <SessionActivityFeed
+              entries={activityEntries}
+              streamStatus={transcript.status}
+            />
           </section>
         )}
       </div>
@@ -218,14 +203,11 @@ export function SessionMainPanel({
             本页不提供发送、插话、停止或参数修改
           </Typography.Text>
         </div>
-        <span
-          className={
-            'workbench-stream-status stream-status is-' +
-            (transcript.status === 'recovery_needed' ? 'offline' : transcript.status)
-          }
-        >
+        <span className={'workbench-stream-status is-' + streamClass}>
           <span className="stream-dot" aria-hidden="true" />
-          <span className="stream-label">{transcriptStatusLabels[transcript.status]}</span>
+          <span className="stream-label">
+            {transcriptStatusLabel(transcript.status)}
+          </span>
         </span>
       </footer>
     </main>
