@@ -312,3 +312,18 @@ export interface SessionFilters {
   profile?: string;
   updatedRange?: [string, string];
 }
+
+export interface WorkspaceFile {
+  path: string;
+  size: number;
+}
+
+export interface WorkspaceFileDocument {
+  path: string;
+  content: string;
+}
+
+export interface WorkspaceSaveResponse {
+  saved: boolean;
+  path: string;
+}

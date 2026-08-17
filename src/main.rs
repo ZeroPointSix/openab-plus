@@ -467,7 +467,15 @@ async fn main() -> anyhow::Result<()> {
         let allow_all_users = env_bool("GATEWAY_ALLOW_ALL_USERS", false);
         let allowed_users = env_set("GATEWAY_ALLOWED_USERS");
         let mut reg = PlatformTrustConfigs::new();
-        for platform in ["telegram", "line", "feishu", "wecom", "googlechat", "teams", "acp"] {
+        for platform in [
+            "telegram",
+            "line",
+            "feishu",
+            "wecom",
+            "googlechat",
+            "teams",
+            "acp",
+        ] {
             reg.insert(
                 platform,
                 TrustConfig::new(
@@ -734,22 +742,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize filestore (for uploading file attachments to S3/R2).
     #[cfg(feature = "filestore")]
-    let filestore: Option<Arc<openab_core::filestore::Filestore>> = if let Some(ref fs_cfg) =
-        cfg.filestore
-    {
-        info!(
-            bucket = %fs_cfg.bucket,
-            region = %fs_cfg.region,
-            prefix = %fs_cfg.prefix,
-            presigned_ttl = fs_cfg.presigned_ttl,
-            "filestore enabled"
-        );
-        Some(Arc::new(
-            openab_core::filestore::Filestore::new(fs_cfg).await,
-        ))
-    } else {
-        None
-    };
+    let filestore: Option<Arc<openab_core::filestore::Filestore>> =
+        if let Some(ref fs_cfg) = cfg.filestore {
+            info!(
+                bucket = %fs_cfg.bucket,
+                region = %fs_cfg.region,
+                prefix = %fs_cfg.prefix,
+                presigned_ttl = fs_cfg.presigned_ttl,
+                "filestore enabled"
+            );
+            Some(Arc::new(
+                openab_core::filestore::Filestore::new(fs_cfg).await,
+            ))
+        } else {
+            None
+        };
 
     #[cfg(feature = "slack")]
     let shared_slack_adapter: Option<Arc<slack::SlackAdapter>> = cfg.slack.as_ref().map(|s| {
@@ -809,13 +816,7 @@ async fn main() -> anyhow::Result<()> {
         configured_platforms.push("telegram");
     }
     #[cfg(feature = "googlechat")]
-    if cfg
-        .googlechat
-        .clone()
-        .unwrap_or_default()
-        .resolve()
-        .enabled
-    {
+    if cfg.googlechat.clone().unwrap_or_default().resolve().enabled {
         configured_platforms.push("googlechat");
     }
     cron::validate_cronjobs(&cfg.cron.jobs, &configured_platforms)?;
@@ -926,15 +927,15 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "filestore")]
         let gw_filestore = filestore.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) =
-                gateway::run_gateway_adapter(
-                    params,
-                    shutdown_rx,
-                    gw_dispatcher,
-                    gw_router,
-                    #[cfg(feature = "filestore")]
-                    gw_filestore,
-                ).await
+            if let Err(e) = gateway::run_gateway_adapter(
+                params,
+                shutdown_rx,
+                gw_dispatcher,
+                gw_router,
+                #[cfg(feature = "filestore")]
+                gw_filestore,
+            )
+            .await
             {
                 error!("gateway adapter error: {e}");
             }
@@ -988,7 +989,6 @@ async fn main() -> anyhow::Result<()> {
 
             // Build gateway AppState from env vars (shared factory with standalone gateway)
             let mut gw_state_inner = openab_gateway::AppState::from_env(event_tx.clone(), None);
-
 
             // First-class `[telegram]` config overrides env-derived values
             // (config-authoritative + ${} expansion + TELEGRAM_* env fallback).
@@ -1081,7 +1081,8 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
             let gw_state = Arc::new(gw_state_inner);
-            let profile_service = Arc::new(openab_core::agent_profile::AgentProfileService::from_env());
+            let profile_service =
+                Arc::new(openab_core::agent_profile::AgentProfileService::from_env());
             let config_manager = openab_gateway::config_admin::ConfigManager::from_env();
             config_manager
                 .set_runtime_applier(openab_gateway::config_admin::RuntimeConfigApplier::new(
@@ -1106,7 +1107,10 @@ async fn main() -> anyhow::Result<()> {
                     profile_service.clone(),
                     pool.clone(),
                 ))
-                .merge(openab_gateway::config_admin::router(config_manager.clone()));
+                .merge(openab_gateway::config_admin::router(config_manager.clone()))
+                .merge(openab_gateway::workspace_admin::router(
+                    openab_gateway::workspace_admin::WorkspaceManager::from_env(),
+                ));
 
             #[cfg(feature = "telegram")]
             if gw_state.telegram_bot_token.is_some() {
@@ -1270,19 +1274,22 @@ async fn main() -> anyhow::Result<()> {
 
             info!(addr = %listen_addr, "unified webhook server starting");
 
-            (Some(tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        error!(addr = %listen_addr, error = %e, "unified webhook server bind failed");
-                        return;
+            (
+                Some(tokio::spawn(async move {
+                    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            error!(addr = %listen_addr, error = %e, "unified webhook server bind failed");
+                            return;
+                        }
+                    };
+                    info!(addr = %listen_addr, "unified webhook server listening");
+                    if let Err(e) = axum::serve(listener, app).await {
+                        error!(error = %e, "unified webhook server error");
                     }
-                };
-                info!(addr = %listen_addr, "unified webhook server listening");
-                if let Err(e) = axum::serve(listener, app).await {
-                    error!(error = %e, "unified webhook server error");
-                }
-            })), Some(cron_unified_adapter))
+                })),
+                Some(cron_unified_adapter),
+            )
         } else {
             (None, None)
         }
@@ -1722,13 +1729,10 @@ allowed_users = ["u1"]
         assert_ne!(trust.decide("c2", false, "u1"), Decision::Allow);
 
         // Empty lists → allow-all (matching the old inline filter default).
-        let gw_open = config::parse_config_str(
-            "[gateway]\nurl = \"ws://gw:8080/ws\"\n",
-            "test",
-        )
-        .unwrap()
-        .gateway
-        .unwrap();
+        let gw_open = config::parse_config_str("[gateway]\nurl = \"ws://gw:8080/ws\"\n", "test")
+            .unwrap()
+            .gateway
+            .unwrap();
         let trust_open = gateway_section_trust(&gw_open);
         assert_eq!(trust_open.decide("any", false, "anyone"), Decision::Allow);
     }
