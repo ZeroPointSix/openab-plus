@@ -153,10 +153,13 @@ RUN npm install -g @agentclientprotocol/codex-acp@${CODEX_ACP_VERSION} @openai/c
 ENV HOME=/home/node
 WORKDIR /home/node
 COPY --from=builder --chown=node:node /build/target/release/openab /usr/local/bin/openab
+COPY scripts/openab-healthcheck.sh /usr/local/bin/openab-healthcheck.sh
+RUN chmod 755 /usr/local/bin/openab-healthcheck.sh
 RUN mkdir -p /home/node/.codex && chown -R node:node /home/node
 USER node
+# Probe decision matches src/main.rs admin_http_enabled_from_values(); port follows GATEWAY_LISTEN.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD pgrep -x openab || exit 1
+  CMD /usr/local/bin/openab-healthcheck.sh
 ENV OPENAB_AGENT_COMMAND="codex-acp"
 ENV OPENAB_AGENT_AUTH_COMMAND="codex login --device-auth"
 ENTRYPOINT ["tini", "--"]

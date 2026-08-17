@@ -116,6 +116,45 @@ enum Commands {
     },
 }
 
+#[cfg(any(
+    feature = "telegram",
+    feature = "line",
+    feature = "feishu",
+    feature = "googlechat",
+    feature = "wecom",
+    feature = "teams",
+    feature = "acp",
+))]
+fn admin_http_enabled_from_values(
+    explicit: Option<&str>,
+    openab_token: Option<&str>,
+    gateway_token: Option<&str>,
+) -> bool {
+    explicit.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        || openab_token.is_some_and(|value| !value.is_empty())
+        || gateway_token.is_some_and(|value| !value.is_empty())
+}
+
+#[cfg(any(
+    feature = "telegram",
+    feature = "line",
+    feature = "feishu",
+    feature = "googlechat",
+    feature = "wecom",
+    feature = "teams",
+    feature = "acp",
+))]
+fn admin_http_enabled() -> bool {
+    let explicit = std::env::var("OPENAB_ADMIN_ENABLED").ok();
+    let openab_token = std::env::var("OPENAB_ADMIN_TOKEN").ok();
+    let gateway_token = std::env::var("GATEWAY_ADMIN_TOKEN").ok();
+    admin_http_enabled_from_values(
+        explicit.as_deref(),
+        openab_token.as_deref(),
+        gateway_token.as_deref(),
+    )
+}
+
 /// Returns true if any unified platform is enabled and its corresponding
 /// feature is compiled in. Google Chat uses its config-first resolver so
 /// `[googlechat].enabled` can activate the adapter without a duplicate env var,
@@ -927,7 +966,8 @@ async fn main() -> anyhow::Result<()> {
             && std::env::var("OPENAB_ACP_ENABLED")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-        if unified_platform_enabled || cfg.telegram.is_some() || acp_enabled {
+        let admin_enabled = admin_http_enabled();
+        if unified_platform_enabled || cfg.telegram.is_some() || acp_enabled || admin_enabled {
             let listen_addr =
                 std::env::var("GATEWAY_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
 
@@ -1555,6 +1595,41 @@ mod tests {
     fn cli_setup_subcommand() {
         let cli = Cli::try_parse_from(["openab", "setup"]).unwrap();
         assert!(matches!(cli.command.unwrap(), Commands::Setup { .. }));
+    }
+
+    #[cfg(any(
+        feature = "telegram",
+        feature = "line",
+        feature = "feishu",
+        feature = "googlechat",
+        feature = "wecom",
+        feature = "teams",
+        feature = "acp",
+    ))]
+    #[test]
+    fn admin_http_starts_for_explicit_flag_or_configured_token() {
+        assert!(!admin_http_enabled_from_values(None, None, None));
+        assert!(admin_http_enabled_from_values(Some("true"), None, None));
+        assert!(admin_http_enabled_from_values(Some("TRUE"), None, None));
+        assert!(admin_http_enabled_from_values(Some("1"), None, None));
+        assert!(admin_http_enabled_from_values(None, Some("token"), None));
+        assert!(admin_http_enabled_from_values(None, None, Some("token")));
+        // Explicit false must not enable Admin by itself. Docker HEALTHCHECK
+        // used to treat any non-empty OPENAB_ADMIN_ENABLED as on; keep Rust
+        // and the shell probe aligned on this matrix.
+        assert!(!admin_http_enabled_from_values(
+            Some("false"),
+            Some(""),
+            Some("")
+        ));
+        assert!(!admin_http_enabled_from_values(Some("0"), None, None));
+        // A non-empty token still enables Admin even when the flag is false,
+        // matching production "token present => Admin on" behavior.
+        assert!(admin_http_enabled_from_values(
+            Some("false"),
+            Some("token"),
+            None
+        ));
     }
 
     #[test]
