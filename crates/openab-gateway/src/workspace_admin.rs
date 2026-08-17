@@ -42,6 +42,7 @@ pub struct WriteFileRequest {
 #[derive(Debug)]
 enum WorkspaceError {
     InvalidPath,
+    InvalidEncoding,
     NotFound,
     TooLarge,
     Io(std::io::Error),
@@ -72,15 +73,19 @@ impl WorkspaceManager {
         while let Some(dir) = pending.pop() {
             let mut entries = tokio::fs::read_dir(&dir).await?;
             while let Some(entry) = entries.next_entry().await? {
-                let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+                let path = entry.path();
+                let metadata = tokio::fs::symlink_metadata(&path).await?;
                 if metadata.file_type().is_symlink() {
                     continue;
                 }
                 if metadata.is_dir() {
-                    pending.push(entry.path());
+                    pending.push(path);
                 } else if metadata.is_file() && metadata.len() <= MAX_FILE_BYTES as u64 {
-                    let relative = entry
-                        .path()
+                    let bytes = tokio::fs::read(&path).await?;
+                    if std::str::from_utf8(&bytes).is_err() {
+                        continue;
+                    }
+                    let relative = path
                         .strip_prefix(&self.root)
                         .map_err(|_| WorkspaceError::InvalidPath)?
                         .to_string_lossy()
@@ -102,9 +107,8 @@ impl WorkspaceManager {
         if metadata.len() > MAX_FILE_BYTES as u64 {
             return Err(WorkspaceError::TooLarge);
         }
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(map_not_found)?;
+        let bytes = tokio::fs::read(&path).await.map_err(map_not_found)?;
+        let content = String::from_utf8(bytes).map_err(|_| WorkspaceError::InvalidEncoding)?;
         Ok(WorkspaceFileDocument {
             path: relative.to_string(),
             content,
@@ -183,8 +187,8 @@ where
 }
 
 async fn list_files(headers: HeaderMap, manager: Arc<WorkspaceManager>) -> Response {
-    if let Err(response) = authorize(&headers) {
-        return response;
+    if let Err(error) = authorize(&headers) {
+        return auth_error_response(error);
     }
     match manager.list().await {
         Ok(files) => Json(files).into_response(),
@@ -197,8 +201,8 @@ async fn read_file(
     Query(query): Query<FileQuery>,
     manager: Arc<WorkspaceManager>,
 ) -> Response {
-    if let Err(response) = authorize(&headers) {
-        return response;
+    if let Err(error) = authorize(&headers) {
+        return auth_error_response(error);
     }
     match manager.read(&query.path).await {
         Ok(document) => Json(document).into_response(),
@@ -211,8 +215,8 @@ async fn write_file(
     Json(request): Json<WriteFileRequest>,
     manager: Arc<WorkspaceManager>,
 ) -> Response {
-    if let Err(response) = authorize(&headers) {
-        return response;
+    if let Err(error) = authorize(&headers) {
+        return auth_error_response(error);
     }
     match manager.write(&request.path, &request.content).await {
         Ok(()) => Json(json!({ "saved": true, "path": request.path })).into_response(),
@@ -220,18 +224,18 @@ async fn write_file(
     }
 }
 
-fn authorize(headers: &HeaderMap) -> Result<(), Response> {
+#[derive(Debug)]
+enum AuthError {
+    TokenNotConfigured,
+    Unauthorized,
+}
+
+fn authorize(headers: &HeaderMap) -> Result<(), AuthError> {
     let expected = std::env::var("GATEWAY_ADMIN_TOKEN")
         .or_else(|_| std::env::var("OPENAB_ADMIN_TOKEN"))
         .ok()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "error": "admin token is not configured" })),
-            )
-                .into_response()
-        })?;
+        .ok_or(AuthError::TokenNotConfigured)?;
     let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -242,11 +246,22 @@ fn authorize(headers: &HeaderMap) -> Result<(), Response> {
     if bearer == Some(expected.as_str()) || header_token == Some(expected.as_str()) {
         Ok(())
     } else {
-        Err((
+        Err(AuthError::Unauthorized)
+    }
+}
+
+fn auth_error_response(error: AuthError) -> Response {
+    match error {
+        AuthError::TokenNotConfigured => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "admin token is not configured" })),
+        )
+            .into_response(),
+        AuthError::Unauthorized => (
             StatusCode::UNAUTHORIZED,
             Json(json!({ "error": "invalid or missing admin token" })),
         )
-            .into_response())
+            .into_response(),
     }
 }
 
@@ -265,6 +280,11 @@ fn error_response(error: WorkspaceError) -> Response {
             Json(json!({ "error": "workspace path must be a safe relative path" })),
         )
             .into_response(),
+        WorkspaceError::InvalidEncoding => (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(json!({ "error": "workspace file must be UTF-8 text" })),
+        )
+            .into_response(),
         WorkspaceError::NotFound => (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "workspace file not found" })),
@@ -279,7 +299,7 @@ fn error_response(error: WorkspaceError) -> Response {
             tracing::error!(error = %error, "workspace admin error");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": error.to_string() })),
+                Json(json!({ "error": "workspace operation failed" })),
             )
                 .into_response()
         }
@@ -310,6 +330,23 @@ mod tests {
         manager.write("AGENTS.md", "# Instructions").await.unwrap();
         let document = manager.read("AGENTS.md").await.unwrap();
         assert_eq!(document.content, "# Instructions");
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn hides_non_utf8_files_and_rejects_direct_reads() {
+        let root = std::env::temp_dir().join(format!("openab-workspace-{}", uuid::Uuid::new_v4()));
+        let manager = WorkspaceManager::new(&root);
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::write(root.join("binary.dat"), [0xff, 0xfe])
+            .await
+            .unwrap();
+
+        assert!(manager.list().await.unwrap().is_empty());
+        assert!(matches!(
+            manager.read("binary.dat").await,
+            Err(WorkspaceError::InvalidEncoding)
+        ));
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

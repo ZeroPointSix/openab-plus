@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { PageContainer } from '@ant-design/pro-components';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Button, Card, Empty, Input, List, Space, Typography, message } from 'antd';
+import { Alert, Button, Card, Empty, Input, List, Modal, Space, Typography, message } from 'antd';
 import { SaveOutlined } from '@ant-design/icons';
 import { adminApi, ApiError } from '../lib/api';
 
@@ -50,11 +50,26 @@ export function WorkspacePage() {
     },
   });
 
+  const selectPath = (path: string) => {
+    setPathInput(path);
+    setSelectedPath(path);
+  };
+
   const openPath = (path: string) => {
     const next = path.trim();
-    if (!next) return;
-    setPathInput(next);
-    setSelectedPath(next);
+    if (!next || next === selectedPath) return;
+    if (dirty) {
+      Modal.confirm({
+        title: '放弃未保存的修改？',
+        content: `切换到 ${next} 将丢失 ${selectedPath} 的未保存内容。`,
+        okText: '放弃并切换',
+        okButtonProps: { danger: true },
+        cancelText: '继续编辑',
+        onOk: () => selectPath(next),
+      });
+      return;
+    }
+    selectPath(next);
   };
 
   return (
@@ -132,4 +147,3 @@ export function WorkspacePage() {
     </PageContainer>
   );
 }
-
