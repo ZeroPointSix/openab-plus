@@ -14,6 +14,8 @@ Users want the Admin web UI to work like the Cursor and Factory Droid web UI. Th
 
 The OpenAB service is different from a desktop tool. The gateway is a daemon, and it runs many ACP sessions at the same time (`[pool] max_sessions = 10`). An ACP CLI reads its configuration one time, at process start. Therefore a live change of the model of a running session is not possible without a restart of the process.
 
+The scope is small on purpose. The feature has two halves: **a backend configuration interface, and a frontend switch.** Section 2, D7 states what stays out.
+
 ### Current state
 
 | Area | Current state | Gap |
@@ -42,6 +44,23 @@ The OpenAB service is different from a desktop tool. The gateway is a daemon, an
 | **D2** | To apply a profile, write the configuration files of the CLI in the user home directory (`~/.codex/config.toml`, `~/.claude/settings.json`, and equivalent). This is the same method as cc-switch. A per-agent apply lock and an applied-configuration snapshot make the method safe for concurrent sessions. |
 | **D3** | Use seven thinking levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Map each level to a native value with a per-model table. A `null` value means that the model does not support the level. |
 | **D4** | Build the provider layer in phase P0. The user gives the API key one time, and more than one agent can use it. |
+| **D5** | P0 gives a renderer to `codex` and `claude` only. The other types in `COMMON_AGENT_TYPES` (`gemini`, `opencode`, `kiro`, `cursor`, `hermes`) fall back to argv and environment variables. |
+| **D6** | P0 gives a blank provider form. A provider preset list is a P1 item. |
+| **D7** | **Scope guard.** This feature is a configuration switch. It does not include a cost multiplier, a rate limit, a quota, usage metering, or billing data. We take the configuration mechanism of cc-switch, and we do not take its commercial surface. |
+
+### D7 in detail
+
+The reference projects hold features that a product needs, and that this feature does not need. The following items are out of scope, and a reviewer must reject a PR that adds them under this ADR:
+
+| Out of scope | Reason |
+|---|---|
+| A cost multiplier per model (the `2x` and `0.56x` labels of the Factory UI) | Display of a commercial term. Not a configuration value. |
+| A rate limit or a quota per provider | Requires metering and an enforcement path. A separate feature. |
+| Usage counting, a token ledger, or a spend report | The same. |
+| A provider health check with a latency ranking or automatic failover | A routing feature. Some cc-switch forks add this, and we do not. |
+| An API-key pool with a rotation policy | The same. |
+
+`POST /api/v1/providers/{id}/test` in P1 is not in this list. It sends one request to confirm that a credential works, and it stores nothing.
 
 ---
 
@@ -49,7 +68,7 @@ The OpenAB service is different from a desktop tool. The gateway is a daemon, an
 
 ### 3.1 cc-switch (farion1231/cc-switch, 127.6k stars, Rust + Tauri + TypeScript)
 
-cc-switch is the primary reference. It solves the same problem for a desktop user: select a provider and a model for Claude Code, Codex, Gemini, and other CLIs.
+cc-switch is the primary reference. It solves the same problem for a desktop user: select a provider and a model for Claude Code, Codex, Gemini, and other CLIs. We take its configuration mechanism and its file-write discipline. We do not take its commercial or routing features, per D7.
 
 **Source of truth and apply step.** cc-switch keeps its own data in `~/.cc-switch/config.json` (`get_app_config_path()`). To make a provider active, it writes the configuration file of the target CLI (`~/.claude/settings.json`, or `~/.codex/config.toml` with `auth.json`). One applier module exists per CLI: `codex_config.rs` (210 KB), `hermes_config.rs` (89 KB), `claude_desktop_config.rs` (80 KB). **We adopt this two-level model: our profile store is the source of truth, and an applier writes the CLI file.**
 
@@ -65,7 +84,7 @@ cc-switch is the primary reference. It solves the same problem for a desktop use
 | Directory override | `get_claude_override_dir()` lets the user move the target directory. |
 | Legacy fallback | A v3.10.3 path fallback keeps an old installation readable. |
 
-**Model catalog (`src/config/piModelCatalog.ts`).** The key is `vendor/model`. The value holds `capabilities { name, reasoning, input, contextWindow, maxTokens }`. `name` is the display name, and `reasoning` states whether the model supports a thinking level. The helper `piModel(catalogKey, { id, thinkingProfile, ...overrides })` separates the logical model identity from the real model ID of one provider. **This separation is necessary for us, because the same model has a different ID on a different gateway.**
+**Model catalog (`src/config/piModelCatalog.ts`).** The key is `vendor/model`. The value holds `capabilities { name, reasoning, input, contextWindow, maxTokens }`. The helper `piModel(catalogKey, { id, thinkingProfile, ...overrides })` separates the logical model identity from the real model ID of one provider. **We adopt the identity split, because the same model has a different ID on a different gateway. We do not adopt the full capability record in P0.** Section 4.5 defines the reduced entry.
 
 **Thinking levels (`src/config/piThinkingProfiles.ts`).** `PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]`. Each profile holds a map from a level to a native value:
 
@@ -77,9 +96,9 @@ openaiResponsesGpt56: { map: { off: "none", low: "low", medium: "medium", high: 
 
 The value semantics are exact: `null` means that the model does not support the level, and the UI must disable it. A missing key means unknown. An empty object `{}` means "use the default of the model". A binding record `{ catalogKey, api, profileId, modelCompat? }` selects the profile, where `api` is `anthropic-messages`, `openai-responses`, or `google-generative-ai`. **The map is therefore keyed on (model x API protocol), not on the model alone.** We adopt the level list, the three-state value semantics, and the protocol dimension.
 
-**Capability registry (`src-tauri/src/model_capabilities.rs`).** `ImageInputCapability` is `Supported`, `Unsupported`, or `Unknown`. The code separates `Unknown` from `Supported` on purpose. `is_confirmed_text_only_model` matches an exact suffix, not a prefix, because `glm-5.2` is text-only and `glm-5.2v` must stay image-capable. `normalize_model_id` removes a `models/` prefix, removes the `[1M]` context marker, lowercases the value, and takes the last segment of `vendor/model`. An unconfirmed variant always passes. **This fail-open rule is the reason that our own list never blocks a new model. We adopt it.**
+**Capability registry (`src-tauri/src/model_capabilities.rs`).** `ImageInputCapability` is `Supported`, `Unsupported`, or `Unknown`. The code separates `Unknown` from `Supported` on purpose. `is_confirmed_text_only_model` matches an exact suffix, not a prefix, because `glm-5.2` is text-only and `glm-5.2v` must stay image-capable. `normalize_model_id` removes a `models/` prefix, removes the `[1M]` context marker, lowercases the value, and takes the last segment of `vendor/model`. An unconfirmed variant always passes. **We adopt the fail-open rule and the exact-suffix match, because our own list must never block a new model.** The image and context fields themselves are not needed for a model switch.
 
-**Provider presets (`src/config/universalProviderPresets.ts`).** `UniversalProviderPreset` holds `name`, `providerType`, `defaultApps { claude, codex, gemini }`, and `defaultModels { claude: { model, haikuModel, sonnetModel, opusModel }, codex: { model, reasoningEffort }, gemini: { model } }`. The signature `createUniversalProviderFromPreset(preset, id, baseUrl, apiKey, customName)` shows the contract: **a preset gives default values only, and the user gives the base URL and the API key.** One universal provider record fills the configuration of Claude, Codex, and Gemini together. We adopt this shape for `providers.toml`.
+**Provider presets (`src/config/universalProviderPresets.ts`).** `UniversalProviderPreset` holds `name`, `providerType`, `defaultApps { claude, codex, gemini }`, and `defaultModels { claude: { model, haikuModel, sonnetModel, opusModel }, codex: { model, reasoningEffort }, gemini: { model } }`. The signature `createUniversalProviderFromPreset(preset, id, baseUrl, apiKey, customName)` shows the contract: **a preset gives default values only, and the user gives the base URL and the API key.** We adopt this shape for `providers.toml`. Per D6, P0 ships no preset data, only the blank form.
 
 **Where cc-switch does not fit.** cc-switch has exactly one active provider for the machine. Our gateway runs concurrent sessions. Section 4.7 defines the rules that make the same write method safe for us.
 
@@ -160,6 +179,8 @@ codex = { model = "gpt-5.6-sol", thinking = "high" }
 claude = { model = "claude-sonnet-5" }
 ```
 
+The record holds four fields and a default-model map. It holds no rate limit, no cost multiplier, and no quota, per D7.
+
 `api_key_ref` uses the reference syntax of `docs/secrets-management.md` (`exec://<script> <key>`, `aws-sm://<id>#<key>`, `${secrets.x}`). The gateway resolves the reference in memory, and it never writes the plaintext value to `providers.toml`. Resolution is fail-closed: if the reference does not resolve, the session does not start.
 
 ### 4.4 Thinking levels
@@ -184,13 +205,24 @@ Rules:
 
 - `null` means unsupported. `GET /api/v1/agents/{agent}/config-schema` marks the level as disabled, and the UI shows it greyed out.
 - A missing entry means unknown. The gateway passes the level through and records a warning. It does not block the session (fail-open, per section 3.1).
-- The token values in the Anthropic column are a proposal. Confirm them against the live ACP schema before merge. See open question 3.
+- The token values in the Anthropic column are a proposal. Confirm them against the live ACP schema before merge. See section 9, item Q3.
 
 ### 4.5 Model list, in three levels
 
 1. **Live ACP schema first.** If `pool.config_schema_for_agent` returns a model field with `options`, use those values. This is the true list of the installed CLI.
-2. **Catalog fallback.** If the CLI gives no list, use the catalog. A catalog entry holds the display name, the capability flags, and the real ID for each provider.
+2. **Catalog fallback.** If the CLI gives no list, use the catalog.
 3. **Free text always permitted.** The dropdown accepts a value that is not in the list. The gateway does not reject an unknown model.
+
+A catalog entry holds three things only:
+
+```text
+catalog key      "openai/gpt-5.6-sol"       stable identity used by a profile
+display name     "GPT-5.6 Sol"              shown in the dropdown
+real model ID    per provider               sent to the CLI
+thinking profile ID of the map in 4.4       decides which levels are enabled
+```
+
+The entry holds no context window, no image flag, no maximum tokens, and no price. A model switch does not need them. Add a field later only when a caller needs it.
 
 ### 4.6 Apply pipeline
 
@@ -206,6 +238,7 @@ profiles.d/<agent>.toml  (source of truth)
   per-agent renderer  (crates/openab-gateway/src/adapters/<agent>.rs, new)
         │   catalog key   -> real model ID
         │   thinking level -> native value
+        │   P0: codex and claude only (D5)
         ▼
   three injection channels, in this order of preference
         1. argv flag        (--model)            preferred, no file write
@@ -217,7 +250,7 @@ profiles.d/<agent>.toml  (source of truth)
   record the applied values in SessionSnapshot
 ```
 
-Only a value that has no flag and no environment variable reaches the file. This keeps the number of file writes low, and it keeps most sessions independent.
+Only a value that has no flag and no environment variable reaches the file. This keeps the number of file writes low, and it keeps most sessions independent. An agent type with no renderer (D5) uses channel 1 and channel 2 only, so it never writes a file.
 
 ### 4.7 Concurrency and user-file safety rules
 
@@ -241,7 +274,8 @@ D2 writes a file that the user owns, and that other sessions read. These rules a
 | `GET /api/v1/agents/{agent}/config-schema` | Add `options` and `disabled_options` to the model field. Add the thinking field with the seven levels, and the disabled set for the selected model. |
 | `GET /api/v1/providers` | New. Returns every provider. The API key is masked, for example `sk-...4f2a`. |
 | `PUT /api/v1/providers/{id}` | New. The `api_key` field is write-only. The response never returns the value. |
-| `POST /api/v1/providers/{id}/test` | New, optional. Sends one cheap request to `base_url` to confirm that the credential works. |
+| `DELETE /api/v1/providers/{id}` | New. Rejected while a profile still refers to the provider. |
+| `POST /api/v1/providers/{id}/test` | P1, optional. Sends one cheap request to `base_url` to confirm that the credential works. Stores no result. |
 | `POST /api/v1/sessions` | No shape change. The web client starts to send `model`, `reasoning_effort`, and `config_options`. |
 | `GET /api/v1/sessions/{id}` | `SessionSnapshot` gains `applied_provider`, `applied_model_id`, and `applied_thinking`. `metadata_source` stays. |
 | `GET/PUT /api/v1/agent-profiles` | No shape change. The store reads and writes `profiles.d`. |
@@ -251,7 +285,7 @@ D2 writes a file that the user owns, and that other sessions read. These rules a
 ### 4.9 Web UI
 
 - `ProfilesPage.tsx`: replace the `default_model` `ProFormText` with a searchable select. Replace `reasoning_effort` with a seven-step segmented control. A disabled level shows a reason on hover.
-- New `ProvidersPage.tsx`: a list of providers, and a form with name, base URL, and API key. The key field shows the masked value and a Replace action.
+- New `ProvidersPage.tsx`: a list of providers, and a blank form with name, base URL, and API key (D6). The key field shows the masked value and a Replace action. No preset picker in P0.
 - `SessionWorkbenchPage.tsx` and `NewAgentWizard.tsx`: add a model control and a thinking control to the session-start form, and send the values as overrides.
 - Session header: show the applied provider, model, and thinking level from the snapshot.
 
@@ -261,8 +295,8 @@ D2 writes a file that the user owns, and that other sessions read. These rules a
 
 | Phase | Scope | Acceptance |
 |---|---|---|
-| **P0** | `profiles.d` split with migration and `schema_version`; `providers.toml` with `api_key_ref`; seven-level thinking with the map; model dropdown from the live schema with a catalog fallback; provider CRUD API and page; apply lock (R1), snapshot (R2), merge (R3), backup (R4). | A user selects a provider, a model, and a thinking level in the UI, starts a session, and the snapshot shows the same values. Two concurrent sessions with a different profile both start, and each one uses its own values. |
-| **P1** | `POST /api/v1/providers/{id}/test`; `openab config restore-cli-config`; the full model catalog with capability flags and the fail-open normaliser; the R7 conflict warning. | A wrong API key gives a clear message before the session starts. |
+| **P0** | `profiles.d` split with migration and `schema_version`; `providers.toml` with `api_key_ref`; seven-level thinking with the map; model dropdown from the live schema with a catalog fallback; provider CRUD API and a blank provider form; renderers for `codex` and `claude` only; R1 to R6. | A user selects a provider, a model, and a thinking level in the UI, starts a session, and the snapshot shows the same values. Two concurrent sessions with a different profile both start, and each one uses its own values. An agent type with no renderer still starts, and it uses argv and environment values. |
+| **P1** | Provider preset list; `POST /api/v1/providers/{id}/test`; `openab config restore-cli-config`; a wider catalog with the fail-open normaliser; the R7 conflict warning. | A wrong API key gives a clear message before the session starts. A preset fills the base URL and the default models, and the user adds only the key. |
 | **P2** | `[apply] target = "isolated"`; the ZER-707 path that pushes a profile change to a live session, which needs a restart of the ACP process. | A profile change reaches a live session, and the transcript records the restart. |
 
 ---
@@ -273,26 +307,20 @@ D2 writes a file that the user owns, and that other sessions read. These rules a
 - **One file per agent type.** The user asked for this. It also removes a class of merge conflict, because a change to the Codex profile never touches the Claude file.
 - **Write the file of the CLI.** The user chose this method instead of an isolated directory. It matches cc-switch, and the behaviour is easy to inspect: the user opens `~/.codex/config.toml` and sees the result. Section 4.7 pays the cost of this choice.
 - **A provider layer in P0.** An API key per profile means that the user types the same key many times. The cc-switch preset contract shows that a preset, a base URL, and a key are enough.
+- **Two renderers, not seven.** `codex` and `claude` are the two agent types that need a file write. The other five have a flag or a variable for the same setting, so a renderer for them adds code with no gain.
+- **A small record, not a catalog product.** D7 keeps the feature at the size of the requirement: a backend configuration interface, and a frontend switch.
 
 ---
 
 ## 7. Alternatives Considered
 
-### A1 - An isolated configuration directory per profile (rejected for P0, kept as R8)
-
-Write to `$OPENAB_HOME/agents/<profile_id>/.codex/config.toml`, and point `CODEX_HOME` at the directory. This removes every concurrency rule of section 4.7, and it never touches a file that the user owns. It is rejected for P0, because the user wants the visible behaviour of cc-switch. It stays available behind `[apply] target = "isolated"`.
-
-### A2 - argv and environment variables only, with no file write
-
-The cleanest option, and stateless. It fails because not every CLI exposes every setting as a flag. Codex reads `approval_policy` from `config.toml` only.
-
-### A3 - A live switch inside a running session
-
-Out of scope, and ZER-568 states this. An ACP CLI reads its configuration at start, so a live switch needs a process restart. That work is the P2 item that ZER-707 tracks.
-
-### A4 - A free-text model field, which is the current state
-
-Keep the text input, and validate the value at session start. Rejected. The user asked for a dropdown, and a typing error currently fails only when the session starts.
+| Option | Verdict |
+|---|---|
+| **A1** An isolated configuration directory per profile, with `CODEX_HOME` pointed at it | Rejected for P0, kept as R8. It removes every rule of section 4.7, and it never touches a file that the user owns, but it loses the visible cc-switch behaviour that the owner asked for. |
+| **A2** argv and environment variables only, with no file write | Rejected as a general rule, and adopted for the five agent types with no renderer (D5). It fails for `codex`, because Codex reads `approval_policy` from `config.toml` only. |
+| **A3** A live switch inside a running session | Out of scope, and ZER-568 states this. An ACP CLI reads its configuration at start, so a live switch needs a process restart. That work is the P2 item that ZER-707 tracks. |
+| **A4** A free-text model field, which is the current state | Rejected. The user asked for a dropdown, and a typing error currently fails only when the session starts. |
+| **A5** A full model catalog with capability flags, prices, and multipliers, as cc-switch and the Factory UI show | Rejected by D7. It turns a configuration switch into a catalogue product, and it needs data that we cannot keep current. |
 
 ---
 
@@ -305,21 +333,32 @@ Keep the text input, and validate the value at session start. Rejected. The user
 | Our thinking map becomes stale when a provider adds a level. | Medium | Fail-open for an unknown key, and the live ACP schema has priority over the catalog. |
 | An API key leaks into a log or a configuration file. | High | Store a reference only, resolve in memory, `0600` on any credential file, mask the value in every response, and keep the existing sanitised-environment rule. |
 | The migration from `agent-profiles.toml` loses a profile. | High | Copy, do not move. Keep the old file as `.migrated`, and add a round-trip test. |
+| Scope grows into routing, metering, or billing. | Medium | D7 lists the rejected items, so a reviewer has a written rule. |
 
 ---
 
-## 9. Open Questions
+## 9. Questions
 
-1. Which agent types get a renderer in P0? Proposal: `codex` and `claude` only. The other five types in `COMMON_AGENT_TYPES` fall back to argv and environment variables.
-2. Do we ship a provider preset list like cc-switch (`codexProviderPresets.ts` is 74 KB), or only a blank form in P0?
-3. Is the Anthropic column of section 4.4 correct, or does the ACP layer accept a level name directly?
-4. Does `providers.toml` need a per-provider rate limit or a cost multiplier, as the Factory UI shows (`2x`, `0.56x`)?
+### Resolved (2026-08-17, by the issue owner)
+
+| # | Question | Answer |
+|---|---|---|
+| Q1 | Which agent types get a renderer in P0? | `codex` and `claude` only. The other five fall back to argv and environment variables. Now D5. |
+| Q2 | Does P0 ship a provider preset list? | No. P0 ships a blank form, and the preset list is a P1 item. Now D6. |
+| Q4 | Does `providers.toml` need a rate limit or a cost multiplier? | No. The feature is a configuration switch, and it takes no commercial feature from the reference projects. Now D7. |
+
+### Remaining
+
+| # | Question | Owner |
+|---|---|---|
+| Q3 | Is the Anthropic column of section 4.4 correct, or does the ACP layer accept a level name directly? Check `crates/openab-core/src/acp/protocol.rs` and the upstream `claude-code-acp` schema. | Implementation PR 1 |
+| Q5 | Does the OpenClaw and Hermes Agent research (section 3.3) change any rule of section 4.7? | Implementation PR 1 |
 
 ---
 
 ## Consequences
 
-- **Positive:** The Admin UI reaches parity with the Cursor and Factory model picker. A key is entered one time. A profile change is predictable, because it applies at the next session.
+- **Positive:** The Admin UI reaches parity with the Cursor and Factory model picker for the part that matters, which is the switch itself. A key is entered one time. A profile change is predictable, because it applies at the next session.
 - **Negative:** The gateway now writes a file that the user owns. This adds the apply lock, the snapshot, the merge, and the backup work. A concurrent conflict is still possible, and R7 only reports it.
 - **Mitigation:** R8 keeps the isolated-directory design one configuration value away.
 
