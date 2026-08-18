@@ -17,6 +17,7 @@ pub mod media;
 pub mod multibot_cache;
 #[cfg(feature = "pre-seed")]
 pub mod pre_seed;
+pub mod presentation;
 pub mod profile_store;
 pub mod reactions;
 #[cfg(feature = "discord")]
