@@ -297,9 +297,8 @@ for line in sys.stdin:
         .is_some_and(|id| id.starts_with("admin:")));
 }
 
-/// ZER-568: Admin session creation must forward profile overrides to the ACP
-/// agent at session start (cwd + session/set_config_option), not only persist
-/// them on the HTTP snapshot.
+/// ZER-568 v2: Codex model/thinking are rendered into ~/.codex before spawn.
+/// Session start may still override cwd and non-model ACP config options.
 #[cfg(unix)]
 #[tokio::test]
 async fn session_creation_applies_start_overrides_to_acp_agent() {
@@ -307,6 +306,8 @@ async fn session_creation_applies_start_overrides_to_acp_agent() {
     let server = spawn_admin_server(&env).await;
     let client = reqwest::Client::new();
     let agent_dir = tempfile::tempdir().expect("fake agent tempdir");
+    let home_dir = tempfile::tempdir().expect("cli home tempdir");
+    std::env::set_var("OPENAB_TEST_HOME", home_dir.path());
     let override_dir = agent_dir.path().join("override-project");
     std::fs::create_dir_all(&override_dir).expect("override workdir");
     let log_path = agent_dir.path().join("acp-trace.jsonl");
@@ -369,8 +370,8 @@ for line in sys.stdin:
         agent_path.to_string_lossy().into_owned(),
         log_path.to_string_lossy().into_owned(),
     ];
-    profile.default_model = Some("gpt-4".into());
-    profile.reasoning_effort = Some("low".into());
+    profile.default_model = Some("gpt-5".into());
+    profile.reasoning_effort = Some("high".into());
     profile.working_dir = Some("/profile/default".into());
     profile
         .config_options
@@ -388,8 +389,6 @@ for line in sys.stdin:
             "profile_id": "codex-overrides",
             "overrides": {
                 "working_dir": override_workdir,
-                "model": "gpt-5",
-                "reasoning_effort": "high",
                 "config_options": {
                     "approval_policy": "never"
                 }
@@ -415,6 +414,18 @@ for line in sys.stdin:
         .as_str()
         .is_some_and(|id| id.starts_with("admin:")));
 
+    let codex_config = home_dir.path().join(".codex/config.toml");
+    let codex_body = tokio::fs::read_to_string(&codex_config)
+        .await
+        .expect("codex config written before spawn");
+    assert!(
+        codex_body.contains("gpt-5"),
+        "expected profile model in ~/.codex/config.toml, got: {codex_body}"
+    );
+    assert!(
+        codex_body.contains("model_reasoning_effort") && codex_body.contains("high"),
+        "expected profile thinking in ~/.codex/config.toml, got: {codex_body}"
+    );
     let trace = std::fs::read_to_string(&log_path).expect("ACP trace log");
     let events: Vec<Value> = trace
         .lines()
@@ -428,20 +439,14 @@ for line in sys.stdin:
         "expected session/new cwd override, got: {events:?}"
     );
     assert!(
-        events.iter().any(|event| {
-            event["method"] == "session/set_config_option"
-                && event["configId"] == "model"
-                && event["value"] == "gpt-5"
+        events.iter().all(|event| {
+            !(event["method"] == "session/set_config_option"
+                && matches!(
+                    event["configId"].as_str(),
+                    Some("model") | Some("reasoning_effort")
+                ))
         }),
-        "expected model override via set_config_option, got: {events:?}"
-    );
-    assert!(
-        events.iter().any(|event| {
-            event["method"] == "session/set_config_option"
-                && event["configId"] == "reasoning_effort"
-                && event["value"] == "high"
-        }),
-        "expected reasoning_effort override via set_config_option, got: {events:?}"
+        "codex model/thinking must not use set_config_option in v2, got: {events:?}"
     );
     assert!(
         events.iter().any(|event| {
@@ -451,6 +456,7 @@ for line in sys.stdin:
         }),
         "expected config_options override via set_config_option, got: {events:?}"
     );
+    std::env::remove_var("OPENAB_TEST_HOME");
 }
 
 /// ZER-568: Claude model and effort must be present in the process environment
