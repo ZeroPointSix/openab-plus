@@ -39,19 +39,6 @@ pub async fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()>
     Ok(())
 }
 
-#[cfg(unix)]
-pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    atomic_write(path, contents).await?;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    atomic_write(path, contents).await
-}
-
 pub async fn restore_from_openab_bak(path: &Path) -> Result<bool> {
     let bak = openab_bak_path(path);
     if !tokio::fs::try_exists(&bak).await.unwrap_or(false) {
