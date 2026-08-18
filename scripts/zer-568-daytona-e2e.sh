@@ -99,6 +99,30 @@ run_remote "curl -sf -X POST ${BASE_URL}/api/v1/sessions \
   -H 'Content-Type: application/json' \
   -d '{\"profile_id\":\"claude-live\",\"overrides\":{\"model\":\"claude-opus-4\",\"reasoning_effort\":\"high\"}}' | tee /tmp/session-claude.json"
 
+echo "==> Asserting codex override landed via ACP"
+run_remote "python3 - <<'PY'
+import json, sys
+data = json.load(open('/tmp/session-codex.json'))
+assert data.get('profile_id') == 'codex-live', data
+assert data.get('reasoning_effort') == 'high', data
+assert data.get('model'), f'expected model in snapshot: {data}'
+errors = data.get('profile_config_errors') or []
+assert not errors, errors
+print('codex ok:', data.get('model'), data.get('reasoning_effort'))
+PY"
+
+echo "==> Asserting claude surfaces honest config errors (no prompt fallback)"
+run_remote "python3 - <<'PY'
+import json
+data = json.load(open('/tmp/session-claude.json'))
+assert data.get('profile_id') == 'claude-live', data
+errors = data.get('profile_config_errors') or []
+assert errors, f'expected profile_config_errors for claude without set_config_option: {data}'
+ids = {e.get('config_id') for e in errors}
+assert 'model' in ids and 'reasoning_effort' in ids, errors
+print('claude ok: profile_config_errors=', ids)
+PY"
+
 echo "==> Fetching workspace files"
 run_remote "curl -sf -H 'Authorization: Bearer ${ADMIN_TOKEN}' ${BASE_URL}/api/v1/workspace/files | head -c 2000"
 

@@ -453,6 +453,132 @@ for line in sys.stdin:
     );
 }
 
+/// ZER-568: agents without `session/set_config_option` must not get silent prompt
+/// fallback at profile apply time; overrides surface as `profile_config_errors`.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_creation_records_config_errors_when_acp_rejects_set_config_option() {
+    let env = AdminTestEnv::new().await;
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let agent_dir = tempfile::tempdir().expect("fake agent tempdir");
+    let log_path = agent_dir.path().join("acp-trace.jsonl");
+    let agent_path = agent_dir.path().join("fake_claude_acp_agent.py");
+    std::fs::write(
+        &agent_path,
+        r#"import json
+import sys
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/openab-fake-acp.jsonl"
+
+def trace(event):
+    with open(LOG, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    params = request.get("params") or {}
+    req_id = request.get("id")
+    if method == "initialize":
+        result = {
+            "agentInfo": {"name": "fake-claude-acp"},
+            "agentCapabilities": {"loadSession": False},
+        }
+    elif method == "session/new":
+        trace({"method": "session/new", "cwd": params.get("cwd")})
+        result = {"sessionId": "fake-claude-session"}
+    elif method == "session/set_config_option":
+        trace({"method": "session/set_config_option", "rejected": True})
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            ),
+            flush=True,
+        )
+        continue
+    elif method == "session/prompt":
+        trace({"method": "session/prompt", "prompt": params.get("prompt")})
+        result = {}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}), flush=True)
+"#,
+    )
+    .expect("write fake Claude ACP agent");
+
+    let mut profile = AgentProfile::new("claude-strict", "Claude Strict", "claude");
+    profile.command = Some("python3".into());
+    profile.args = vec![
+        agent_path.to_string_lossy().into_owned(),
+        log_path.to_string_lossy().into_owned(),
+    ];
+    profile.default_model = Some("claude-sonnet-4".into());
+    profile.reasoning_effort = Some("high".into());
+    env.profile_service()
+        .upsert(profile)
+        .await
+        .expect("save claude strict profile");
+
+    let created = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "profile_id": "claude-strict",
+            "overrides": {
+                "model": "claude-opus-4",
+                "reasoning_effort": "high"
+            }
+        }))
+        .send()
+        .await
+        .expect("create claude session");
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let snapshot = created.json::<Value>().await.expect("created session json");
+    assert_eq!(snapshot["profile_id"], "claude-strict");
+
+    let config_errors = snapshot["profile_config_errors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !config_errors.is_empty(),
+        "expected profile_config_errors when set_config_option is unsupported, got: {snapshot:?}"
+    );
+    assert!(
+        config_errors.iter().any(|entry| {
+            entry["config_id"].as_str() == Some("model")
+                && entry["error"]
+                    .as_str()
+                    .is_some_and(|msg| msg.contains("session/set_config_option unsupported"))
+        }),
+        "expected model config error, got: {config_errors:?}"
+    );
+    assert!(
+        config_errors
+            .iter()
+            .any(|entry| entry["config_id"].as_str() == Some("reasoning_effort")),
+        "expected reasoning_effort config error, got: {config_errors:?}"
+    );
+
+    let trace = std::fs::read_to_string(&log_path).expect("ACP trace log");
+    let events: Vec<Value> = trace
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("trace json line"))
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["method"] == "session/prompt"),
+        "profile apply must not use prompt fallback, got: {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn profiles_crud_default_and_validate() {
     let env = AdminTestEnv::new().await;
