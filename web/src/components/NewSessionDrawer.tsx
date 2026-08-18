@@ -1,22 +1,15 @@
 import { useEffect, useMemo } from 'react';
 import {
   DrawerForm,
-  ProFormGroup,
-  ProFormList,
   ProFormSelect,
   ProFormText,
 } from '@ant-design/pro-components';
-import { useQuery } from '@tanstack/react-query';
-import { Form } from 'antd';
-import { adminApi } from '../lib/api';
+import { Form, Typography } from 'antd';
 import { AgentProfile, CreateSessionRequest } from '../types';
 
 interface SessionFormValues {
   profile_id: string;
   working_dir?: string;
-  model?: string;
-  reasoning_effort?: string;
-  config_entries?: Array<{ key?: string; value?: string }>;
 }
 
 interface NewSessionDrawerProps {
@@ -27,10 +20,6 @@ interface NewSessionDrawerProps {
   onOpenChange: (open: boolean) => void;
   onSubmit: (request: CreateSessionRequest) => Promise<unknown>;
 }
-
-const THINKING_LEVELS = [
-  'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max',
-];
 
 export function NewSessionDrawer({
   open,
@@ -49,35 +38,6 @@ export function NewSessionDrawer({
   const selectedProfile = enabledProfiles.find(
     (profile) => profile.id === profileId,
   );
-  const schemaQuery = useQuery({
-    queryKey: ['profileSchema', selectedProfile?.agent_type],
-    queryFn: () => adminApi.profileSchema(selectedProfile?.agent_type as string),
-    enabled: Boolean(selectedProfile?.agent_type),
-  });
-  const fields = schemaQuery.data?.fields || [];
-  const modelOptions = useMemo(
-    () =>
-      Array.from(
-        new Set([
-          ...(fields.find((field) => field.id === 'model')?.options || []),
-          ...(selectedProfile?.default_model ? [selectedProfile.default_model] : []),
-        ]),
-      ).map((value) => ({ label: value, value })),
-    [fields, selectedProfile?.default_model],
-  );
-  const reasoningOptions = useMemo(() => {
-    const supported =
-      fields.find((field) => field.id === 'reasoning_effort')?.options || [];
-    const values = supported.length ? supported : THINKING_LEVELS;
-    return Array.from(
-      new Set([
-        ...values,
-        ...(selectedProfile?.reasoning_effort
-          ? [selectedProfile.reasoning_effort]
-          : []),
-      ]),
-    ).map((value) => ({ label: value, value }));
-  }, [fields, selectedProfile?.reasoning_effort]);
 
   useEffect(() => {
     if (!open) return;
@@ -101,19 +61,10 @@ export function NewSessionDrawer({
         submitButtonProps: { loading: submitting },
       }}
       onFinish={async (values) => {
-        const configOptions = Object.fromEntries(
-          (values.config_entries || [])
-            .filter((entry) => entry.key?.trim() && entry.value?.trim())
-            .map((entry) => [entry.key!.trim(), entry.value!.trim()]),
-        );
         await onSubmit({
           profile_id: values.profile_id,
           overrides: {
             working_dir: values.working_dir?.trim() || undefined,
-            model: values.model || undefined,
-            reasoning_effort: values.reasoning_effort || undefined,
-            config_options:
-              Object.keys(configOptions).length > 0 ? configOptions : undefined,
           },
         });
         return true;
@@ -129,40 +80,21 @@ export function NewSessionDrawer({
         rules={[{ required: true, message: '请选择 Profile' }]}
         showSearch
       />
-      <ProFormGroup>
-        <ProFormSelect
-          name="model"
-          label="模型覆盖"
-          width="md"
-          options={modelOptions}
-          placeholder={selectedProfile?.default_model || '使用 Profile 默认值'}
-          allowClear
-          showSearch
-        />
-        <ProFormSelect
-          name="reasoning_effort"
-          label="思考级别覆盖"
-          width="md"
-          options={reasoningOptions}
-          placeholder={selectedProfile?.reasoning_effort || '使用 Profile 默认值'}
-          allowClear
-        />
-      </ProFormGroup>
+      <Typography.Paragraph type="secondary">
+        v2 要求先在 Profile 中选好服务商 / 模型 / 思考级别，再启动。启动时不再提供临时覆盖。
+      </Typography.Paragraph>
+      <Typography.Paragraph>
+        服务商：{selectedProfile?.provider || '（未设置）'}
+        <br />
+        模型：{selectedProfile?.default_model || '（使用 Agent 默认）'}
+        <br />
+        思考级别：{selectedProfile?.reasoning_effort || '（使用 Agent 默认）'}
+      </Typography.Paragraph>
       <ProFormText
         name="working_dir"
         label="工作目录覆盖"
         placeholder={selectedProfile?.working_dir || '使用 Profile 默认值'}
       />
-      <ProFormList
-        name="config_entries"
-        label="启动配置覆盖"
-        creatorButtonProps={{ creatorButtonText: '添加配置项' }}
-      >
-        <ProFormGroup key="config-entry">
-          <ProFormText name="key" label="配置键" width="md" />
-          <ProFormText name="value" label="配置值" width="md" />
-        </ProFormGroup>
-      </ProFormList>
     </DrawerForm>
   );
 }

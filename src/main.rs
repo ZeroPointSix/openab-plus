@@ -413,14 +413,18 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown_hook = cfg.hooks.pre_shutdown.clone();
 
-    let pool = Arc::new(acp::SessionPool::new(
-        cfg.agent,
-        cfg.pool.max_sessions,
-        cfg.pool
-            .prompt_hard_timeout_secs
-            .saturating_add(cfg.pool.hung_grace_secs),
-        cfg.pool.default_config_options,
-    ));
+    let provider_store = Arc::new(openab_core::provider_store::ProviderStore::from_env());
+    let pool = Arc::new(
+        acp::SessionPool::new(
+            cfg.agent,
+            cfg.pool.max_sessions,
+            cfg.pool
+                .prompt_hard_timeout_secs
+                .saturating_add(cfg.pool.hung_grace_secs),
+            cfg.pool.default_config_options,
+        )
+        .with_provider_store(provider_store.clone()),
+    );
     let ttl_secs = cfg.pool.session_ttl_hours * 3600;
 
     // Resolve STT config (auto-detect GROQ_API_KEY from env)
@@ -1106,6 +1110,13 @@ async fn main() -> anyhow::Result<()> {
                 .merge(openab_gateway::agent_profile_admin::router_with_pool(
                     profile_service.clone(),
                     pool.clone(),
+                ))
+                .merge(openab_gateway::provider_admin::router(
+                    provider_store.clone(),
+                    profile_service.clone(),
+                ))
+                .merge(openab_gateway::cli_config_admin::router_with_store(
+                    provider_store.clone(),
                 ))
                 .merge(openab_gateway::config_admin::router(config_manager.clone()))
                 .merge(openab_gateway::workspace_admin::router(

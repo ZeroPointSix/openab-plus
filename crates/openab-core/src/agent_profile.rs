@@ -40,6 +40,8 @@ pub struct AgentProfile {
     pub default_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub workdir_strategy: WorkdirStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +81,7 @@ impl AgentProfile {
             args: Vec::new(),
             default_model: None,
             reasoning_effort: None,
+            provider: None,
             workdir_strategy: WorkdirStrategy::default(),
             working_dir: None,
             env_refs: HashMap::new(),
@@ -92,12 +95,28 @@ impl AgentProfile {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProfileDocument {
+    #[serde(default = "default_profile_schema_version")]
+    pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<AgentProfile>,
+}
+
+impl Default for AgentProfileDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: default_profile_schema_version(),
+            default_profile: None,
+            profiles: Vec::new(),
+        }
+    }
+}
+
+fn default_profile_schema_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

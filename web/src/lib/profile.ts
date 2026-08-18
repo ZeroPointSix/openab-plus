@@ -70,6 +70,7 @@ export function normalizeProfilePayload(
     args: (values.args || []).map((value) => value.trim()).filter(Boolean),
     default_model: text(values.default_model),
     reasoning_effort: text(values.reasoning_effort),
+    provider: text(values.provider),
     workdir_strategy: values.workdir_strategy || 'system_default',
     working_dir: text(values.working_dir),
     env_refs: compactRecord(values.env_ref_entries),

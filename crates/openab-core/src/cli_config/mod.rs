@@ -1,0 +1,138 @@
+mod atomic;
+mod claude;
+mod codex;
+mod home;
+mod merge;
+mod thinking;
+
+pub use home::{claude_settings_path, cli_home_dir, codex_config_path};
+pub use merge::FieldChange;
+pub use thinking::{disabled_levels, is_supported, supported_levels, THINKING_LEVELS};
+
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::Mutex as AsyncMutex;
+
+#[derive(Debug, Clone, Default)]
+pub struct ApplyRequest {
+    pub agent_type: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub provider_id: Option<String>,
+    /// Provider type from total ledger (e.g. openai_compatible / anthropic).
+    pub provider_type: Option<String>,
+    /// Optional OpenAI/Anthropic compatible base URL to render into CLI config / env.
+    pub base_url: Option<String>,
+    /// Environment variable name that carries the API key (never the secret value).
+    pub api_key_env: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DryRunFile {
+    pub path: String,
+    pub backup_path: String,
+    pub fields: BTreeMap<String, FieldChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DryRunReport {
+    pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsupported_thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<DryRunFile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+pub fn supports_file_renderer(agent_type: &str) -> bool {
+    matches!(agent_type, "codex" | "claude")
+}
+
+fn apply_locks() -> &'static Mutex<HashMap<String, Arc<AsyncMutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Per-agent-type mutex shared by CLI file apply and spawn.
+pub async fn lock_for(agent_type: &str) -> Arc<AsyncMutex<()>> {
+    let mut map = apply_locks().lock().expect("apply lock map poisoned");
+    map.entry(agent_type.to_string())
+        .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+        .clone()
+}
+
+pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
+    match request.agent_type.as_str() {
+        "codex" => codex::plan(request),
+        "claude" => claude::plan(request),
+        other => Err(anyhow!("no CLI file renderer for agent type {other}")),
+    }
+}
+
+/// Apply CLI config without taking the per-agent lock.
+/// Caller must already hold [`lock_for`] for the same agent type when pairing with spawn.
+pub async fn apply_unlocked(request: &ApplyRequest) -> Result<DryRunReport> {
+    if !supports_file_renderer(&request.agent_type) {
+        return Err(anyhow!(
+            "no CLI file renderer for agent type {}",
+            request.agent_type
+        ));
+    }
+    match request.agent_type.as_str() {
+        "codex" => codex::apply(request).await,
+        "claude" => claude::apply(request).await,
+        other => Err(anyhow!("no CLI file renderer for agent type {other}")),
+    }
+}
+
+pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
+    let lock = lock_for(&request.agent_type).await;
+    let _guard = lock.lock().await;
+    apply_unlocked(request).await
+}
+
+pub async fn restore(agent_type: &str) -> Result<bool> {
+    if !supports_file_renderer(agent_type) {
+        return Err(anyhow!("no CLI file renderer for agent type {agent_type}"));
+    }
+    let lock = lock_for(agent_type).await;
+    let _guard = lock.lock().await;
+    match agent_type {
+        "codex" => codex::restore().await,
+        "claude" => claude::restore().await,
+        other => Err(anyhow!("no CLI file renderer for agent type {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn apply_codex_writes_config_under_test_home() {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("OPENAB_TEST_HOME", dir.path());
+        let report = apply(&ApplyRequest {
+            agent_type: "codex".into(),
+            model: Some("gpt-5".into()),
+            reasoning_effort: Some("high".into()),
+            provider_id: Some("newapi".into()),
+            provider_type: Some("openai_compatible".into()),
+            base_url: Some("https://api.example.com/v1".into()),
+            api_key_env: Some("OPENAI_API_KEY".into()),
+        })
+        .await
+        .unwrap();
+        let path = dir.path().join(".codex/config.toml");
+        let body = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(body.contains("gpt-5"));
+        assert!(body.contains("model_reasoning_effort"));
+        assert!(body.contains("openai_base_url"));
+        assert!(body.contains("api.example.com"));
+        assert!(!report.files.is_empty());
+        std::env::remove_var("OPENAB_TEST_HOME");
+    }
+}

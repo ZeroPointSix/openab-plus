@@ -27,6 +27,7 @@ import {
   AutoComplete,
   Empty,
   Form,
+  Modal,
   Popconfirm,
   Segmented,
   Space,
@@ -36,6 +37,7 @@ import {
   Typography,
   message,
 } from 'antd';
+import type { CliConfigDryRunReport } from '../types';
 import { adminApi, ApiError } from '../lib/api';
 import { EntityMark } from '../components/EntityMark';
 import {
@@ -63,6 +65,80 @@ const COMMON_AGENTS = [
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const CLAUDE_THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
+const BUILTIN_MODELS: Record<string, string[]> = {
+  codex: ['gpt-5', 'gpt-5-codex', 'o3', 'o4-mini'],
+  claude: [
+    'claude-opus-4-1',
+    'claude-sonnet-4',
+    'claude-sonnet-4-5',
+    'claude-haiku-4-5',
+  ],
+  gemini: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+  opencode: ['gpt-5', 'claude-sonnet-4'],
+};
+
+function formatDryRunReport(report: CliConfigDryRunReport): string {
+  const lines: string[] = [];
+  if (report.unsupported_thinking) {
+    lines.push(`不支持的思考档位：${report.unsupported_thinking}`);
+  }
+  for (const file of report.files || []) {
+    lines.push(`文件：${file.path}`);
+    lines.push(`备份：${file.backup_path}`);
+    const entries = Object.entries(file.fields || {});
+    if (!entries.length) {
+      lines.push('  （无字段变更）');
+      continue;
+    }
+    for (const [key, change] of entries) {
+      lines.push(`  ${key}: ${change.from ?? '∅'} → ${change.to ?? '∅'}`);
+    }
+  }
+  if (report.errors?.length) {
+    lines.push(`错误：${report.errors.join('；')}`);
+  }
+  return lines.join('\n') || '无变更';
+}
+
+async function confirmCliConfigDryRun(values: ProfileFormValues): Promise<boolean> {
+  const agentType = values.agent_type?.trim();
+  if (!agentType || !['codex', 'claude'].includes(agentType)) {
+    return true;
+  }
+  try {
+    const report = await adminApi.dryRunCliConfig(agentType, {
+      model: values.default_model || undefined,
+      reasoning_effort: values.reasoning_effort || undefined,
+      provider_id: values.provider || undefined,
+    });
+    return await new Promise<boolean>((resolve) => {
+      Modal.confirm({
+        title: 'CLI 配置 dry-run',
+        width: 720,
+        content: (
+          <Typography.Paragraph>
+            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+              {formatDryRunReport(report)}
+            </pre>
+            <Typography.Text type="secondary">
+              仅新会话启动时写入 ~/.codex / ~/.claude；密钥只注入环境变量名，不回显值。
+            </Typography.Text>
+          </Typography.Paragraph>
+        ),
+        okText: '确认保存 Profile',
+        cancelText: '取消',
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false),
+      });
+    });
+  } catch (error) {
+    message.error(
+      error instanceof ApiError ? error.message : 'CLI 配置 dry-run 失败',
+    );
+    return false;
+  }
+}
+
 function ProfileModelControls({ agentType }: { agentType?: string }) {
   const schemaQuery = useQuery({
     queryKey: ['profileSchema', agentType],
@@ -70,25 +146,50 @@ function ProfileModelControls({ agentType }: { agentType?: string }) {
     enabled: Boolean(agentType),
   });
   const fields = schemaQuery.data?.fields || [];
-  const modelOptions =
-    fields
-      .find((field) => field.id === 'model')
-      ?.options?.map((value) => ({ value })) || [];
+  const liveModels =
+    fields.find((field) => field.id === 'model')?.options || [];
+  const builtinModels = BUILTIN_MODELS[agentType || ''] || [];
+  const modelOptions = Array.from(
+    new Set([...liveModels, ...builtinModels]),
+  ).map((value) => ({ value }));
   const schemaEfforts = fields.find((field) =>
     ['reasoning_effort', 'effort'].includes(field.id),
   )?.options;
-  const effortValues = schemaEfforts?.length
-    ? schemaEfforts
-    : agentType === 'claude'
-      ? CLAUDE_THINKING_LEVELS
-      : THINKING_LEVELS;
+  const supportedEfforts = new Set(
+    schemaEfforts?.length
+      ? schemaEfforts
+      : agentType === 'claude'
+        ? CLAUDE_THINKING_LEVELS
+        : THINKING_LEVELS,
+  );
+  const providersQuery = useQuery({
+    queryKey: ['providers'],
+    queryFn: async () => {
+      const result = await adminApi.providers();
+      return Array.isArray((result as { providers?: unknown }).providers)
+        ? ((result as { providers: Array<{ id: string; name: string; provider_type: string }> })
+            .providers)
+        : [];
+    },
+  });
 
   return (
     <>
+      <ProFormSelect
+        name="provider"
+        label="服务商"
+        allowClear
+        showSearch
+        options={(providersQuery.data || []).map((provider) => ({
+          label: `${provider.name} · ${provider.provider_type}`,
+          value: provider.id,
+        }))}
+        placeholder="选择服务商（可选）"
+      />
       <ProForm.Item
         name="default_model"
         label="默认模型"
-        tooltip="优先使用 Agent 实时模型列表，也允许输入新的模型 ID"
+        tooltip="顺序：实时 schema → 内置清单 → 手填逃生口"
       >
         <AutoComplete
           allowClear
@@ -102,13 +203,17 @@ function ProfileModelControls({ agentType }: { agentType?: string }) {
       <ProForm.Item
         name="reasoning_effort"
         label="思考级别"
-        tooltip="新会话启动时应用；Claude 仅显示其官方支持的级别"
+        tooltip="新会话启动时应用；不支持的档位置灰"
       >
         <Segmented
           block
           options={[
             { label: '默认', value: '' },
-            ...effortValues.map((value) => ({ label: value, value })),
+            ...THINKING_LEVELS.map((value) => ({
+              label: value,
+              value,
+              disabled: !supportedEfforts.has(value),
+            })),
           ]}
         />
       </ProForm.Item>
@@ -428,6 +533,48 @@ export function ProfilesPage() {
             清除默认
           </Button>
         ) : null,
+        <Popconfirm
+          key="restore-codex"
+          title="还原 Codex CLI 配置"
+          description="将用 ~/.codex/config.toml.openab.bak 覆盖当前配置。"
+          onConfirm={async () => {
+            try {
+              const result = await adminApi.restoreCliConfig('codex');
+              message.success(
+                result.restored ? 'Codex CLI 配置已还原' : '没有可用备份',
+              );
+            } catch (error) {
+              message.error(
+                error instanceof ApiError
+                  ? error.message
+                  : '还原 Codex CLI 配置失败',
+              );
+            }
+          }}
+        >
+          <Button>还原 Codex CLI</Button>
+        </Popconfirm>,
+        <Popconfirm
+          key="restore-claude"
+          title="还原 Claude CLI 配置"
+          description="将用 ~/.claude/settings.json.openab.bak 覆盖当前配置。"
+          onConfirm={async () => {
+            try {
+              const result = await adminApi.restoreCliConfig('claude');
+              message.success(
+                result.restored ? 'Claude CLI 配置已还原' : '没有可用备份',
+              );
+            } catch (error) {
+              message.error(
+                error instanceof ApiError
+                  ? error.message
+                  : '还原 Claude CLI 配置失败',
+              );
+            }
+          }}
+        >
+          <Button>还原 Claude CLI</Button>
+        </Popconfirm>,
         <Button
           key="create"
           type="primary"
@@ -501,6 +648,8 @@ export function ProfilesPage() {
           submitButtonProps: { loading: saveMutation.isPending },
         }}
         onFinish={async (values) => {
+          const confirmed = await confirmCliConfigDryRun(values);
+          if (!confirmed) return false;
           await saveMutation.mutateAsync(values);
           return true;
         }}

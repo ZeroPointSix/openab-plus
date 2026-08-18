@@ -73,6 +73,11 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           icon: <UserOutlined />,
         },
         {
+          path: '/providers',
+          name: '服务商',
+          icon: <ApiOutlined />,
+        },
+        {
           path: '/workspace',
           name: '提示词与工作区',
           icon: <FileTextOutlined />,

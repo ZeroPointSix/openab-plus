@@ -3,6 +3,8 @@ use super::pool;
 use super::protocol::ConfigOption;
 use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy};
 use crate::config::AgentConfig;
+use crate::provider::{api_key_env_name, base_url_env_name, resolve_env_secret_ref};
+use crate::provider_store::ProviderStore;
 use crate::session_event::{SessionEventBus, SessionEventKind, SessionStreamBus};
 use crate::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
 use crate::transcript::SessionTranscriptStore;
@@ -28,6 +30,7 @@ pub struct SessionPool {
     hung_threshold_secs: u64,
     default_config_options: HashMap<String, String>,
     profile_service: Arc<AgentProfileService>,
+    provider_store: Arc<ProviderStore>,
     pools: RwLock<HashMap<String, PoolHandle>>,
     thread_pools: RwLock<HashMap<String, String>>,
     thread_policies: RwLock<HashMap<String, ThreadProfilePolicy>>,
@@ -70,6 +73,7 @@ impl SessionPool {
             hung_threshold_secs,
             default_config_options,
             profile_service: Arc::new(AgentProfileService::from_env()),
+            provider_store: Arc::new(ProviderStore::from_env()),
             pools: RwLock::new(pools),
             thread_pools: RwLock::new(HashMap::new()),
             thread_policies: RwLock::new(HashMap::new()),
@@ -86,6 +90,11 @@ impl SessionPool {
 
     pub fn with_agent_profile_service(mut self, profile_service: Arc<AgentProfileService>) -> Self {
         self.profile_service = profile_service;
+        self
+    }
+
+    pub fn with_provider_store(mut self, provider_store: Arc<ProviderStore>) -> Self {
+        self.provider_store = provider_store;
         self
     }
 
@@ -192,6 +201,69 @@ impl SessionPool {
                 overrides,
             )
             .await?;
+        let mut resolved = resolved;
+        let renderer_agent = resolved
+            .profile
+            .as_ref()
+            .map(|profile| profile.agent_type.clone())
+            .filter(|agent| crate::cli_config::supports_file_renderer(agent));
+        let apply_lock = match renderer_agent.as_deref() {
+            Some(agent) => Some(crate::cli_config::lock_for(agent).await),
+            None => None,
+        };
+        let _apply_guard = match apply_lock.as_ref() {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+
+        if let Some(profile) = resolved.profile.clone() {
+            if crate::cli_config::supports_file_renderer(&profile.agent_type) {
+                let model = configured_model(&resolved.config, &resolved.config_options);
+                let reasoning_effort =
+                    configured_reasoning_effort(&resolved.config, &resolved.config_options);
+                let mut request = crate::cli_config::ApplyRequest {
+                    agent_type: profile.agent_type.clone(),
+                    model,
+                    reasoning_effort,
+                    provider_id: profile.provider.clone(),
+                    provider_type: None,
+                    base_url: None,
+                    api_key_env: None,
+                };
+                if let Some(provider_id) = profile.provider.as_deref() {
+                    let provider = self
+                        .provider_store
+                        .get(provider_id)
+                        .await?
+                        .ok_or_else(|| anyhow!("provider {provider_id} not found"))?;
+                    let api_key_env = api_key_env_name(&provider.provider_type).to_string();
+                    let base_url_env = base_url_env_name(&provider.provider_type).to_string();
+                    let api_key_value = resolve_env_secret_ref(&provider.api_key_ref)?;
+                    resolved
+                        .config
+                        .env
+                        .insert(api_key_env.clone(), api_key_value);
+                    if let Some(base_url) = provider
+                        .base_url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        resolved
+                            .config
+                            .env
+                            .insert(base_url_env, base_url.to_string());
+                        request.base_url = Some(base_url.to_string());
+                    }
+                    request.provider_type = Some(provider.provider_type.clone());
+                    request.api_key_env = Some(api_key_env);
+                }
+                crate::cli_config::apply_unlocked(&request).await?;
+                // File renderer owns model/thinking for codex/claude.
+                resolved.config_options.remove("model");
+                resolved.config_options.remove("reasoning_effort");
+            }
+        }
         let pool_key = if resolved.profile.is_none() && overrides.is_none() {
             "system".to_string()
         } else {
@@ -222,6 +294,8 @@ impl SessionPool {
             )
             .await;
 
+        // Hold the per-agent apply lock through spawn so concurrent sessions cannot
+        // interleave CLI file writes with process start.
         let result = pool.get_or_create(thread_id, working_dir_override).await;
         match result {
             Ok(outcome) => {

@@ -447,7 +447,11 @@ impl AcpConnection {
         // current_dir() above and is not necessarily the user's home directory.
         cmd.env(
             "HOME",
-            std::env::var("HOME").unwrap_or_else(|_| working_dir.into()),
+            crate::cli_config::cli_home_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| {
+                    std::env::var("HOME").unwrap_or_else(|_| working_dir.into())
+                }),
         );
         cmd.env(
             "PATH",
