@@ -24,9 +24,11 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Button,
+  AutoComplete,
   Empty,
   Form,
   Popconfirm,
+  Segmented,
   Space,
   Tabs,
   Tag,
@@ -58,6 +60,62 @@ const COMMON_AGENTS = [
   'hermes',
 ];
 
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_THINKING_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
+function ProfileModelControls({ agentType }: { agentType?: string }) {
+  const schemaQuery = useQuery({
+    queryKey: ['profileSchema', agentType],
+    queryFn: () => adminApi.profileSchema(agentType as string),
+    enabled: Boolean(agentType),
+  });
+  const fields = schemaQuery.data?.fields || [];
+  const modelOptions =
+    fields
+      .find((field) => field.id === 'model')
+      ?.options?.map((value) => ({ value })) || [];
+  const schemaEfforts = fields.find((field) =>
+    ['reasoning_effort', 'effort'].includes(field.id),
+  )?.options;
+  const effortValues = schemaEfforts?.length
+    ? schemaEfforts
+    : agentType === 'claude'
+      ? CLAUDE_THINKING_LEVELS
+      : THINKING_LEVELS;
+
+  return (
+    <>
+      <ProForm.Item
+        name="default_model"
+        label="默认模型"
+        tooltip="优先使用 Agent 实时模型列表，也允许输入新的模型 ID"
+      >
+        <AutoComplete
+          allowClear
+          options={modelOptions}
+          placeholder="选择或输入模型 ID"
+          filterOption={(input, option) =>
+            String(option?.value || '').toLowerCase().includes(input.toLowerCase())
+          }
+        />
+      </ProForm.Item>
+      <ProForm.Item
+        name="reasoning_effort"
+        label="思考级别"
+        tooltip="新会话启动时应用；Claude 仅显示其官方支持的级别"
+      >
+        <Segmented
+          block
+          options={[
+            { label: '默认', value: '' },
+            ...effortValues.map((value) => ({ label: value, value })),
+          ]}
+        />
+      </ProForm.Item>
+    </>
+  );
+}
+
 function DynamicConfigFields({
   agentType,
 }: {
@@ -69,7 +127,10 @@ function DynamicConfigFields({
     enabled: Boolean(agentType),
   });
 
-  if (!agentType || !schemaQuery.data?.fields.length) return null;
+  const dynamicFields = (schemaQuery.data?.fields || []).filter(
+    (field) => !['model', 'reasoning_effort', 'effort'].includes(field.id),
+  );
+  if (!agentType || !dynamicFields.length) return null;
 
   const fieldFor = (field: AgentConfigField) => {
     const name = ['config_options', field.id];
@@ -114,12 +175,12 @@ function DynamicConfigFields({
         <div>
           <Typography.Text strong>Agent 配置项</Typography.Text>
           <Typography.Text type="secondary">
-            来源：{schemaQuery.data.source}
+        来源：{schemaQuery.data?.source}
           </Typography.Text>
         </div>
-        <Tag color="blue">{schemaQuery.data.fields.length} 项</Tag>
+        <Tag color="blue">{dynamicFields.length} 项</Tag>
       </div>
-      <ProFormGroup>{schemaQuery.data.fields.map(fieldFor)}</ProFormGroup>
+      <ProFormGroup>{dynamicFields.map(fieldFor)}</ProFormGroup>
     </section>
   );
 }
@@ -501,17 +562,7 @@ export function ProfilesPage() {
                       mode="tags"
                       options={[]}
                     />
-                    <ProFormText
-                      name="default_model"
-                      label="默认模型"
-                      width="md"
-                    />
-                    <ProFormText
-                      name="reasoning_effort"
-                      label="推理强度"
-                      width="md"
-                      tooltip="控制 Agent 推理深度，具体取值取决于 Agent 类型"
-                    />
+                    <ProfileModelControls agentType={agentType} />
                     <ProFormSelect
                       name="workdir_strategy"
                       label="工作目录策略"
