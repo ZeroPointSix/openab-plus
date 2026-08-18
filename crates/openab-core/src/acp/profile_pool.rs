@@ -234,10 +234,8 @@ impl SessionPool {
                     .await
                     .insert(thread_id.to_string(), policy);
                 let profile_config_errors = outcome.profile_config_errors.clone();
-                let runtime_metadata = merge_runtime_metadata(
-                    outcome.runtime_metadata.clone(),
-                    configured_metadata,
-                );
+                let runtime_metadata =
+                    merge_runtime_metadata(outcome.runtime_metadata.clone(), configured_metadata);
                 let created = self.apply_ensure_outcome(thread_id, outcome).await;
                 if created {
                     let mut snapshot = SessionSnapshot::new(
@@ -916,10 +914,8 @@ mod tests {
     #[test]
     fn configured_values_fill_missing_acp_metadata() {
         let runtime = SessionRuntimeMetadata::acp(Some("claude-agent-acp".into()), None, None);
-        let configured = SessionRuntimeMetadata::configured(
-            Some("claude-opus-4-6".into()),
-            Some("high".into()),
-        );
+        let configured =
+            SessionRuntimeMetadata::configured(Some("claude-opus-4-6".into()), Some("high".into()));
 
         let merged = merge_runtime_metadata(runtime, configured);
 

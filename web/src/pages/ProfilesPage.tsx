@@ -70,9 +70,10 @@ function ProfileModelControls({ agentType }: { agentType?: string }) {
     enabled: Boolean(agentType),
   });
   const fields = schemaQuery.data?.fields || [];
-  const modelOptions = fields
-    .find((field) => field.id === 'model')
-    ?.options.map((value) => ({ value })) || [];
+  const modelOptions =
+    fields
+      .find((field) => field.id === 'model')
+      ?.options?.map((value) => ({ value })) || [];
   const schemaEfforts = fields.find((field) =>
     ['reasoning_effort', 'effort'].includes(field.id),
   )?.options;
@@ -174,7 +175,7 @@ function DynamicConfigFields({
         <div>
           <Typography.Text strong>Agent 配置项</Typography.Text>
           <Typography.Text type="secondary">
-            来源：{schemaQuery.data.source}
+        来源：{schemaQuery.data?.source}
           </Typography.Text>
         </div>
         <Tag color="blue">{dynamicFields.length} 项</Tag>

@@ -1093,17 +1093,16 @@ mod tests {
         let service = AgentProfileService::new(store);
 
         let resolved = service
-            .resolve_for_session(
-                &base_config(),
-                &HashMap::new(),
-                Some("claude-deep"),
-                None,
-            )
+            .resolve_for_session(&base_config(), &HashMap::new(), Some("claude-deep"), None)
             .await
             .unwrap();
 
         assert_eq!(
-            resolved.config.env.get("ANTHROPIC_MODEL").map(String::as_str),
+            resolved
+                .config
+                .env
+                .get("ANTHROPIC_MODEL")
+                .map(String::as_str),
             Some("claude-opus-4-6")
         );
         assert_eq!(
@@ -1134,12 +1133,7 @@ mod tests {
         let service = AgentProfileService::new(store);
 
         let resolved = service
-            .resolve_for_session(
-                &base_config(),
-                &HashMap::new(),
-                Some("claude-off"),
-                None,
-            )
+            .resolve_for_session(&base_config(), &HashMap::new(), Some("claude-off"), None)
             .await
             .unwrap();
 
