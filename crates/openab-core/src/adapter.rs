@@ -604,6 +604,9 @@ pub struct AdapterRouter {
     pool: Arc<SessionPool>,
     reactions_config: ReactionsConfig,
     table_mode: TableMode,
+    /// Per-channel presentation overrides from `[presentation.<platform>]`.
+    /// Empty default = every channel inherits the global display settings.
+    presentation: crate::presentation::PresentationConfig,
     prompt_hard_timeout: std::time::Duration,
     /// Polling cadence for the recv-loop liveness check (#732).
     liveness_check_interval: std::time::Duration,
@@ -640,6 +643,7 @@ impl AdapterRouter {
             pool,
             reactions_config,
             table_mode,
+            presentation: crate::presentation::PresentationConfig::new(),
             prompt_hard_timeout: std::time::Duration::from_secs(prompt_hard_timeout_secs),
             liveness_check_interval: std::time::Duration::from_secs(liveness_check_secs),
             workspace_aliases,
@@ -678,6 +682,36 @@ impl AdapterRouter {
     /// Access the reactions config (used by dispatch.rs).
     pub fn reactions_config(&self) -> &ReactionsConfig {
         &self.reactions_config
+    }
+
+    /// Attach per-channel presentation overrides from `[presentation.<platform>]`.
+    /// Channels without an entry inherit the global display configuration.
+    #[must_use]
+    pub fn with_presentation(
+        mut self,
+        presentation: crate::presentation::PresentationConfig,
+    ) -> Self {
+        self.presentation = presentation;
+        self
+    }
+
+    /// Resolved presentation policy for a platform, as the router would use it.
+    /// Exposed for admin surfaces and tests.
+    pub fn presentation_policy(
+        &self,
+        adapter: &dyn ChatAdapter,
+        platform: &str,
+        other_bot_present: bool,
+    ) -> crate::presentation::PresentationPolicy {
+        crate::presentation::PresentationPolicy::resolve(
+            crate::presentation::ChannelCapabilities::probe(adapter, platform, other_bot_present),
+            platform,
+            &self.reactions_config,
+            self.table_mode,
+            self.presentation
+                .get(platform)
+                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+        )
     }
 
     /// Workspace aliases for control directive resolution.
@@ -897,45 +931,35 @@ impl AdapterRouter {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
         let message_limit = reply_message_limit(&thread_channel.platform, adapter.message_limit());
-        let exposes_intermediate_text = adapter.exposes_intermediate_text();
-        // A strict privacy-boundary adapter (Slack) never publishes raw agent
-        // chunks while a turn is running. ACP uses snapshot edits to produce
-        // append-only agent_message_chunk updates, independent of Telegram streaming.
-        let streaming = if thread_channel.platform == "acp" {
-            false
-        } else {
-            adapter.use_streaming(other_bot_present) && exposes_intermediate_text
-        };
-        // Intermediate narration is never retained across a strict privacy
-        // boundary, even if the shared narration_display setting is enabled.
-        let keep_full_text =
-            exposes_intermediate_text && (streaming || self.reactions_config.narration_display);
-        let native = streaming && adapter.uses_native_streaming(other_bot_present);
-        let assistant_status = adapter.uses_assistant_status();
-        // Platforms that render Markdown tables natively (e.g. Slack Block Kit
-        // `markdown` blocks / `markdown_text` stream chunks) skip the
-        // table→code/bullets pre-pass so the raw table renders natively.
-        let table_mode = if adapter.renders_native_tables(&thread_channel.platform) {
-            TableMode::Off
-        } else {
-            self.table_mode
-        };
-        // Tool titles can contain command arguments or other execution detail.
-        // Strict privacy-boundary adapters expose only generic counts/states.
-        let tool_display = if exposes_intermediate_text {
-            self.reactions_config.tool_display
-        } else {
-            ToolDisplay::None
-        };
-        let tool_progress_enabled = adapter.uses_tool_progress_message();
-        let reply_tool_display = if tool_progress_enabled {
-            ToolDisplay::None
-        } else {
-            tool_display
-        };
+        // Presentation policy for this turn: adapter capabilities are the
+        // ceiling, then the platform-agnostic display config, then the
+        // per-channel `[presentation.<platform>]` overrides. See
+        // `crate::presentation` and docs/adr/channel-presentation-layering.md.
+        let policy = crate::presentation::PresentationPolicy::resolve(
+            crate::presentation::ChannelCapabilities::probe(
+                adapter.as_ref(),
+                &thread_channel.platform,
+                other_bot_present,
+            ),
+            &thread_channel.platform,
+            &self.reactions_config,
+            self.table_mode,
+            self.presentation
+                .get(thread_channel.platform.as_str())
+                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+        );
+        let exposes_intermediate_text = policy.intermediate_text;
+        let streaming = policy.streaming;
+        let keep_full_text = policy.keep_full_text;
+        let native = policy.native_streaming;
+        let assistant_status = policy.assistant_status;
+        let table_mode = policy.table_mode;
+        let tool_display = policy.tool_display;
+        let tool_progress_enabled = policy.tool_progress_message;
+        let reply_tool_display = policy.reply_tool_display;
         // ACP chunks are append-only; do not re-render tool prefixes into text deltas.
         let platform_is_acp = thread_channel.platform == "acp";
-        let session_link_label = adapter.session_link_label();
+        let session_link_label = policy.session_link_label;
         let external_url = self
             .pool
             .session_snapshot(thread_key)
@@ -1018,7 +1042,7 @@ impl AdapterRouter {
                         } else {
                             "…".to_string()
                         };
-                        let msg = if adapter.show_streaming_placeholder() {
+                        let msg = if policy.streaming_placeholder {
                             adapter.send_message(&thread_channel, &initial).await?
                         } else {
                             // Dummy ref for edit loop — gateway uses drafts, doesn't need real msg_id

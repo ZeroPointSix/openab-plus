@@ -188,6 +188,10 @@ pub struct Config {
     pub stt: SttConfig,
     #[serde(default)]
     pub markdown: MarkdownConfig,
+    /// Per-channel presentation overrides: `[presentation.<platform>]`.
+    /// Absent or empty means every channel keeps the global display behaviour.
+    #[serde(default)]
+    pub presentation: crate::presentation::PresentationConfig,
     #[serde(default)]
     pub cron: CronConfig,
     #[serde(default)]

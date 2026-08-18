@@ -690,7 +690,8 @@ async fn main() -> anyhow::Result<()> {
                 "/tmp".into()
             })),
         )
-        .with_trust(gateway_trust),
+        .with_trust(gateway_trust)
+        .with_presentation(cfg.presentation.clone()),
     );
 
     // Shutdown signal for Slack adapter

@@ -1,289 +1,240 @@
 //! Channel presentation policy — the display half of the channel abstraction.
 //!
 //! See `docs/adr/channel-presentation-layering.md` (ZER-569). A channel adapter
-//! carries two very different kinds of knowledge:
+//! answers two very different kinds of question:
 //!
-//! 1. **Transport capability** — what the platform is physically able to do
-//!    (edit a message, add a reaction, set a native assistant status line).
-//! 2. **Presentation policy** — what we *choose* to show there (whether the
+//! 1. **Transport capability** — what the platform is physically able to do:
+//!    edit a message, add a reaction, set a native assistant status line.
+//! 2. **Presentation policy** — what we *choose* to show there: whether the
 //!    agent's intermediate text is exposed, how tool calls are rendered,
-//!    whether a streaming placeholder is posted).
+//!    whether a streaming placeholder is posted.
 //!
 //! Capability belongs on the adapter, because only the adapter knows it. Policy
-//! is a product decision and belongs in configuration; otherwise every new
-//! display preference becomes another [`crate::adapter::ChatAdapter`] method,
-//! and eventually pressure to fork the agent Profile schema per channel.
+//! is a product decision that operators must be able to tune per channel;
+//! otherwise every new display preference becomes another
+//! [`crate::adapter::ChatAdapter`] method, and eventually pressure to fork the
+//! agent Profile schema per channel.
 //!
-//! [`PresentationPolicy`] is the resolved value a router reads. It is built in
-//! three steps of increasing precedence:
+//! [`PresentationPolicy`] is the resolved value the router reads once per turn.
+//! It is produced by [`PresentationPolicy::resolve`] from three inputs, in
+//! increasing order of precedence — with one exception that always wins:
 //!
-//! 1. [`PresentationPolicy::from_display_config`] — the platform-agnostic
-//!    `[reactions]` display settings that already exist today.
-//! 2. [`PresentationPolicy::with_overrides`] — the channel-scoped
-//!    `[<channel>.presentation]` table, i.e. [`PresentationOverrides`].
-//! 3. [`PresentationPolicy::clamp_to`] — capability clamping. Policy can never
-//!    ask a channel to do something it cannot do, so this step always wins.
+//! 1. [`ChannelCapabilities`], probed from the adapter.
+//! 2. The platform-agnostic `[reactions]` display settings
+//!    (`narration_display`, `tool_display`) and `[markdown] tables`.
+//! 3. The per-channel `[presentation.<platform>]` table
+//!    ([`PresentationOverrides`]).
+//!
+//! **Capability is a ceiling, not a default.** `intermediate_text`, `streaming`,
+//! `assistant_status` and `tool_progress_message` describe a privacy boundary or
+//! a transport limit, so an override may only ever tighten them. Configuration
+//! cannot make Slack publish raw agent text, and cannot make a send-once webhook
+//! stream. `native_tables` is the one two-way knob: whether a platform renders
+//! Markdown tables is a rendering preference rather than a safety property, so an
+//! operator may opt in or out.
 //!
 //! Nothing here reads or writes an agent Profile. Presentation is a per-channel
 //! display concern; the Profile answers "which agent, which model, which
-//! reasoning effort" for a session regardless of which channel it arrived on.
+//! reasoning effort" for a session regardless of the channel it arrived on.
 
+use crate::adapter::ChatAdapter;
 use crate::config::{ReactionsConfig, ToolDisplay};
+use crate::markdown::TableMode;
 use serde::Deserialize;
+use std::collections::HashMap;
 
-/// Where a channel shows the high-level "what is the agent doing right now"
-/// signal for a turn.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StatusSurface {
-    /// Emoji reactions on the triggering message. Today's default for Discord
-    /// and for Slack apps without the assistant feature.
-    #[default]
-    Reactions,
-    /// The platform's own status line, e.g. Slack's
-    /// `assistant.threads.setStatus` for AI apps.
-    AssistantStatus,
-    /// No progress signal at all; only the reply itself is posted.
-    None,
+/// Per-channel presentation overrides, parsed from `[presentation.<platform>]`.
+///
+/// Every field is optional and unset means "inherit". A config file without a
+/// `[presentation]` section therefore behaves exactly as before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PresentationOverrides {
+    /// Expose the agent's intermediate text in this channel. May only tighten:
+    /// `true` cannot open a privacy-boundary channel such as Slack.
+    pub intermediate_text: Option<bool>,
+    /// Keep inter-tool narration in send-once replies instead of posting only
+    /// the final answer. Overrides `[reactions] narration_display`.
+    pub narration: Option<bool>,
+    /// Use the platform's native assistant status line. May only tighten.
+    pub assistant_status: Option<bool>,
+    /// Keep tool activity in one editable progress message. May only tighten.
+    pub tool_progress_message: Option<bool>,
+    /// How tool calls are rendered: `full`, `compact` or `none`. Overrides
+    /// `[reactions] tool_display`.
+    pub tool_display: Option<ToolDisplay>,
+    /// Send Markdown tables through untouched instead of converting them to code
+    /// blocks. Two-way: an operator may opt in or out.
+    pub native_tables: Option<bool>,
+    /// Stream the reply by editing a message. May only tighten.
+    pub streaming: Option<bool>,
+    /// Post the "…" placeholder when streaming starts. May only tighten.
+    pub streaming_placeholder: Option<bool>,
 }
 
-/// What a channel is physically able to do. Reported by the adapter, never by
-/// configuration — an operator cannot grant Slack a capability Slack lacks.
+impl PresentationOverrides {
+    /// The "inherit everything" value. Usable as a `&'static` fallback for a
+    /// platform with no `[presentation.<platform>]` table.
+    pub const INHERIT: Self = Self {
+        intermediate_text: None,
+        narration: None,
+        assistant_status: None,
+        tool_progress_message: None,
+        tool_display: None,
+        native_tables: None,
+        streaming: None,
+        streaming_placeholder: None,
+    };
+}
+
+/// The `[presentation]` config section: platform name -> overrides.
+pub type PresentationConfig = HashMap<String, PresentationOverrides>;
+
+/// What a channel is physically able to do, probed from its adapter.
+///
+/// Operators never set these. They are the ceiling that
+/// [`PresentationPolicy::resolve`] clamps configuration against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelCapabilities {
     /// The channel may carry the agent's raw intermediate text. `false` marks a
     /// privacy-boundary channel (Slack today): only the finalized answer is
-    /// posted, so tool lines and inter-tool narration must be suppressed.
+    /// published, so narration and per-tool detail must be suppressed.
     pub intermediate_text: bool,
-    /// The channel supports emoji reactions on a message.
-    pub reactions: bool,
+    /// The channel supports the message editing that streaming needs.
+    pub streaming: bool,
+    /// The channel has a first-class streaming API (Slack assistant mode).
+    pub native_streaming: bool,
     /// The channel has a native assistant status line.
     pub assistant_status: bool,
-    /// The channel supports the message editing that live streaming needs.
-    pub streaming: bool,
+    /// The channel keeps tool activity in one editable progress message.
+    pub tool_progress_message: bool,
     /// The channel renders Markdown tables natively.
     pub native_tables: bool,
+    /// The channel wants a "…" placeholder before streaming starts.
+    pub streaming_placeholder: bool,
+    /// Label for a session deep link appended to progress and final messages.
+    pub session_link_label: Option<&'static str>,
 }
 
 impl ChannelCapabilities {
-    /// Every optional capability available — the permissive baseline.
-    pub const fn all() -> Self {
+    /// Probe an adapter for what its channel can do.
+    pub fn probe(adapter: &dyn ChatAdapter, platform: &str, other_bot_present: bool) -> Self {
         Self {
-            intermediate_text: true,
-            reactions: true,
-            assistant_status: true,
-            streaming: true,
-            native_tables: true,
-        }
-    }
-
-    /// A plain send-once channel: it still carries the full text, but has no
-    /// reactions, no status line, no live editing and no native tables. The
-    /// floor a brand-new webhook channel starts from.
-    pub const fn send_once() -> Self {
-        Self {
-            intermediate_text: true,
-            reactions: false,
-            assistant_status: false,
-            streaming: false,
-            native_tables: false,
+            intermediate_text: adapter.exposes_intermediate_text(),
+            streaming: adapter.use_streaming(other_bot_present),
+            native_streaming: adapter.uses_native_streaming(other_bot_present),
+            assistant_status: adapter.uses_assistant_status(),
+            tool_progress_message: adapter.uses_tool_progress_message(),
+            native_tables: adapter.renders_native_tables(platform),
+            streaming_placeholder: adapter.show_streaming_placeholder(),
+            session_link_label: adapter.session_link_label(),
         }
     }
 }
 
-/// The `[<channel>.presentation]` config table: per-channel display overrides.
+/// A fully resolved presentation policy for one turn on one channel.
 ///
-/// Every field is optional, and unset means "inherit". A channel section that
-/// omits the table therefore keeps exactly the behaviour it has today.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PresentationOverrides {
-    /// Expose the agent's intermediate text (inter-tool narration and thinking)
-    /// in this channel.
-    pub intermediate_text: Option<bool>,
-    /// Keep inter-tool narration in send-once replies instead of posting only
-    /// the final answer block.
-    pub narration: Option<bool>,
-    /// Which surface carries the turn's progress signal.
-    pub status_surface: Option<StatusSurface>,
-    /// Post a separate tool-progress message instead of inline tool lines.
-    pub tool_progress_message: Option<bool>,
-    /// How tool calls are rendered: `full`, `compact` or `none`.
-    pub tool_display: Option<ToolDisplay>,
-    /// Send Markdown tables through untouched instead of wrapping them in a
-    /// code block.
-    pub native_tables: Option<bool>,
-    /// Stream the reply live by editing a message.
-    pub streaming: Option<bool>,
-    /// Post a `…` placeholder when streaming starts.
-    pub streaming_placeholder: Option<bool>,
-}
-
-/// A fully resolved presentation policy for one channel.
-///
-/// Build it with [`PresentationPolicy::resolve`] rather than by hand, so the
-/// capability clamp is never skipped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Field names match the locals the router used before this type existed, so the
+/// send path reads the policy instead of interrogating the adapter.
+#[derive(Debug, Clone, Copy)]
 pub struct PresentationPolicy {
-    /// Whether the agent's raw intermediate text reaches the channel.
+    /// Whether raw intermediate agent text may be published.
     pub intermediate_text: bool,
-    /// Whether send-once replies keep inter-tool narration.
-    pub narration: bool,
-    /// Which surface carries the turn's progress signal.
-    pub status_surface: StatusSurface,
-    /// Whether a separate tool-progress message is posted.
-    pub tool_progress_message: bool,
-    /// How tool calls are rendered.
-    pub tool_display: ToolDisplay,
-    /// Whether Markdown tables are sent through untouched.
-    pub native_tables: bool,
-    /// Whether the reply is streamed live.
+    /// Whether the reply is streamed by editing a message.
     pub streaming: bool,
-    /// Whether a placeholder is posted at streaming start.
+    /// Whether streaming uses the platform's native streaming API.
+    pub native_streaming: bool,
+    /// Whether the full running text is retained rather than trimmed to the
+    /// final answer block.
+    pub keep_full_text: bool,
+    /// Whether progress is reported on a native status line.
+    pub assistant_status: bool,
+    /// Table pre-pass mode for this channel.
+    pub table_mode: TableMode,
+    /// How tool calls are rendered in progress output.
+    pub tool_display: ToolDisplay,
+    /// How tool calls are rendered in the final reply.
+    pub reply_tool_display: ToolDisplay,
+    /// Whether tool activity lives in a separate progress message.
+    pub tool_progress_message: bool,
+    /// Whether a placeholder message is posted at streaming start.
     pub streaming_placeholder: bool,
-}
-
-impl Default for PresentationPolicy {
-    /// The shared defaults in use today: full text, tool lines shown in full,
-    /// reaction-based status, send-once narration trimmed, tables wrapped.
-    fn default() -> Self {
-        Self {
-            intermediate_text: true,
-            narration: false,
-            status_surface: StatusSurface::Reactions,
-            tool_progress_message: false,
-            tool_display: ToolDisplay::Full,
-            native_tables: false,
-            streaming: true,
-            streaming_placeholder: true,
-        }
-    }
+    /// Session deep-link label, if the channel has a session console.
+    pub session_link_label: Option<&'static str>,
 }
 
 impl PresentationPolicy {
-    /// Seed a policy from the platform-agnostic `[reactions]` display settings.
-    ///
-    /// This is the pre-existing global layer: `narration_display` and
-    /// `tool_display` are read straight off it, and `enabled = false` means no
-    /// reaction status surface.
-    pub fn from_display_config(reactions: &ReactionsConfig) -> Self {
-        Self {
-            narration: reactions.narration_display,
-            tool_display: reactions.tool_display,
-            status_surface: if reactions.enabled {
-                StatusSurface::Reactions
-            } else {
-                StatusSurface::None
-            },
-            ..Self::default()
-        }
-    }
-
-    /// Apply a channel's `[<channel>.presentation]` overrides. Unset fields are
-    /// left untouched.
-    #[must_use]
-    pub fn with_overrides(mut self, overrides: &PresentationOverrides) -> Self {
-        if let Some(v) = overrides.intermediate_text {
-            self.intermediate_text = v;
-        }
-        if let Some(v) = overrides.narration {
-            self.narration = v;
-        }
-        if let Some(v) = overrides.status_surface {
-            self.status_surface = v;
-        }
-        if let Some(v) = overrides.tool_progress_message {
-            self.tool_progress_message = v;
-        }
-        if let Some(v) = overrides.tool_display {
-            self.tool_display = v;
-        }
-        if let Some(v) = overrides.native_tables {
-            self.native_tables = v;
-        }
-        if let Some(v) = overrides.streaming {
-            self.streaming = v;
-        }
-        if let Some(v) = overrides.streaming_placeholder {
-            self.streaming_placeholder = v;
-        }
-        self
-    }
-
-    /// Clamp the policy to what the channel can actually do, returning the
-    /// names of the fields that had to be changed so the caller can log them.
-    ///
-    /// Invariants enforced here:
-    ///
-    /// - A privacy-boundary channel (`intermediate_text = false`) never receives
-    ///   intermediate text, inter-tool narration, or per-tool lines.
-    /// - Streaming, and therefore the streaming placeholder, requires a channel
-    ///   that can edit messages.
-    /// - An unavailable status surface degrades to reactions, then to nothing.
-    #[must_use]
-    pub fn clamp_to(mut self, caps: ChannelCapabilities) -> (Self, Vec<&'static str>) {
-        let mut clamped: Vec<&'static str> = Vec::new();
-
-        if !caps.intermediate_text {
-            if self.intermediate_text {
-                self.intermediate_text = false;
-                clamped.push("intermediate_text");
-            }
-            if self.narration {
-                self.narration = false;
-                clamped.push("narration");
-            }
-            if self.tool_display != ToolDisplay::None {
-                self.tool_display = ToolDisplay::None;
-                clamped.push("tool_display");
-            }
-        }
-
-        if !caps.streaming && self.streaming {
-            self.streaming = false;
-            clamped.push("streaming");
-        }
-        if !self.streaming && self.streaming_placeholder {
-            self.streaming_placeholder = false;
-            clamped.push("streaming_placeholder");
-        }
-
-        let wanted = self.status_surface;
-        let allowed = match wanted {
-            StatusSurface::AssistantStatus if !caps.assistant_status => {
-                if caps.reactions {
-                    StatusSurface::Reactions
-                } else {
-                    StatusSurface::None
-                }
-            }
-            StatusSurface::Reactions if !caps.reactions => StatusSurface::None,
-            other => other,
-        };
-        if allowed != wanted {
-            self.status_surface = allowed;
-            clamped.push("status_surface");
-        }
-
-        if !caps.native_tables && self.native_tables {
-            self.native_tables = false;
-            clamped.push("native_tables");
-        }
-
-        (self, clamped)
-    }
-
-    /// Resolve global display config, channel overrides and channel capabilities
-    /// into the policy a router should use, plus the list of clamped fields.
-    #[must_use]
+    /// Resolve capabilities, global display config and per-channel overrides
+    /// into the policy the router should use for this turn.
     pub fn resolve(
-        reactions: &ReactionsConfig,
-        overrides: &PresentationOverrides,
         caps: ChannelCapabilities,
-    ) -> (Self, Vec<&'static str>) {
-        Self::from_display_config(reactions)
-            .with_overrides(overrides)
-            .clamp_to(caps)
+        platform: &str,
+        reactions: &ReactionsConfig,
+        table_mode: TableMode,
+        overrides: &PresentationOverrides,
+    ) -> Self {
+        // Privacy boundary: capability is a ceiling, so an override can only
+        // ever close this, never open it.
+        let intermediate_text =
+            caps.intermediate_text && overrides.intermediate_text.unwrap_or(true);
+
+        // ACP drives append-only snapshot edits rather than IM-style streaming.
+        let streaming = if platform == "acp" {
+            false
+        } else {
+            caps.streaming && overrides.streaming.unwrap_or(true) && intermediate_text
+        };
+
+        // Intermediate narration is never retained across a privacy boundary,
+        // even when the shared narration setting is enabled.
+        let narration = overrides.narration.unwrap_or(reactions.narration_display);
+        let keep_full_text = intermediate_text && (streaming || narration);
+
+        let native_streaming = streaming && caps.native_streaming;
+        let assistant_status = caps.assistant_status && overrides.assistant_status.unwrap_or(true);
+
+        // Rendering preference, not a safety property: two-way override.
+        let native_tables = overrides.native_tables.unwrap_or(caps.native_tables);
+        let table_mode = if native_tables {
+            TableMode::Off
+        } else {
+            table_mode
+        };
+
+        // Tool titles can carry command arguments or other execution detail, so
+        // a privacy-boundary channel exposes only generic counts and states.
+        let tool_display = if intermediate_text {
+            overrides.tool_display.unwrap_or(reactions.tool_display)
+        } else {
+            ToolDisplay::None
+        };
+        let tool_progress_message =
+            caps.tool_progress_message && overrides.tool_progress_message.unwrap_or(true);
+        // Tool lines already live in the progress message; do not duplicate them
+        // in the final reply.
+        let reply_tool_display = if tool_progress_message {
+            ToolDisplay::None
+        } else {
+            tool_display
+        };
+
+        let streaming_placeholder = streaming
+            && caps.streaming_placeholder
+            && overrides.streaming_placeholder.unwrap_or(true);
+
+        Self {
+            intermediate_text,
+            streaming,
+            native_streaming,
+            keep_full_text,
+            assistant_status,
+            table_mode,
+            tool_display,
+            reply_tool_display,
+            tool_progress_message,
+            streaming_placeholder,
+            session_link_label: caps.session_link_label,
+        }
     }
 }
 
@@ -291,187 +242,253 @@ impl PresentationPolicy {
 mod tests {
     use super::*;
 
-    /// Capabilities of a Slack AI app: privacy boundary, native status line, no
-    /// live streaming of raw agent text.
+    /// Discord: full text, reactions for status, no native streaming or tables.
+    fn discord_like() -> ChannelCapabilities {
+        ChannelCapabilities {
+            intermediate_text: true,
+            streaming: true,
+            native_streaming: false,
+            assistant_status: false,
+            tool_progress_message: false,
+            native_tables: false,
+            streaming_placeholder: true,
+            session_link_label: None,
+        }
+    }
+
+    /// Slack AI app: privacy boundary, native status line, native streaming,
+    /// tool progress message, native tables.
     fn slack_like() -> ChannelCapabilities {
         ChannelCapabilities {
             intermediate_text: false,
-            reactions: true,
+            streaming: true,
+            native_streaming: true,
             assistant_status: true,
-            streaming: false,
-            native_tables: false,
+            tool_progress_message: true,
+            native_tables: true,
+            streaming_placeholder: true,
+            session_link_label: Some("Open session"),
         }
     }
 
-    #[test]
-    fn default_policy_matches_todays_shared_defaults() {
-        let p = PresentationPolicy::default();
-        assert!(p.intermediate_text);
-        assert!(!p.narration);
-        assert_eq!(p.status_surface, StatusSurface::Reactions);
-        assert!(!p.tool_progress_message);
-        assert_eq!(p.tool_display, ToolDisplay::Full);
-        assert!(!p.native_tables);
-        assert!(p.streaming);
-        assert!(p.streaming_placeholder);
+    /// A plain send-once webhook channel.
+    fn send_once_like() -> ChannelCapabilities {
+        ChannelCapabilities {
+            intermediate_text: true,
+            streaming: false,
+            native_streaming: false,
+            assistant_status: false,
+            tool_progress_message: false,
+            native_tables: false,
+            streaming_placeholder: false,
+            session_link_label: None,
+        }
+    }
+
+    fn resolve(
+        caps: ChannelCapabilities,
+        platform: &str,
+        reactions: &ReactionsConfig,
+    ) -> PresentationPolicy {
+        PresentationPolicy::resolve(
+            caps,
+            platform,
+            reactions,
+            TableMode::default(),
+            &PresentationOverrides::INHERIT,
+        )
+    }
+
+    fn is_default_table_mode(mode: TableMode) -> bool {
+        format!("{mode:?}") == format!("{:?}", TableMode::default())
     }
 
     #[test]
-    fn from_display_config_follows_the_reactions_section() {
-        let reactions = ReactionsConfig {
-            narration_display: true,
-            tool_display: ToolDisplay::Compact,
-            ..Default::default()
-        };
-        let p = PresentationPolicy::from_display_config(&reactions);
-        assert!(p.narration);
-        assert_eq!(p.tool_display, ToolDisplay::Compact);
-        assert_eq!(p.status_surface, StatusSurface::Reactions);
-
-        let disabled = ReactionsConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let p = PresentationPolicy::from_display_config(&disabled);
-        assert_eq!(p.status_surface, StatusSurface::None);
-    }
-
-    #[test]
-    fn empty_overrides_change_nothing() {
-        let reactions = ReactionsConfig::default();
-        let base = PresentationPolicy::from_display_config(&reactions);
-        let (resolved, clamped) = PresentationPolicy::resolve(
-            &reactions,
-            &PresentationOverrides::default(),
-            ChannelCapabilities::all(),
+    fn inherit_is_the_default() {
+        assert_eq!(
+            PresentationOverrides::INHERIT,
+            PresentationOverrides::default()
         );
-        assert_eq!(resolved, base);
-        assert!(clamped.is_empty());
     }
 
     #[test]
-    fn overrides_win_over_global_display_config() {
+    fn discord_keeps_todays_behaviour() {
         let reactions = ReactionsConfig::default();
-        let overrides = PresentationOverrides {
-            narration: Some(true),
-            status_surface: Some(StatusSurface::AssistantStatus),
-            tool_progress_message: Some(true),
-            tool_display: Some(ToolDisplay::None),
-            native_tables: Some(true),
-            streaming_placeholder: Some(false),
+        let p = resolve(discord_like(), "discord", &reactions);
+        assert!(p.intermediate_text);
+        assert!(p.streaming);
+        assert!(!p.native_streaming);
+        assert!(
+            p.keep_full_text,
+            "streaming implies the running text is kept"
+        );
+        assert!(!p.assistant_status);
+        assert!(
+            is_default_table_mode(p.table_mode),
+            "tables still converted"
+        );
+        assert_eq!(p.tool_display, reactions.tool_display);
+        assert_eq!(p.reply_tool_display, reactions.tool_display);
+        assert!(!p.tool_progress_message);
+        assert!(p.streaming_placeholder);
+        assert_eq!(p.session_link_label, None);
+    }
+
+    #[test]
+    fn slack_privacy_boundary_suppresses_intermediate_content() {
+        let reactions = ReactionsConfig {
+            narration_display: true,
+            tool_display: ToolDisplay::Full,
             ..Default::default()
         };
-        let (p, clamped) =
-            PresentationPolicy::resolve(&reactions, &overrides, ChannelCapabilities::all());
-        assert!(p.narration);
-        assert_eq!(p.status_surface, StatusSurface::AssistantStatus);
-        assert!(p.tool_progress_message);
+        let p = resolve(slack_like(), "slack", &reactions);
+        assert!(!p.intermediate_text);
+        assert!(!p.streaming, "no raw chunks across a privacy boundary");
+        assert!(!p.native_streaming);
+        assert!(
+            !p.keep_full_text,
+            "narration_display cannot cross the boundary"
+        );
+        assert!(p.assistant_status, "status line still reports progress");
         assert_eq!(p.tool_display, ToolDisplay::None);
-        assert!(p.native_tables);
-        assert!(p.streaming);
-        assert!(!p.streaming_placeholder);
-        assert!(clamped.is_empty());
+        assert_eq!(p.reply_tool_display, ToolDisplay::None);
+        assert!(p.tool_progress_message);
+        assert!(!p.streaming_placeholder, "no placeholder without streaming");
+        assert!(
+            matches!(p.table_mode, TableMode::Off),
+            "Slack renders tables natively"
+        );
+        assert_eq!(p.session_link_label, Some("Open session"));
     }
 
     #[test]
-    fn privacy_boundary_channel_suppresses_intermediate_content() {
-        let reactions = ReactionsConfig {
+    fn acp_never_streams() {
+        let reactions = ReactionsConfig::default();
+        let p = resolve(discord_like(), "acp", &reactions);
+        assert!(!p.streaming);
+        assert!(!p.native_streaming);
+        assert!(!p.streaming_placeholder);
+        assert!(!p.keep_full_text, "send-once trims unless narration is on");
+
+        let chatty = ReactionsConfig {
             narration_display: true,
             ..Default::default()
         };
+        let p = resolve(discord_like(), "acp", &chatty);
+        assert!(p.keep_full_text, "narration_display keeps the running text");
+    }
+
+    #[test]
+    fn send_once_channel_follows_narration_setting() {
+        let quiet = ReactionsConfig::default();
+        assert!(!resolve(send_once_like(), "telegram", &quiet).keep_full_text);
+
+        let chatty = ReactionsConfig {
+            narration_display: true,
+            ..Default::default()
+        };
+        let p = resolve(send_once_like(), "telegram", &chatty);
+        assert!(p.keep_full_text);
+        assert!(!p.streaming_placeholder);
+    }
+
+    #[test]
+    fn overrides_cannot_open_a_privacy_boundary() {
+        let reactions = ReactionsConfig::default();
         let overrides = PresentationOverrides {
             intermediate_text: Some(true),
-            status_surface: Some(StatusSurface::AssistantStatus),
+            streaming: Some(true),
+            tool_display: Some(ToolDisplay::Full),
+            narration: Some(true),
             ..Default::default()
         };
-        let (p, clamped) = PresentationPolicy::resolve(&reactions, &overrides, slack_like());
-        assert!(!p.intermediate_text, "config must not open a privacy boundary");
-        assert!(!p.narration);
-        assert_eq!(p.tool_display, ToolDisplay::None);
-        assert_eq!(p.status_surface, StatusSurface::AssistantStatus);
-        assert!(!p.streaming);
-        assert!(!p.streaming_placeholder);
-        assert!(clamped.contains(&"intermediate_text"));
-        assert!(clamped.contains(&"narration"));
-        assert!(clamped.contains(&"tool_display"));
-        assert!(clamped.contains(&"streaming"));
-    }
-
-    #[test]
-    fn assistant_status_degrades_when_unsupported() {
-        let reactions = ReactionsConfig::default();
-        let overrides = PresentationOverrides {
-            status_surface: Some(StatusSurface::AssistantStatus),
-            ..Default::default()
-        };
-
-        let (p, clamped) =
-            PresentationPolicy::resolve(&reactions, &overrides, ChannelCapabilities::send_once());
-        assert_eq!(p.status_surface, StatusSurface::None);
-        assert!(clamped.contains(&"status_surface"));
-        assert_eq!(
-            clamped.iter().filter(|f| **f == "status_surface").count(),
-            1,
-            "a single degradation must be reported once"
+        let p = PresentationPolicy::resolve(
+            slack_like(),
+            "slack",
+            &reactions,
+            TableMode::default(),
+            &overrides,
         );
-
-        let with_reactions = ChannelCapabilities {
-            reactions: true,
-            ..ChannelCapabilities::send_once()
-        };
-        let (p, _) = PresentationPolicy::resolve(&reactions, &overrides, with_reactions);
-        assert_eq!(p.status_surface, StatusSurface::Reactions);
+        assert!(!p.intermediate_text);
+        assert!(!p.streaming);
+        assert!(!p.keep_full_text);
+        assert_eq!(p.tool_display, ToolDisplay::None);
     }
 
     #[test]
-    fn placeholder_requires_streaming() {
+    fn overrides_can_tighten_and_tune() {
         let reactions = ReactionsConfig::default();
         let overrides = PresentationOverrides {
             streaming: Some(false),
-            streaming_placeholder: Some(true),
+            tool_display: Some(ToolDisplay::Compact),
+            native_tables: Some(true),
             ..Default::default()
         };
-        let (p, clamped) =
-            PresentationPolicy::resolve(&reactions, &overrides, ChannelCapabilities::all());
+        let p = PresentationPolicy::resolve(
+            discord_like(),
+            "discord",
+            &reactions,
+            TableMode::default(),
+            &overrides,
+        );
+        assert!(!p.streaming, "an operator may turn streaming off");
         assert!(!p.streaming_placeholder);
-        assert!(clamped.contains(&"streaming_placeholder"));
+        assert_eq!(p.tool_display, ToolDisplay::Compact);
+        assert!(
+            matches!(p.table_mode, TableMode::Off),
+            "native_tables is a two-way knob"
+        );
     }
 
     #[test]
-    fn overrides_parse_from_a_channel_section() {
+    fn assistant_status_can_be_turned_off_per_channel() {
+        let reactions = ReactionsConfig::default();
+        let overrides = PresentationOverrides {
+            assistant_status: Some(false),
+            ..Default::default()
+        };
+        let p = PresentationPolicy::resolve(
+            slack_like(),
+            "slack",
+            &reactions,
+            TableMode::default(),
+            &overrides,
+        );
+        assert!(!p.assistant_status);
+    }
+
+    #[test]
+    fn presentation_section_parses_from_toml() {
         #[derive(Debug, Deserialize)]
-        struct ChannelSection {
+        struct Wrapper {
             #[serde(default)]
-            presentation: PresentationOverrides,
+            presentation: PresentationConfig,
         }
 
-        let section: ChannelSection = toml::from_str(
-            r#"
-[presentation]
-intermediate_text = false
-status_surface = "assistant_status"
-tool_display = "compact"
-streaming = true
-"#,
+        let parsed: Wrapper = toml::from_str(
+            "[presentation.slack]\nassistant_status = false\ntool_display = \"compact\"\n\n[presentation.telegram]\nnarration = true\nstreaming_placeholder = false\n",
         )
-        .expect("presentation table parses");
-        assert_eq!(section.presentation.intermediate_text, Some(false));
-        assert_eq!(
-            section.presentation.status_surface,
-            Some(StatusSurface::AssistantStatus)
-        );
-        assert_eq!(section.presentation.tool_display, Some(ToolDisplay::Compact));
-        assert_eq!(section.presentation.streaming, Some(true));
-        assert_eq!(section.presentation.narration, None);
+        .expect("presentation section parses");
+        let slack = parsed.presentation.get("slack").expect("slack overrides");
+        assert_eq!(slack.assistant_status, Some(false));
+        assert_eq!(slack.tool_display, Some(ToolDisplay::Compact));
+        assert_eq!(slack.intermediate_text, None);
+        let telegram = parsed
+            .presentation
+            .get("telegram")
+            .expect("telegram overrides");
+        assert_eq!(telegram.narration, Some(true));
+        assert_eq!(telegram.streaming_placeholder, Some(false));
 
-        // A channel section without the table inherits everything.
-        let section: ChannelSection = toml::from_str("").expect("absent table is fine");
-        assert_eq!(section.presentation, PresentationOverrides::default());
+        let empty: Wrapper = toml::from_str("").expect("absent section is fine");
+        assert!(empty.presentation.is_empty());
     }
 
     #[test]
     fn unknown_presentation_key_is_rejected() {
-        let err = toml::from_str::<PresentationOverrides>("show_everything = true\n");
-        assert!(err.is_err(), "typos must fail loudly, not be ignored");
+        assert!(
+            toml::from_str::<PresentationOverrides>("show_everything = true\n").is_err(),
+            "typos must fail loudly rather than be silently ignored"
+        );
     }
 }
