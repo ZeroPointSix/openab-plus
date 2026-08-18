@@ -45,6 +45,11 @@ run_remote 'source "$HOME/.cargo/env" && cd ~/openab-plus && cargo build --relea
 echo "==> Preparing workspace + profiles"
 run_remote 'mkdir -p ~/workspace/AGENTS.md && printf "# E2E workspace\n" > ~/workspace/AGENTS.md'
 
+if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+  echo "==> Configuring Codex API key auth (required for codex-acp session/new)"
+  run_remote "export PATH=\$HOME/.npm-global/bin:\$PATH && printf '%s' '${OPENAI_API_KEY}' | codex login --with-api-key"
+fi
+
 ADMIN_TOKEN="${OPENAB_ADMIN_TOKEN:-zer-568-daytona-test-token}"
 run_remote "cat > ~/openab-plus/config/agent-profiles.toml <<'TOML'
 default_profile = \"codex-live\"
