@@ -594,6 +594,18 @@ pub trait ChatAdapter: Send + Sync + 'static {
     fn show_streaming_placeholder(&self) -> bool {
         true
     }
+
+    /// Physical presentation capabilities for this adapter and routed platform.
+    ///
+    /// Shared adapters can override this once for platform-specific transport
+    /// constraints. Policy code must not branch on platform names.
+    fn presentation_capabilities(
+        &self,
+        platform: &str,
+        other_bot_present: bool,
+    ) -> crate::presentation::ChannelCapabilities {
+        crate::presentation::ChannelCapabilities::from_adapter(self, platform, other_bot_present)
+    }
 }
 
 // --- AdapterRouter ---
@@ -704,8 +716,24 @@ impl AdapterRouter {
         other_bot_present: bool,
     ) -> crate::presentation::PresentationPolicy {
         crate::presentation::PresentationPolicy::resolve(
-            crate::presentation::ChannelCapabilities::probe(adapter, platform, other_bot_present),
-            platform,
+            adapter.presentation_capabilities(platform, other_bot_present),
+            &self.reactions_config,
+            self.table_mode,
+            self.presentation
+                .get(platform)
+                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+        )
+    }
+
+    /// Explainable policy result for management surfaces and diagnostics.
+    pub fn presentation_resolution(
+        &self,
+        adapter: &dyn ChatAdapter,
+        platform: &str,
+        other_bot_present: bool,
+    ) -> crate::presentation::PresentationResolution {
+        crate::presentation::PresentationPolicy::resolve_with_report(
+            adapter.presentation_capabilities(platform, other_bot_present),
             &self.reactions_config,
             self.table_mode,
             self.presentation
@@ -935,19 +963,22 @@ impl AdapterRouter {
         // ceiling, then the platform-agnostic display config, then the
         // per-channel `[presentation.<platform>]` overrides. See
         // `crate::presentation` and docs/adr/channel-presentation-layering.md.
-        let policy = crate::presentation::PresentationPolicy::resolve(
-            crate::presentation::ChannelCapabilities::probe(
-                adapter.as_ref(),
-                &thread_channel.platform,
-                other_bot_present,
-            ),
-            &thread_channel.platform,
+        let resolution = crate::presentation::PresentationPolicy::resolve_with_report(
+            adapter.presentation_capabilities(&thread_channel.platform, other_bot_present),
             &self.reactions_config,
             self.table_mode,
             self.presentation
                 .get(thread_channel.platform.as_str())
                 .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
         );
+        if !resolution.clamped_by.is_empty() {
+            tracing::debug!(
+                platform = %thread_channel.platform,
+                clamped_by = ?resolution.clamped_by,
+                "presentation policy clamped by channel capabilities"
+            );
+        }
+        let policy = resolution.effective;
         let exposes_intermediate_text = policy.intermediate_text;
         let streaming = policy.streaming;
         let keep_full_text = policy.keep_full_text;
