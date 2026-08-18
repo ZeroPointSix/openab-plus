@@ -619,6 +619,7 @@ pub struct AdapterRouter {
     /// Per-channel presentation overrides from `[presentation.<platform>]`.
     /// Empty default = every channel inherits the global display settings.
     presentation: crate::presentation::PresentationConfig,
+    channel_profiles: Arc<crate::channel_profile::ChannelProfileService>,
     prompt_hard_timeout: std::time::Duration,
     /// Polling cadence for the recv-loop liveness check (#732).
     liveness_check_interval: std::time::Duration,
@@ -656,6 +657,7 @@ impl AdapterRouter {
             reactions_config,
             table_mode,
             presentation: crate::presentation::PresentationConfig::new(),
+            channel_profiles: Arc::new(crate::channel_profile::ChannelProfileService::from_env()),
             prompt_hard_timeout: std::time::Duration::from_secs(prompt_hard_timeout_secs),
             liveness_check_interval: std::time::Duration::from_secs(liveness_check_secs),
             workspace_aliases,
@@ -705,6 +707,47 @@ impl AdapterRouter {
     ) -> Self {
         self.presentation = presentation;
         self
+    }
+
+    #[must_use]
+    pub fn with_channel_profiles(
+        mut self,
+        service: Arc<crate::channel_profile::ChannelProfileService>,
+    ) -> Self {
+        self.channel_profiles = service;
+        self
+    }
+
+    /// Resolve the complete policy for one concrete channel context.
+    pub async fn presentation_resolution_for_channel(
+        &self,
+        adapter: &dyn ChatAdapter,
+        channel: &ChannelRef,
+        workspace_id: Option<&str>,
+        other_bot_present: bool,
+    ) -> Result<crate::presentation::PresentationResolution> {
+        let base = self
+            .presentation
+            .get(channel.platform.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let profile = self
+            .channel_profiles
+            .resolve(
+                &channel.platform,
+                workspace_id,
+                Some(&channel.channel_id),
+                &base,
+            )
+            .await?;
+        let mut resolution = crate::presentation::PresentationPolicy::resolve_with_report(
+            adapter.presentation_capabilities(&channel.platform, other_bot_present),
+            &self.reactions_config,
+            self.table_mode,
+            &profile.presentation,
+        );
+        resolution.applied_layers = profile.applied_layers;
+        Ok(resolution)
     }
 
     /// Resolved presentation policy for a platform, as the router would use it.
@@ -963,17 +1006,19 @@ impl AdapterRouter {
         // ceiling, then the platform-agnostic display config, then the
         // per-channel `[presentation.<platform>]` overrides. See
         // `crate::presentation` and docs/adr/channel-presentation-layering.md.
-        let resolution = crate::presentation::PresentationPolicy::resolve_with_report(
-            adapter.presentation_capabilities(&thread_channel.platform, other_bot_present),
-            &self.reactions_config,
-            self.table_mode,
-            self.presentation
-                .get(thread_channel.platform.as_str())
-                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
-        );
+        let workspace_id = recipient.as_ref().map(|(_, workspace)| workspace.as_str());
+        let resolution = self
+            .presentation_resolution_for_channel(
+                adapter.as_ref(),
+                &thread_channel,
+                workspace_id,
+                other_bot_present,
+            )
+            .await?;
         if !resolution.clamped_by.is_empty() {
             tracing::debug!(
                 platform = %thread_channel.platform,
+                applied_layers = ?resolution.applied_layers,
                 clamped_by = ?resolution.clamped_by,
                 "presentation policy clamped by channel capabilities"
             );

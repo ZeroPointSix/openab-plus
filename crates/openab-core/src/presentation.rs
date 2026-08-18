@@ -202,6 +202,8 @@ pub struct PolicyClamp {
 pub struct PresentationResolution {
     pub requested: BTreeMap<String, String>,
     pub effective: PresentationPolicy,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub applied_layers: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub clamped_by: BTreeMap<String, PolicyClamp>,
 }
@@ -372,6 +374,7 @@ impl PresentationPolicy {
         PresentationResolution {
             requested,
             effective,
+            applied_layers: Vec::new(),
             clamped_by,
         }
     }

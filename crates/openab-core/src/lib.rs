@@ -2,6 +2,7 @@ pub mod acp;
 pub mod adapter;
 pub mod agent_profile;
 pub mod bot_turns;
+pub mod channel_profile;
 pub mod config;
 pub mod cron;
 pub mod directives;
