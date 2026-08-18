@@ -2579,3 +2579,47 @@ select {
   gap: 12px;
   margin-bottom: 8px;
 }
+
+.workspace-manager {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.workspace-file-panel,
+.workspace-editor-panel {
+  min-height: 560px;
+}
+
+.workspace-file-list {
+  margin-top: 12px;
+}
+
+.workspace-file-list .ant-list-item {
+  padding: 4px 0;
+  border: 0;
+}
+
+.workspace-file-button {
+  display: flex;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.workspace-editor {
+  min-height: 460px !important;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@media (max-width: 900px) {
+  .workspace-manager {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-file-panel,
+  .workspace-editor-panel {
+    min-height: auto;
+  }
+}

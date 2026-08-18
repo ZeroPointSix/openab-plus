@@ -6,6 +6,7 @@ import { OverviewPage } from './pages/OverviewPage';
 import { SessionWorkbenchPage } from './pages/SessionWorkbenchPage';
 import { ProfilesPage } from './pages/ProfilesPage';
 import { ConfigPage } from './pages/ConfigPage';
+import { WorkspacePage } from './pages/WorkspacePage';
 import {
   loginPathFor,
   readAdminToken,
@@ -68,6 +69,7 @@ export function App() {
         <Route path="/sessions" element={<SessionWorkbenchPage />} />
         <Route path="/sessions/:id" element={<SessionWorkbenchPage />} />
         <Route path="/profiles" element={<ProfilesPage />} />
+        <Route path="/workspace" element={<WorkspacePage />} />
         <Route path="/config" element={<ConfigPage />} />
         <Route path="*" element={<Navigate to="/overview" replace />} />
       </Route>

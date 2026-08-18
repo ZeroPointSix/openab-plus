@@ -545,7 +545,14 @@ impl SessionPool {
 
             // Apply default config options (e.g. mode=bypass, model=swe-1-6)
             for (config_id, value) in &self.default_config_options {
-                if let Err(e) = new_conn.set_config_option(config_id, value).await {
+                if let Err(e) = new_conn
+                    .set_config_option(
+                        config_id,
+                        value,
+                        crate::acp::connection::ConfigOptionApplyPolicy::Strict,
+                    )
+                    .await
+                {
                     warn!(config_id, error = %e, "failed to set default config option");
                     profile_config_errors
                         .push(ProfileConfigError::new(config_id.clone(), e.to_string()));
@@ -777,7 +784,12 @@ impl SessionPool {
                 .ok_or_else(|| anyhow!("no connection for thread {thread_id}"))?
         };
         let mut conn = conn.lock().await;
-        conn.set_config_option(config_id, value).await
+        conn.set_config_option(
+            config_id,
+            value,
+            crate::acp::connection::ConfigOptionApplyPolicy::InteractiveFallback,
+        )
+        .await
     }
 
     /// Query account-level usage/billing from the backend agent for a session

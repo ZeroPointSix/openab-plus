@@ -6,6 +6,7 @@ pub(crate) mod media;
 pub mod schema;
 pub mod store;
 pub mod web_admin;
+pub mod workspace_admin;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -892,6 +893,9 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         .merge(web_admin::router())
         .merge(agent_profile_admin::router(profile_service.clone()))
         .merge(config_admin::router(config_manager.clone()))
+        .merge(workspace_admin::router(
+            workspace_admin::WorkspaceManager::from_env(),
+        ))
         .with_state(state.clone());
 
     // Background: evict expired media files

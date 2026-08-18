@@ -13,6 +13,9 @@ import {
   ProfileValidationResult,
   SessionSnapshot,
   TranscriptSnapshot,
+  WorkspaceFile,
+  WorkspaceFileDocument,
+  WorkspaceSaveResponse,
 } from '../types';
 import { notifyUnauthorized, readAdminToken } from './auth';
 
@@ -150,6 +153,17 @@ export const adminApi = {
         '/validate',
       { method: 'POST' },
     ),
+  workspaceFiles: () =>
+    apiRequest<WorkspaceFile[]>('/api/v1/workspace/files'),
+  workspaceFile: (path: string) =>
+    apiRequest<WorkspaceFileDocument>(
+      '/api/v1/workspace/file?path=' + encodeURIComponent(path),
+    ),
+  saveWorkspaceFile: (path: string, content: string) =>
+    apiRequest<WorkspaceSaveResponse>('/api/v1/workspace/file', {
+      method: 'PUT',
+      body: JSON.stringify({ path, content }),
+    }),
   config: () => apiRequest<ConfigDocument>('/api/v1/config'),
   configStatus: () => apiRequest<ConfigStatus>('/api/v1/config/status'),
   validateConfig: (values: ConfigValues) =>

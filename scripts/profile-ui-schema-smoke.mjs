@@ -29,8 +29,8 @@ assert.match(
 );
 assert.match(
   source,
-  /schemaQuery\.data\.fields\.map\(fieldFor\)/,
-  "profile form must render the fields returned by the runtime schema",
+  /dynamicFields\.map\(fieldFor\)/,
+  "profile form must render the remaining fields returned by the runtime schema",
 );
 assert.match(
   source,
@@ -49,7 +49,7 @@ assert.match(
 );
 assert.match(
   source,
-  /来源：\{schemaQuery\.data\.source\}/,
+  /来源：\{schemaQuery\.data\?\.source\}/,
   "the active schema source must remain visible to administrators",
 );
 

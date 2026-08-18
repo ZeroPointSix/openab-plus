@@ -15,6 +15,17 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
+/// How to apply a config option when the agent rejects `session/set_config_option`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConfigOptionApplyPolicy {
+    /// Profile/session-start apply: only ACP `session/set_config_option` counts.
+    /// Never inject slash-command prompts (ZER-568 honesty rule).
+    Strict,
+    /// Interactive channel picker: best-effort prompt fallback when ACP rejects.
+    #[default]
+    InteractiveFallback,
+}
+
 /// Pick the most permissive selectable permission option from ACP options.
 fn pick_best_option(options: &[Value]) -> Option<String> {
     let mut fallback: Option<&Value> = None;
@@ -665,6 +676,7 @@ impl AcpConnection {
         &mut self,
         config_id: &str,
         value: &str,
+        policy: ConfigOptionApplyPolicy,
     ) -> Result<Vec<ConfigOption>> {
         let session_id = self
             .acp_session_id
@@ -697,24 +709,32 @@ impl AcpConnection {
                 }
                 info!(config_id, value, "config option set");
             }
-            Err(_) => {
-                // Fall back: send as a slash command (e.g. "/model claude-sonnet-4")
-                let cmd = format!("/{config_id} {value}");
-                info!(
-                    cmd,
-                    "set_config_option not supported, falling back to prompt"
-                );
-                let _resp = self
-                    .send_request(
-                        "session/prompt",
-                        Some(json!({
-                            "sessionId": session_id,
-                            "prompt": [{"type": "text", "text": cmd}],
-                        })),
-                    )
-                    .await?;
-                self.update_config_option_cache(config_id, value);
-            }
+            Err(err) => match policy {
+                ConfigOptionApplyPolicy::Strict => {
+                    return Err(anyhow!(
+                        "session/set_config_option unsupported for {config_id}={value}: {err}; \
+                         profile config requires ACP support or cc-switch renderer (no prompt fallback)"
+                    ));
+                }
+                ConfigOptionApplyPolicy::InteractiveFallback => {
+                    // Fall back: send as a slash command (e.g. "/model claude-sonnet-4")
+                    let cmd = format!("/{config_id} {value}");
+                    info!(
+                        cmd,
+                        "set_config_option not supported, falling back to prompt"
+                    );
+                    let _resp = self
+                        .send_request(
+                            "session/prompt",
+                            Some(json!({
+                                "sessionId": session_id,
+                                "prompt": [{"type": "text", "text": cmd}],
+                            })),
+                        )
+                        .await?;
+                    self.update_config_option_cache(config_id, value);
+                }
+            },
         }
 
         Ok(self.config_options.clone())

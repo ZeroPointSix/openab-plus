@@ -40,7 +40,7 @@ interface SessionSidebarProps {
   onSelect: (sessionId: string) => void;
   onReload?: () => void;
   onNewAgent?: () => void;
-  onCreateSession?: (profile: AgentProfile) => void;
+  onCreateSession?: () => void;
 }
 
 const statusOptions = [
@@ -84,14 +84,6 @@ export function SessionSidebar({
     ];
   }, [sessions]);
 
-  const selectedProfile = useMemo(() => {
-    if (agentScope.startsWith('profile:')) {
-      const profileId = agentScope.slice('profile:'.length);
-      return profiles.find((profile) => profile.id === profileId && profile.enabled);
-    }
-    return profiles.find((profile) => profile.enabled);
-  }, [agentScope, profiles]);
-
   const filteredSessions = useMemo(() => {
     return filterSessions(sessions, filters).filter((session) => {
       if (agentScope && agentDisplayName(session.agent) !== agentScope) {
@@ -114,9 +106,7 @@ export function SessionSidebar({
     return [...groups.entries()];
   }, [filteredSessions]);
 
-  const newChatTitle = selectedProfile
-    ? `使用 ${selectedProfile.name || selectedProfile.id} 新建会话`
-    : '请先准备一个启用的 Profile';
+  const hasEnabledProfile = profiles.some((profile) => profile.enabled);
 
   return (
     <aside className="workbench-panel workbench-sidebar" aria-label="会话列表">
@@ -139,15 +129,15 @@ export function SessionSidebar({
               />
             </Tooltip>
           ) : null}
-          <Tooltip title={newChatTitle}>
+          <Tooltip title={hasEnabledProfile ? '新建会话' : '请先准备一个启用的 Profile'}>
             <Button
               type="text"
               size="small"
               icon={<PlusOutlined />}
               aria-label="New chat"
-              disabled={!selectedProfile || !onCreateSession}
+              disabled={!hasEnabledProfile || !onCreateSession}
               loading={creatingSession}
-              onClick={() => selectedProfile && onCreateSession?.(selectedProfile)}
+              onClick={() => onCreateSession?.()}
             />
           </Tooltip>
           {onReload ? (
