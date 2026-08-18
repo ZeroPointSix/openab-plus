@@ -164,6 +164,8 @@ pub struct AgentProfileSnapshot {
     pub id: String,
     pub name: String,
     pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -766,6 +768,7 @@ fn snapshot(profile: &AgentProfile) -> AgentProfileSnapshot {
         id: profile.id.clone(),
         name: profile.name.clone(),
         agent_type: profile.agent_type.clone(),
+        provider: profile.provider.clone(),
         updated_at: profile.updated_at,
     }
 }

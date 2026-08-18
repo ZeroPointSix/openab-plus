@@ -41,11 +41,7 @@ pub fn codex_effort_value(level: &str) -> Option<&'static str> {
 
 /// Map unified level to Claude `effortLevel` / CLAUDE_CODE_EFFORT_LEVEL.
 pub fn claude_effort_value(level: &str) -> Option<&'static str> {
-    if CLAUDE_SUPPORTED.contains(&level) {
-        Some(level)
-    } else {
-        None
-    }
+    CLAUDE_SUPPORTED.iter().find(|value| **value == level).copied()
 }
 
 #[cfg(test)]
