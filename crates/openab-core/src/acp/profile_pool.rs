@@ -207,10 +207,7 @@ impl SessionPool {
             .to_string();
         let configured_metadata = SessionRuntimeMetadata::configured(
             configured_model(&resolved.config, &resolved.config_options),
-            resolved
-                .config_options
-                .get("reasoning_effort")
-                .and_then(|value| non_empty_string(value)),
+            configured_reasoning_effort(&resolved.config, &resolved.config_options),
         );
         let policy = ThreadProfilePolicy {
             timeout_secs: resolved.timeout_secs,
@@ -237,11 +234,10 @@ impl SessionPool {
                     .await
                     .insert(thread_id.to_string(), policy);
                 let profile_config_errors = outcome.profile_config_errors.clone();
-                let runtime_metadata = if outcome.runtime_metadata.is_empty() {
-                    configured_metadata
-                } else {
-                    outcome.runtime_metadata.clone()
-                };
+                let runtime_metadata = merge_runtime_metadata(
+                    outcome.runtime_metadata.clone(),
+                    configured_metadata,
+                );
                 let created = self.apply_ensure_outcome(thread_id, outcome).await;
                 if created {
                     let mut snapshot = SessionSnapshot::new(
@@ -714,6 +710,35 @@ fn configured_model(
         .or_else(|| model_from_agent_env(config))
 }
 
+fn configured_reasoning_effort(
+    config: &AgentConfig,
+    config_options: &HashMap<String, String>,
+) -> Option<String> {
+    config_options
+        .get("reasoning_effort")
+        .and_then(|value| non_empty_string(value))
+        .or_else(|| agent_env_value(config, "CLAUDE_CODE_EFFORT_LEVEL"))
+}
+
+fn merge_runtime_metadata(
+    mut runtime: SessionRuntimeMetadata,
+    configured: SessionRuntimeMetadata,
+) -> SessionRuntimeMetadata {
+    let mut used_configured = false;
+    if runtime.model.is_none() {
+        runtime.model = configured.model;
+        used_configured |= runtime.model.is_some();
+    }
+    if runtime.reasoning_effort.is_none() {
+        runtime.reasoning_effort = configured.reasoning_effort;
+        used_configured |= runtime.reasoning_effort.is_some();
+    }
+    if used_configured {
+        runtime.metadata_source = configured.metadata_source;
+    }
+    runtime
+}
+
 fn model_from_agent_env(config: &AgentConfig) -> Option<String> {
     for key in ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_MODEL", "CLAUDE_MODEL"] {
         if let Some(value) = agent_env_value(config, key) {
@@ -872,6 +897,38 @@ mod tests {
         assert_eq!(
             configured_model(&config, &HashMap::new()).as_deref(),
             Some("deepseek/deepseek-v4-flash")
+        );
+    }
+
+    #[test]
+    fn configured_reasoning_effort_falls_back_to_claude_startup_env() {
+        let mut config = AgentConfig::default();
+        config
+            .env
+            .insert("CLAUDE_CODE_EFFORT_LEVEL".into(), " high ".into());
+
+        assert_eq!(
+            configured_reasoning_effort(&config, &HashMap::new()).as_deref(),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn configured_values_fill_missing_acp_metadata() {
+        let runtime = SessionRuntimeMetadata::acp(Some("claude-agent-acp".into()), None, None);
+        let configured = SessionRuntimeMetadata::configured(
+            Some("claude-opus-4-6".into()),
+            Some("high".into()),
+        );
+
+        let merged = merge_runtime_metadata(runtime, configured);
+
+        assert_eq!(merged.agent.as_deref(), Some("claude-agent-acp"));
+        assert_eq!(merged.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(merged.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            merged.metadata_source,
+            Some(SessionMetadataSource::Configured)
         );
     }
 

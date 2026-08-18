@@ -19,7 +19,7 @@ fi
 DAYTONA_BIN="${DAYTONA_BIN:-daytona}"
 SANDBOX_NAME="${SANDBOX_NAME:-zer-568-e2e-$(date +%s)}"
 OPENAB_REPO="${OPENAB_REPO:-https://github.com/ZeroPointSix/openab-plus.git}"
-OPENAB_BRANCH="${OPENAB_BRANCH:-feat/zer-568-control-plane-session}"
+OPENAB_BRANCH="${OPENAB_BRANCH:-cursor/zer-568-review-fixes-c04a}"
 
 echo "==> Creating sandbox ${SANDBOX_NAME}"
 $DAYTONA_BIN create --name "$SANDBOX_NAME" --snapshot daytona-medium || \
@@ -111,16 +111,17 @@ assert not errors, errors
 print('codex ok:', data.get('model'), data.get('reasoning_effort'))
 PY"
 
-echo "==> Asserting claude surfaces honest config errors (no prompt fallback)"
+echo "==> Asserting claude override landed before ACP session start"
 run_remote "python3 - <<'PY'
 import json
 data = json.load(open('/tmp/session-claude.json'))
 assert data.get('profile_id') == 'claude-live', data
 errors = data.get('profile_config_errors') or []
-assert errors, f'expected profile_config_errors for claude without set_config_option: {data}'
-ids = {e.get('config_id') for e in errors}
-assert 'model' in ids and 'reasoning_effort' in ids, errors
-print('claude ok: profile_config_errors=', ids)
+assert not errors, errors
+assert data.get('model') == 'claude-opus-4', data
+assert data.get('reasoning_effort') == 'high', data
+assert data.get('metadata_source') == 'configured', data
+print('claude ok:', data.get('model'), data.get('reasoning_effort'))
 PY"
 
 echo "==> Fetching workspace files"

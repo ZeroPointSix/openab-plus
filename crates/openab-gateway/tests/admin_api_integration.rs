@@ -453,11 +453,11 @@ for line in sys.stdin:
     );
 }
 
-/// ZER-568: agents without `session/set_config_option` must not get silent prompt
-/// fallback at profile apply time; overrides surface as `profile_config_errors`.
+/// ZER-568: Claude model and effort must be present in the process environment
+/// before `session/new`, without ACP config calls or prompt injection.
 #[cfg(unix)]
 #[tokio::test]
-async fn session_creation_records_config_errors_when_acp_rejects_set_config_option() {
+async fn session_creation_applies_claude_overrides_before_process_start() {
     let env = AdminTestEnv::new().await;
     let server = spawn_admin_server(&env).await;
     let client = reqwest::Client::new();
@@ -467,6 +467,7 @@ async fn session_creation_records_config_errors_when_acp_rejects_set_config_opti
     std::fs::write(
         &agent_path,
         r#"import json
+import os
 import sys
 
 LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/openab-fake-acp.jsonl"
@@ -486,7 +487,12 @@ for line in sys.stdin:
             "agentCapabilities": {"loadSession": False},
         }
     elif method == "session/new":
-        trace({"method": "session/new", "cwd": params.get("cwd")})
+        trace({
+            "method": "session/new",
+            "cwd": params.get("cwd"),
+            "model": os.environ.get("ANTHROPIC_MODEL"),
+            "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
+        })
         result = {"sessionId": "fake-claude-session"}
     elif method == "session/set_config_option":
         trace({"method": "session/set_config_option", "rejected": True})
@@ -540,30 +546,12 @@ for line in sys.stdin:
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let snapshot = created.json::<Value>().await.expect("created session json");
     assert_eq!(snapshot["profile_id"], "claude-strict");
-
-    let config_errors = snapshot["profile_config_errors"]
+    assert_eq!(snapshot["model"], "claude-opus-4");
+    assert_eq!(snapshot["reasoning_effort"], "high");
+    assert_eq!(snapshot["metadata_source"], "configured");
+    assert!(snapshot["profile_config_errors"]
         .as_array()
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        !config_errors.is_empty(),
-        "expected profile_config_errors when set_config_option is unsupported, got: {snapshot:?}"
-    );
-    assert!(
-        config_errors.iter().any(|entry| {
-            entry["config_id"].as_str() == Some("model")
-                && entry["error"]
-                    .as_str()
-                    .is_some_and(|msg| msg.contains("session/set_config_option unsupported"))
-        }),
-        "expected model config error, got: {config_errors:?}"
-    );
-    assert!(
-        config_errors
-            .iter()
-            .any(|entry| entry["config_id"].as_str() == Some("reasoning_effort")),
-        "expected reasoning_effort config error, got: {config_errors:?}"
-    );
+        .is_none_or(Vec::is_empty));
 
     let trace = std::fs::read_to_string(&log_path).expect("ACP trace log");
     let events: Vec<Value> = trace
@@ -576,6 +564,20 @@ for line in sys.stdin:
             .iter()
             .any(|event| event["method"] == "session/prompt"),
         "profile apply must not use prompt fallback, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["method"] == "session/set_config_option"),
+        "Claude startup values must not depend on ACP config support, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["method"] == "session/new"
+                && event["model"] == "claude-opus-4"
+                && event["effort"] == "high"
+        }),
+        "expected Claude startup environment before session/new, got: {events:?}"
     );
 }
 

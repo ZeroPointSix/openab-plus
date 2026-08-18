@@ -369,6 +369,14 @@ impl AgentProfileService {
             applied_layers.push("entry_override".to_string());
         }
 
+        apply_agent_startup_options(
+            profile_snapshot
+                .as_ref()
+                .map(|profile| profile.agent_type.as_str()),
+            &mut config,
+            &mut config_options,
+        );
+
         let pool_key = profile_pool_key(
             profile_snapshot.as_ref(),
             &config,
@@ -825,6 +833,31 @@ fn apply_overrides(
     }
 }
 
+fn apply_agent_startup_options(
+    agent_type: Option<&str>,
+    config: &mut AgentConfig,
+    config_options: &mut HashMap<String, String>,
+) {
+    if agent_type != Some("claude") {
+        return;
+    }
+
+    if let Some(model) = config_options.remove("model") {
+        config.env.insert("ANTHROPIC_MODEL".to_string(), model);
+    }
+
+    let supported_effort = config_options
+        .get("reasoning_effort")
+        .is_some_and(|value| matches!(value.as_str(), "low" | "medium" | "high" | "xhigh" | "max"));
+    if supported_effort {
+        if let Some(effort) = config_options.remove("reasoning_effort") {
+            config
+                .env
+                .insert("CLAUDE_CODE_EFFORT_LEVEL".to_string(), effort);
+        }
+    }
+}
+
 fn apply_startup_command(config: &mut AgentConfig, command: &str, args: &[String]) {
     if args.is_empty() {
         let mut parts = command.split_whitespace();
@@ -1039,6 +1072,84 @@ mod tests {
                 .expect("selected profile snapshot")
                 .agent_type,
             "claude"
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_profile_applies_model_and_effort_before_process_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::new(dir.path().join("profiles.toml"));
+        let mut claude = AgentProfile::new("claude-deep", "Claude Deep", "claude");
+        claude.command = Some("claude-agent-acp".into());
+        claude.default_model = Some("claude-opus-4-6".into());
+        claude.reasoning_effort = Some("high".into());
+        store
+            .save_atomic(&AgentProfileDocument {
+                default_profile: None,
+                profiles: vec![claude],
+            })
+            .await
+            .unwrap();
+        let service = AgentProfileService::new(store);
+
+        let resolved = service
+            .resolve_for_session(
+                &base_config(),
+                &HashMap::new(),
+                Some("claude-deep"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolved.config.env.get("ANTHROPIC_MODEL").map(String::as_str),
+            Some("claude-opus-4-6")
+        );
+        assert_eq!(
+            resolved
+                .config
+                .env
+                .get("CLAUDE_CODE_EFFORT_LEVEL")
+                .map(String::as_str),
+            Some("high")
+        );
+        assert!(!resolved.config_options.contains_key("model"));
+        assert!(!resolved.config_options.contains_key("reasoning_effort"));
+    }
+
+    #[tokio::test]
+    async fn claude_profile_keeps_unsupported_effort_for_strict_error_reporting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::new(dir.path().join("profiles.toml"));
+        let mut claude = AgentProfile::new("claude-off", "Claude Off", "claude");
+        claude.reasoning_effort = Some("off".into());
+        store
+            .save_atomic(&AgentProfileDocument {
+                default_profile: None,
+                profiles: vec![claude],
+            })
+            .await
+            .unwrap();
+        let service = AgentProfileService::new(store);
+
+        let resolved = service
+            .resolve_for_session(
+                &base_config(),
+                &HashMap::new(),
+                Some("claude-off"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(!resolved.config.env.contains_key("CLAUDE_CODE_EFFORT_LEVEL"));
+        assert_eq!(
+            resolved
+                .config_options
+                .get("reasoning_effort")
+                .map(String::as_str),
+            Some("off")
         );
     }
 
