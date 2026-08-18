@@ -1000,6 +1000,7 @@ mod tests {
         let doc = AgentProfileDocument {
             default_profile: Some("missing".into()),
             profiles: vec![AgentProfile::new("codex", "Codex", "codex")],
+            ..Default::default()
         };
 
         let result = validate_document(&doc);
@@ -1026,6 +1027,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: Some("default".into()),
                 profiles: vec![default, specified],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1070,6 +1072,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: None,
                 profiles: vec![claude],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1109,6 +1112,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: None,
                 profiles: vec![claude],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1149,6 +1153,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: None,
                 profiles: vec![claude],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1237,6 +1242,7 @@ mod tests {
         let resolver = AgentCapabilityResolver::new(AgentProfileDocument {
             default_profile: Some("codex".into()),
             profiles: vec![profile],
+            ..Default::default()
         });
 
         let schema = resolver.config_schema("codex");
