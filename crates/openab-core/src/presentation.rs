@@ -113,8 +113,44 @@ pub type PresentationConfig = HashMap<String, PresentationOverrides>;
 ///
 /// Operators never set these. They are the ceiling that
 /// [`PresentationPolicy::resolve`] clamps configuration against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    /// Ordinary chat delivery: tool progress can be folded into message text,
+    /// replies use the adapter's message limit, and message edits may stream.
+    Chat,
+    /// Structured append-only delivery: tool events travel separately from the
+    /// answer text, the reply is delivered as one snapshot, and edits are off.
+    AppendOnly,
+}
+
+impl DeliveryMode {
+    pub fn supports_streaming(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+
+    pub fn combines_tool_progress(self) -> bool {
+        matches!(self, Self::Chat)
+    }
+
+    pub fn message_limit(self, adapter_limit: usize) -> usize {
+        match self {
+            Self::Chat => adapter_limit,
+            Self::AppendOnly => usize::MAX,
+        }
+    }
+}
+
+impl Default for DeliveryMode {
+    fn default() -> Self {
+        Self::Chat
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelCapabilities {
+    /// How this adapter delivers answer text and tool progress.
+    pub delivery_mode: DeliveryMode,
     /// The channel may carry the agent's raw intermediate text. `false` marks a
     /// privacy-boundary channel (Slack today): only the finalized answer is
     /// published, so narration and per-tool detail must be suppressed.
@@ -145,14 +181,18 @@ impl ChannelCapabilities {
         platform: &str,
         other_bot_present: bool,
     ) -> Self {
+        let delivery_mode = adapter.delivery_mode(platform);
+        let supports_streaming = delivery_mode.supports_streaming();
         Self {
+            delivery_mode,
             intermediate_text: adapter.exposes_intermediate_text(),
-            streaming: adapter.use_streaming(other_bot_present),
-            native_streaming: adapter.uses_native_streaming(other_bot_present),
+            streaming: supports_streaming && adapter.use_streaming(other_bot_present),
+            native_streaming: supports_streaming
+                && adapter.uses_native_streaming(other_bot_present),
             assistant_status: adapter.uses_assistant_status(),
             tool_progress_message: adapter.uses_tool_progress_message(),
             native_tables: adapter.renders_native_tables(platform),
-            streaming_placeholder: adapter.show_streaming_placeholder(),
+            streaming_placeholder: supports_streaming && adapter.show_streaming_placeholder(),
             session_link_label: adapter.session_link_label(),
         }
     }
@@ -164,6 +204,8 @@ impl ChannelCapabilities {
 /// send path reads the policy instead of interrogating the adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PresentationPolicy {
+    /// Adapter-reported delivery semantics for this channel.
+    pub delivery_mode: DeliveryMode,
     /// Whether raw intermediate agent text may be published.
     pub intermediate_text: bool,
     /// Whether the reply is streamed by editing a message.
@@ -248,13 +290,19 @@ impl PresentationPolicy {
 
         let requested_streaming = overrides.streaming.unwrap_or(true);
         requested.insert("streaming".into(), requested_streaming.to_string());
-        let streaming = caps.streaming && requested_streaming && intermediate_text;
+        let delivery_supports_streaming = caps.delivery_mode.supports_streaming();
+        let streaming = caps.streaming
+            && delivery_supports_streaming
+            && requested_streaming
+            && intermediate_text;
         record_clamp(
             &mut clamped_by,
             "streaming",
             requested_streaming,
             streaming,
-            if !intermediate_text {
+            if !delivery_supports_streaming {
+                "channel.delivery_mode"
+            } else if !intermediate_text {
                 "effective.intermediate_text"
             } else {
                 "channel.capability.streaming"
@@ -358,6 +406,7 @@ impl PresentationPolicy {
         );
 
         let effective = Self {
+            delivery_mode: caps.delivery_mode,
             intermediate_text,
             streaming,
             native_streaming,
@@ -406,6 +455,7 @@ mod tests {
     /// Discord: full text, reactions for status, no native streaming or tables.
     fn discord_like() -> ChannelCapabilities {
         ChannelCapabilities {
+            delivery_mode: DeliveryMode::Chat,
             intermediate_text: true,
             streaming: true,
             native_streaming: false,
@@ -421,6 +471,7 @@ mod tests {
     /// tool progress message, native tables.
     fn slack_like() -> ChannelCapabilities {
         ChannelCapabilities {
+            delivery_mode: DeliveryMode::Chat,
             intermediate_text: false,
             streaming: true,
             native_streaming: true,
@@ -435,6 +486,7 @@ mod tests {
     /// A plain send-once webhook channel.
     fn send_once_like() -> ChannelCapabilities {
         ChannelCapabilities {
+            delivery_mode: DeliveryMode::Chat,
             intermediate_text: true,
             streaming: false,
             native_streaming: false,
@@ -521,10 +573,9 @@ mod tests {
     fn append_only_channel_never_streams() {
         let reactions = ReactionsConfig::default();
         let mut append_only = discord_like();
-        append_only.streaming = false;
-        append_only.native_streaming = false;
-        append_only.streaming_placeholder = false;
+        append_only.delivery_mode = DeliveryMode::AppendOnly;
         let p = resolve(append_only, &reactions);
+        assert_eq!(p.delivery_mode, DeliveryMode::AppendOnly);
         assert!(!p.streaming);
         assert!(!p.native_streaming);
         assert!(!p.streaming_placeholder);
@@ -536,6 +587,14 @@ mod tests {
         };
         let p = resolve(append_only, &chatty);
         assert!(p.keep_full_text, "narration_display keeps the running text");
+    }
+
+    #[test]
+    fn delivery_mode_controls_tool_merging_and_message_limit() {
+        assert!(DeliveryMode::Chat.combines_tool_progress());
+        assert_eq!(DeliveryMode::Chat.message_limit(2_000), 2_000);
+        assert!(!DeliveryMode::AppendOnly.combines_tool_progress());
+        assert_eq!(DeliveryMode::AppendOnly.message_limit(4_096), usize::MAX);
     }
 
     #[test]

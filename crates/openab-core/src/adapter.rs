@@ -27,17 +27,6 @@ pub struct OutputDirectives {
     pub reply_to: Option<String>,
 }
 
-/// Chunk limit for delivering a reply on `platform`. ACP is a WebSocket transport with
-/// no small per-message limit, and its reply route closes after the first delivered
-/// message. Deliver ACP replies whole so long responses are not truncated.
-fn reply_message_limit(platform: &str, adapter_limit: usize) -> usize {
-    if platform == "acp" {
-        usize::MAX
-    } else {
-        adapter_limit
-    }
-}
-
 /// Keep the visible user text in the transcript while deliberately excluding
 /// OpenAB's internal `<sender_context>` envelope from the read-only UI.
 fn record_prompt_transcript(pool: &SessionPool, session_id: &str, blocks: &[ContentBlock]) {
@@ -595,6 +584,12 @@ pub trait ChatAdapter: Send + Sync + 'static {
         true
     }
 
+    /// Delivery semantics reported by the concrete adapter. Shared policy and
+    /// routing code consume this value without naming a platform.
+    fn delivery_mode(&self, _platform: &str) -> crate::presentation::DeliveryMode {
+        crate::presentation::DeliveryMode::Chat
+    }
+
     /// Physical presentation capabilities for this adapter and routed platform.
     ///
     /// Shared adapters can override this once for platform-specific transport
@@ -1001,7 +996,6 @@ impl AdapterRouter {
     ) -> Result<()> {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
-        let message_limit = reply_message_limit(&thread_channel.platform, adapter.message_limit());
         // Presentation policy for this turn: adapter capabilities are the
         // ceiling, then the platform-agnostic display config, then the
         // per-channel `[presentation.<platform>]` overrides. See
@@ -1024,6 +1018,8 @@ impl AdapterRouter {
             );
         }
         let policy = resolution.effective;
+        let delivery_mode = policy.delivery_mode;
+        let message_limit = delivery_mode.message_limit(adapter.message_limit());
         let exposes_intermediate_text = policy.intermediate_text;
         let streaming = policy.streaming;
         let keep_full_text = policy.keep_full_text;
@@ -1033,8 +1029,6 @@ impl AdapterRouter {
         let tool_display = policy.tool_display;
         let tool_progress_enabled = policy.tool_progress_message;
         let reply_tool_display = policy.reply_tool_display;
-        // ACP chunks are append-only; do not re-render tool prefixes into text deltas.
-        let platform_is_acp = thread_channel.platform == "acp";
         let session_link_label = policy.session_link_label;
         let external_url = self
             .pool
@@ -1333,7 +1327,7 @@ impl AdapterRouter {
                                         }
                                     } else if let Some(tx) = &buf_tx {
                                         let _ = tx.send(display_for(
-                                            platform_is_acp,
+                                            delivery_mode,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1397,7 +1391,7 @@ impl AdapterRouter {
                                     // Post+edit live update (no-op under native streaming: buf_tx is None).
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(display_for(
-                                            platform_is_acp,
+                                            delivery_mode,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1446,7 +1440,7 @@ impl AdapterRouter {
                                     tool_progress.update(&tool_lines).await;
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(display_for(
-                                            platform_is_acp,
+                                            delivery_mode,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1527,7 +1521,7 @@ impl AdapterRouter {
                     // Build final content
                     let final_content =
                         display_for(
-                            platform_is_acp,
+                            delivery_mode,
                             &tool_lines,
                             &text_buf,
                             false,
@@ -2481,19 +2475,20 @@ pub(crate) fn classify_empty_turn(
     }
 }
 
-/// Select content for a reply. ACP receives raw append-only answer text; other
-/// platforms retain their existing tool-merged display.
+/// Select content from adapter-reported delivery semantics. Structured
+/// append-only transports receive raw answer text because tool progress is
+/// delivered separately; chat transports retain the tool-merged display.
 fn display_for(
-    platform_is_acp: bool,
+    delivery_mode: crate::presentation::DeliveryMode,
     tool_lines: &[ToolEntry],
     text: &str,
     streaming: bool,
     tool_display: ToolDisplay,
 ) -> String {
-    if platform_is_acp {
-        text.to_string()
-    } else {
+    if delivery_mode.combines_tool_progress() {
         compose_display(tool_lines, text, streaming, tool_display)
+    } else {
+        text.to_string()
     }
 }
 
@@ -2787,13 +2782,19 @@ mod tests {
     }
 
     #[test]
-    fn acp_reply_limit_is_unbounded_others_use_adapter_limit() {
-        assert_eq!(reply_message_limit("acp", 4096), usize::MAX);
-        assert_eq!(reply_message_limit("discord", 2000), 2000);
-        assert_eq!(reply_message_limit("slack", 4096), 4096);
+    fn append_only_reply_is_unbounded_chat_uses_adapter_limit() {
+        use crate::presentation::DeliveryMode;
+
+        assert_eq!(DeliveryMode::AppendOnly.message_limit(4096), usize::MAX);
+        assert_eq!(DeliveryMode::Chat.message_limit(2000), 2000);
+        assert_eq!(DeliveryMode::Chat.message_limit(4096), 4096);
         let long = "x".repeat(50_000);
         assert_eq!(
-            crate::format::split_message(&long, reply_message_limit("acp", 4096)).len(),
+            crate::format::split_message(
+                &long,
+                DeliveryMode::AppendOnly.message_limit(4096)
+            )
+            .len(),
             1
         );
     }

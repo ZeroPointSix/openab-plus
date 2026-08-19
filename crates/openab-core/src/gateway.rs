@@ -757,24 +757,14 @@ impl ChatAdapter for GatewayAdapter {
         self.platform_name == "telegram" && self.telegram_rich_messages
     }
 
-    fn presentation_capabilities(
-        &self,
-        platform: &str,
-        other_bot_present: bool,
-    ) -> crate::presentation::ChannelCapabilities {
-        let mut capabilities = crate::presentation::ChannelCapabilities::from_adapter(
-            self,
-            platform,
-            other_bot_present,
-        );
-        // ACP publishes append-only snapshots. This transport constraint belongs
-        // to the shared gateway adapter, not the platform-agnostic policy layer.
-        if platform == "acp" {
-            capabilities.streaming = false;
-            capabilities.native_streaming = false;
-            capabilities.streaming_placeholder = false;
+    fn delivery_mode(&self, _platform: &str) -> crate::presentation::DeliveryMode {
+        // The concrete gateway adapter owns this transport distinction. Shared
+        // presentation and routing code consume only the reported mode.
+        if self.platform_name == "acp" {
+            crate::presentation::DeliveryMode::AppendOnly
+        } else {
+            crate::presentation::DeliveryMode::Chat
         }
-        capabilities
     }
 }
 

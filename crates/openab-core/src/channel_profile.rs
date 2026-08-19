@@ -31,7 +31,10 @@ impl ChannelProfile {
         match (&self.workspace_id, &self.channel_id) {
             (None, None) => format!("platform:{}", self.platform),
             (Some(workspace), None) => format!("workspace:{workspace}"),
-            (_, Some(channel)) => format!("channel:{channel}"),
+            (None, Some(channel)) => format!("channel:{channel}"),
+            (Some(workspace), Some(channel)) => {
+                format!("workspace:{workspace}/channel:{channel}")
+            }
         }
     }
 
@@ -60,12 +63,6 @@ impl ChannelProfileDocument {
             if profile.platform.trim().is_empty() {
                 return Err(anyhow!("channel profile platform must not be empty"));
             }
-            if profile.channel_id.is_some() && profile.workspace_id.is_none() {
-                return Err(anyhow!(
-                    "channel profile {} requires workspace_id",
-                    profile.layer_name()
-                ));
-            }
             let scope = (
                 profile.platform.as_str(),
                 profile.workspace_id.as_deref(),
@@ -88,14 +85,17 @@ impl ChannelProfileDocument {
         self.validate()?;
         let mut presentation = base.clone();
         let mut applied_layers = Vec::new();
-        for (workspace, channel) in [
-            (None, None),
-            (workspace_id, None),
-            (workspace_id, channel_id),
-        ] {
-            if channel.is_some() && workspace.is_none() {
-                continue;
+        let mut scopes = vec![(None, None)];
+        if let Some(workspace) = workspace_id {
+            scopes.push((Some(workspace), None));
+        }
+        if let Some(channel) = channel_id {
+            scopes.push((None, Some(channel)));
+            if let Some(workspace) = workspace_id {
+                scopes.push((Some(workspace), Some(channel)));
             }
+        }
+        for (workspace, channel) in scopes {
             if let Some(profile) = self
                 .profiles
                 .iter()
@@ -266,14 +266,36 @@ mod tests {
         assert_eq!(resolved.presentation.narration, Some(true));
         assert_eq!(
             resolved.applied_layers,
-            ["platform:slack", "workspace:T1", "channel:C1"]
+            [
+                "platform:slack",
+                "workspace:T1",
+                "workspace:T1/channel:C1"
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_channel_without_workspace() {
+        let document = ChannelProfileDocument {
+            profiles: vec![
+                profile("discord", None, None, Some(false)),
+                profile("discord", None, Some("C1"), Some(true)),
+            ],
+        };
+        let resolved = document
+            .resolve("discord", None, Some("C1"), &Default::default())
+            .unwrap();
+        assert_eq!(resolved.presentation.narration, Some(true));
+        assert_eq!(
+            resolved.applied_layers,
+            ["platform:discord", "channel:C1"]
         );
     }
 
     #[test]
     fn invalid_and_duplicate_scopes_are_rejected() {
         let invalid = ChannelProfileDocument {
-            profiles: vec![profile("slack", None, Some("C1"), None)],
+            profiles: vec![profile("", None, Some("C1"), None)],
         };
         assert!(invalid.validate().is_err());
         let duplicate = ChannelProfileDocument {
