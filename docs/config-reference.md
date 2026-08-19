@@ -556,14 +556,15 @@ streaming_placeholder = true
 
 ## Channel profiles (`config/channel-profiles.toml`)
 
-Hierarchical presentation profiles loaded from `OPENAB_CHANNEL_PROFILES_PATH` (default `config/channel-profiles.toml`). Merge order: platform → workspace → channel → workspace/channel. Each profile carries a `presentation` table with the same keys as `[presentation.<platform>]`.
+Hierarchical presentation profiles loaded from `OPENAB_CHANNEL_PROFILES_PATH` (default `config/channel-profiles.toml`). Merge order: platform → workspace → channel → workspace/channel.
+
+Each `[[profiles]]` entry has `platform` plus optional `workspace_id` / `channel_id`, and **flattens** the same presentation keys as `[presentation.<platform>]` onto the profile itself. Do not nest a `[profiles.presentation]` table — unknown nested tables fail `deny_unknown_fields`.
 
 ```toml
 [[profiles]]
 platform = "slack"
-# workspace = "T123"
-# channel = "C456"
-[profiles.presentation]
+# workspace_id = "T123"
+# channel_id = "C456"
 tool_display = "compact"
 session_link_label = "Open in OpenAB"
 ```

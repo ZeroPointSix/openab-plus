@@ -313,4 +313,42 @@ mod tests {
         let store = ChannelProfileStore::new(dir.path().join("channel-profiles.toml"));
         assert!(store.load().await.unwrap().profiles.is_empty());
     }
+
+    #[test]
+    fn flat_profile_toml_parses_and_nested_presentation_table_is_rejected() {
+        let flat = r#"
+[[profiles]]
+platform = "slack"
+workspace_id = "T1"
+channel_id = "C1"
+tool_display = "compact"
+session_link_label = "Open in OpenAB"
+"#;
+        let document: ChannelProfileDocument = toml::from_str(flat).unwrap();
+        assert_eq!(document.profiles.len(), 1);
+        assert_eq!(document.profiles[0].workspace_id.as_deref(), Some("T1"));
+        assert_eq!(document.profiles[0].channel_id.as_deref(), Some("C1"));
+        assert_eq!(
+            document.profiles[0].presentation.tool_display,
+            Some(crate::config::ToolDisplay::Compact)
+        );
+        assert_eq!(
+            document.profiles[0]
+                .presentation
+                .session_link_label
+                .as_deref(),
+            Some("Open in OpenAB")
+        );
+
+        let nested = r#"
+[[profiles]]
+platform = "slack"
+[profiles.presentation]
+tool_display = "none"
+"#;
+        assert!(
+            toml::from_str::<ChannelProfileDocument>(nested).is_err(),
+            "nested [profiles.presentation] must fail deny_unknown_fields"
+        );
+    }
 }

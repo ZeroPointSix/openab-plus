@@ -682,6 +682,13 @@ async fn dispatch_batch(
     let batch_size = batch.len();
     let session_key = Dispatcher::session_key(thread_channel);
 
+    // Native-streaming recipient is bound to the turn (captured per-message). A
+    // batch attributes to the most recent sender; None for non-Slack/bot turns.
+    // Extract before presentation resolve so workspace-scoped profiles (Slack
+    // team_id) apply to the queued-reaction decision as well as the stream path.
+    let recipient: Option<(String, String)> = batch.last().and_then(|m| m.recipient.clone());
+    let workspace_id = recipient.as_ref().map(|(_, team)| team.as_str());
+
     // Apply 👀 reaction to every message in the batch before dispatch (§6.7).
     // Skip when assistant status API is active — uses
     // assistant.threads.setStatus instead of emoji reactions.
@@ -689,7 +696,7 @@ async fn dispatch_batch(
         .presentation_policy_for_channel(
             adapter.as_ref(),
             thread_channel,
-            None,
+            workspace_id,
             other_bot_present,
         )
         .await
@@ -715,10 +722,6 @@ async fn dispatch_batch(
         .map(|m| m.arrived_at.elapsed().as_millis())
         .collect();
     let senders: Vec<String> = batch.iter().map(|m| m.sender_name.clone()).collect();
-
-    // Native-streaming recipient is bound to the turn (captured per-message). A
-    // batch attributes to the most recent sender; None for non-Slack/bot turns.
-    let recipient: Option<(String, String)> = batch.last().and_then(|m| m.recipient.clone());
 
     // Anchor reactions on the last message in the batch (before consuming).
     let trigger_msg = batch.last().unwrap().trigger_msg.clone();
