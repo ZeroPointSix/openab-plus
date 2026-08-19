@@ -9,21 +9,30 @@ use crate::session_event::{SessionEventBus, SessionEventKind, SessionStreamBus};
 use crate::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
 use crate::transcript::SessionTranscriptStore;
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
+use tracing::warn;
 
 type PoolHandle = Arc<pool::SessionPool>;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct ThreadProfilePolicy {
     timeout_secs: Option<u64>,
     recovery_strategy: RecoveryStrategy,
     profile_id: Option<String>,
     overrides: Option<ProfileSessionOverrides>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedThreadSession {
+    pool_key: String,
+    policy: ThreadProfilePolicy,
 }
 
 pub struct SessionPool {
@@ -42,6 +51,7 @@ pub struct SessionPool {
     transcripts: SessionTranscriptStore,
     snapshots: RwLock<HashMap<String, SessionSnapshot>>,
     external_base_url: Option<String>,
+    thread_profile_path: PathBuf,
     #[cfg(any(test, feature = "test-support"))]
     config_options_for_test: RwLock<HashMap<String, Vec<ConfigOption>>>,
 }
@@ -69,6 +79,16 @@ impl SessionPool {
         let session_stream = SessionStreamBus::default();
         let session_events = SessionEventBus::new_with_stream(session_stream.clone());
         let transcripts = SessionTranscriptStore::new(transcript_capacity, session_stream.clone());
+        let openab_dir = openab_data_dir();
+        let _ = std::fs::create_dir_all(&openab_dir);
+        let thread_profile_path = openab_dir.join("thread_profile_context.json");
+        let persisted_sessions = load_thread_sessions(&thread_profile_path);
+        let mut thread_pools = HashMap::new();
+        let mut thread_policies = HashMap::new();
+        for (thread_id, entry) in persisted_sessions {
+            thread_pools.insert(thread_id.clone(), entry.pool_key);
+            thread_policies.insert(thread_id, entry.policy);
+        }
         Self {
             base_config: config,
             max_sessions,
@@ -77,14 +97,15 @@ impl SessionPool {
             profile_service: Arc::new(AgentProfileService::from_env()),
             provider_store: Arc::new(ProviderStore::from_env()),
             pools: RwLock::new(pools),
-            thread_pools: RwLock::new(HashMap::new()),
-            thread_policies: RwLock::new(HashMap::new()),
+            thread_pools: RwLock::new(thread_pools),
+            thread_policies: RwLock::new(thread_policies),
             thread_gates: RwLock::new(HashMap::new()),
             session_events,
             session_stream,
             transcripts,
             snapshots: RwLock::new(HashMap::new()),
             external_base_url,
+            thread_profile_path,
             #[cfg(any(test, feature = "test-support"))]
             config_options_for_test: RwLock::new(HashMap::new()),
         }
@@ -330,14 +351,8 @@ impl SessionPool {
         let result = pool.get_or_create(thread_id, working_dir_override).await;
         match result {
             Ok(outcome) => {
-                self.thread_pools
-                    .write()
-                    .await
-                    .insert(thread_id.to_string(), pool_key.clone());
-                self.thread_policies
-                    .write()
-                    .await
-                    .insert(thread_id.to_string(), policy);
+                self.record_thread_session(thread_id, &pool_key, policy)
+                    .await;
                 let profile_config_errors = outcome.profile_config_errors.clone();
                 let runtime_metadata =
                     merge_runtime_metadata(outcome.runtime_metadata.clone(), configured_metadata);
@@ -518,16 +533,14 @@ impl SessionPool {
         if let Some(pool) = self.existing_pool(thread_id).await {
             let result = pool.reset_session(thread_id).await;
             if result.is_ok() {
-                self.thread_pools.write().await.remove(thread_id);
-                self.thread_policies.write().await.remove(thread_id);
+                self.clear_thread_session(thread_id).await;
                 self.mark_session_exited(thread_id, None).await;
             }
             return result;
         }
         for (_, pool) in self.pools_snapshot().await {
             if pool.reset_session(thread_id).await.is_ok() {
-                self.thread_pools.write().await.remove(thread_id);
-                self.thread_policies.write().await.remove(thread_id);
+                self.clear_thread_session(thread_id).await;
                 self.mark_session_exited(thread_id, None).await;
                 return Ok(());
             }
@@ -539,11 +552,7 @@ impl SessionPool {
         for (pool_key, pool) in self.pools_snapshot().await {
             let failures = pool.cleanup_idle(ttl_secs).await;
             for failure in failures {
-                self.thread_pools.write().await.remove(&failure.thread_id);
-                self.thread_policies
-                    .write()
-                    .await
-                    .remove(&failure.thread_id);
+                self.clear_thread_session(&failure.thread_id).await;
                 self.mark_session_error(&failure.thread_id, failure.error)
                     .await;
             }
@@ -716,13 +725,30 @@ impl SessionPool {
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
     ) -> (Option<String>, Option<ProfileSessionOverrides>) {
-        if profile_id.is_some() || overrides.is_some() {
-            return (
-                profile_id.map(str::to_string),
-                overrides.cloned(),
-            );
+        let (stored_profile_id, stored_overrides) = self.stored_profile_context(thread_id).await;
+
+        if profile_id.is_none() && overrides.is_none() {
+            return (stored_profile_id, stored_overrides);
         }
 
+        let effective_profile_id = profile_id
+            .map(str::to_string)
+            .or(stored_profile_id);
+
+        let effective_overrides = match (overrides, stored_overrides) {
+            (Some(request), Some(stored)) => Some(merge_profile_overrides(stored, request)),
+            (Some(request), None) => Some(request.clone()),
+            (None, Some(stored)) => Some(stored),
+            (None, None) => None,
+        };
+
+        (effective_profile_id, effective_overrides)
+    }
+
+    async fn stored_profile_context(
+        &self,
+        thread_id: &str,
+    ) -> (Option<String>, Option<ProfileSessionOverrides>) {
         if let Some(policy) = self.thread_policies.read().await.get(thread_id) {
             if policy.profile_id.is_some() || policy.overrides.is_some() {
                 return (policy.profile_id.clone(), policy.overrides.clone());
@@ -737,6 +763,52 @@ impl SessionPool {
         }
 
         (None, None)
+    }
+
+    async fn record_thread_session(
+        &self,
+        thread_id: &str,
+        pool_key: &str,
+        policy: ThreadProfilePolicy,
+    ) {
+        self.thread_pools
+            .write()
+            .await
+            .insert(thread_id.to_string(), pool_key.to_string());
+        self.thread_policies
+            .write()
+            .await
+            .insert(thread_id.to_string(), policy);
+        self.flush_thread_sessions().await;
+    }
+
+    async fn clear_thread_session(&self, thread_id: &str) {
+        self.thread_pools.write().await.remove(thread_id);
+        self.thread_policies.write().await.remove(thread_id);
+        self.flush_thread_sessions().await;
+    }
+
+    async fn flush_thread_sessions(&self) {
+        let sessions = {
+            let pools = self.thread_pools.read().await;
+            let policies = self.thread_policies.read().await;
+            pools
+                .iter()
+                .filter_map(|(thread_id, pool_key)| {
+                    policies.get(thread_id).map(|policy| {
+                        (
+                            thread_id.clone(),
+                            PersistedThreadSession {
+                                pool_key: pool_key.clone(),
+                                policy: policy.clone(),
+                            },
+                        )
+                    })
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let path = self.thread_profile_path.clone();
+        let _ = tokio::task::spawn_blocking(move || save_thread_sessions(&path, &sessions)).await;
     }
 
     async fn thread_gate(&self, thread_id: &str) -> Arc<Mutex<()>> {
@@ -770,8 +842,7 @@ impl SessionPool {
                         .await;
                 }
                 pool::SessionEntryStatus::Missing => {
-                    self.thread_pools.write().await.remove(&session_id);
-                    self.thread_policies.write().await.remove(&session_id);
+                    self.clear_thread_session(&session_id).await;
                     self.mark_session_exited(&session_id, None).await;
                 }
             }
@@ -790,8 +861,7 @@ impl SessionPool {
         if pool.has_active_session(thread_id).await {
             Some(pool)
         } else {
-            self.thread_pools.write().await.remove(thread_id);
-            self.thread_policies.write().await.remove(thread_id);
+            self.clear_thread_session(thread_id).await;
             None
         }
     }
@@ -937,6 +1007,66 @@ fn profile_overrides_from_snapshot(snapshot: &SessionSnapshot) -> Option<Profile
     };
     let has_overrides = overrides.model.is_some() || overrides.reasoning_effort.is_some();
     has_overrides.then_some(overrides)
+}
+
+fn merge_profile_overrides(
+    base: &ProfileSessionOverrides,
+    patch: &ProfileSessionOverrides,
+) -> ProfileSessionOverrides {
+    let mut merged = base.clone();
+    if let Some(command) = patch.command.as_ref() {
+        merged.command = Some(command.clone());
+    }
+    if !patch.args.is_empty() {
+        merged.args = patch.args.clone();
+    }
+    if let Some(working_dir) = patch.working_dir.as_ref() {
+        merged.working_dir = Some(working_dir.clone());
+    }
+    if let Some(model) = patch.model.as_ref() {
+        merged.model = Some(model.clone());
+    }
+    if let Some(reasoning_effort) = patch.reasoning_effort.as_ref() {
+        merged.reasoning_effort = Some(reasoning_effort.clone());
+    }
+    for (key, value) in &patch.env {
+        merged.env.insert(key.clone(), value.clone());
+    }
+    for (key, value) in &patch.config_options {
+        merged.config_options.insert(key.clone(), value.clone());
+    }
+    merged
+}
+
+fn openab_data_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join(".openab")
+}
+
+fn load_thread_sessions(path: &Path) -> HashMap<String, PersistedThreadSession> {
+    match std::fs::read_to_string(path) {
+        Ok(data) => serde_json::from_str(&data).unwrap_or_else(|e| {
+            warn!(path = %path.display(), error = %e, "corrupt thread profile context, starting fresh");
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+fn save_thread_sessions(path: &Path, sessions: &HashMap<String, PersistedThreadSession>) {
+    let data = match serde_json::to_string_pretty(sessions) {
+        Ok(data) => data,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize thread profile context");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &data).and_then(|_| std::fs::rename(&tmp, path)) {
+        warn!(path = %path.display(), error = %e, "failed to persist thread profile context");
+    }
 }
 
 fn session_external_base_url_from_env() -> Option<String> {
@@ -1156,11 +1286,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn effective_profile_context_merges_partial_override_with_stored_profile() {
+        let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        outer.thread_policies.write().await.insert(
+            "slack:thread".into(),
+            ThreadProfilePolicy {
+                profile_id: Some("deep".into()),
+                ..ThreadProfilePolicy::default()
+            },
+        );
+        let request_overrides = ProfileSessionOverrides {
+            model: Some("gpt-5.1".into()),
+            ..ProfileSessionOverrides::default()
+        };
+
+        let (profile_id, overrides) = outer
+            .effective_profile_context("slack:thread", None, Some(&request_overrides))
+            .await;
+        let overrides = overrides.expect("expected merged overrides");
+
+        assert_eq!(profile_id.as_deref(), Some("deep"));
+        assert_eq!(overrides.model.as_deref(), Some("gpt-5.1"));
+    }
+
+    #[tokio::test]
+    async fn thread_profile_context_persists_across_pool_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::env::set_var("HOME", dir.path());
+
+        {
+            let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+            outer
+                .record_thread_session(
+                    "slack:thread",
+                    "profile:deep",
+                    ThreadProfilePolicy {
+                        profile_id: Some("deep".into()),
+                        overrides: Some(ProfileSessionOverrides {
+                            model: Some("gpt-5.1".into()),
+                            reasoning_effort: Some("high".into()),
+                            ..ProfileSessionOverrides::default()
+                        }),
+                        ..ThreadProfilePolicy::default()
+                    },
+                )
+                .await;
+        }
+
+        let reloaded = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+        let (profile_id, overrides) = reloaded
+            .effective_profile_context("slack:thread", None, None)
+            .await;
+        let overrides = overrides.expect("expected persisted overrides");
+
+        assert_eq!(profile_id.as_deref(), Some("deep"));
+        assert_eq!(overrides.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(overrides.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            reloaded.thread_pools.read().await.get("slack:thread").map(String::as_str),
+            Some("profile:deep")
+        );
+    }
+
+    #[test]
+    fn merge_profile_overrides_keeps_profile_and_patches_model() {
+        let base = ProfileSessionOverrides {
+            reasoning_effort: Some("medium".into()),
+            ..ProfileSessionOverrides::default()
+        };
+        let patch = ProfileSessionOverrides {
+            model: Some("gpt-5.1".into()),
+            ..ProfileSessionOverrides::default()
+        };
+
+        let merged = merge_profile_overrides(&base, &patch);
+
+        assert_eq!(merged.model.as_deref(), Some("gpt-5.1"));
+        assert_eq!(merged.reasoning_effort.as_deref(), Some("medium"));
+    }
+
+    #[tokio::test]
     async fn pool_for_key_applies_profile_policy() {
         let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
         let policy = ThreadProfilePolicy {
             timeout_secs: Some(60),
             recovery_strategy: RecoveryStrategy::None,
+            ..ThreadProfilePolicy::default()
         };
 
         let pool = outer
@@ -1195,6 +1406,7 @@ mod tests {
             ThreadProfilePolicy {
                 timeout_secs: None,
                 recovery_strategy: RecoveryStrategy::None,
+                ..ThreadProfilePolicy::default()
             },
         );
         let mut events = outer.session_event_bus().subscribe();

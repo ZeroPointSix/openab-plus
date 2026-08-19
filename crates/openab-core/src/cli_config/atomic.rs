@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 /// Marker written when the target file did not exist before OpenAB first applied.
 pub const NO_PREEXISTING_MARKER: &[u8] = b"# openab:no-preexisting\n";
@@ -26,60 +27,42 @@ pub async fn ensure_openab_bak(path: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(bak))
 }
 
-pub async fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = {
-        let mut name = path
-            .file_name()
-            .map(|s| s.to_os_string())
-            .unwrap_or_else(|| "config".into());
-        name.push(".tmp");
-        path.with_file_name(name)
-    };
-    tokio::fs::write(&tmp, contents).await?;
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
+fn private_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!(".openab-{}.tmp", Uuid::new_v4()))
 }
 
 pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp = {
-        let mut name = path
-            .file_name()
-            .map(|s| s.to_os_string())
-            .unwrap_or_else(|| "config".into());
-        name.push(".tmp");
-        path.with_file_name(name)
-    };
     let contents = contents.as_ref().to_vec();
+    let final_path = path.to_path_buf();
     #[cfg(unix)]
     {
-        let tmp_path = tmp.clone();
+        let tmp_path = private_temp_path(&final_path);
         tokio::task::spawn_blocking(move || -> Result<()> {
             use std::fs::OpenOptions;
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
                 .open(&tmp_path)?;
             file.write_all(&contents)?;
             file.sync_all()?;
+            std::fs::rename(&tmp_path, &final_path)?;
             Ok(())
         })
         .await??;
     }
     #[cfg(not(unix))]
     {
-        tokio::fs::write(&tmp, contents).await?;
+        let tmp_path = private_temp_path(&final_path);
+        tokio::fs::write(&tmp_path, contents).await?;
+        tokio::fs::rename(&tmp_path, &final_path).await?;
     }
-    tokio::fs::rename(&tmp, path).await?;
     Ok(())
 }
 
@@ -159,5 +142,14 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[tokio::test]
+    async fn atomic_write_private_overwrites_with_unique_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        atomic_write_private(&path, "one\n").await.unwrap();
+        atomic_write_private(&path, "two\n").await.unwrap();
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "two\n");
     }
 }
