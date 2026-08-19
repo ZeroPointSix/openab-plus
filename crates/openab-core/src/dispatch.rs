@@ -129,6 +129,18 @@ impl ThreadHandle {
 pub trait DispatchTarget: Send + Sync + 'static {
     fn reactions_config(&self) -> &ReactionsConfig;
 
+    /// Resolved presentation policy for one channel turn.
+    ///
+    /// Batched dispatch uses this so emoji/status decisions stay on the policy
+    /// path instead of probing adapter presentation methods directly.
+    async fn presentation_policy_for_channel(
+        &self,
+        adapter: &dyn ChatAdapter,
+        channel: &ChannelRef,
+        workspace_id: Option<&str>,
+        other_bot_present: bool,
+    ) -> Result<crate::presentation::PresentationPolicy>;
+
     /// Workspace aliases from config (for `[[ws:@alias]]` resolution).
     fn workspace_aliases(&self) -> std::collections::HashMap<String, String>;
 
@@ -167,6 +179,24 @@ pub trait DispatchTarget: Send + Sync + 'static {
 impl DispatchTarget for AdapterRouter {
     fn reactions_config(&self) -> &ReactionsConfig {
         AdapterRouter::reactions_config(self)
+    }
+
+    async fn presentation_policy_for_channel(
+        &self,
+        adapter: &dyn ChatAdapter,
+        channel: &ChannelRef,
+        workspace_id: Option<&str>,
+        other_bot_present: bool,
+    ) -> Result<crate::presentation::PresentationPolicy> {
+        Ok(self
+            .presentation_resolution_for_channel(
+                adapter,
+                channel,
+                workspace_id,
+                other_bot_present,
+            )
+            .await?
+            .effective)
     }
 
     fn workspace_aliases(&self) -> std::collections::HashMap<String, String> {
@@ -655,7 +685,22 @@ async fn dispatch_batch(
     // Apply 👀 reaction to every message in the batch before dispatch (§6.7).
     // Skip when assistant status API is active — uses
     // assistant.threads.setStatus instead of emoji reactions.
-    let assistant_status = adapter.uses_assistant_status();
+    let assistant_status = target
+        .presentation_policy_for_channel(
+            adapter.as_ref(),
+            thread_channel,
+            None,
+            other_bot_present,
+        )
+        .await
+        .map(|policy| policy.assistant_status)
+        .unwrap_or_else(|error| {
+            warn!(
+                error = %error,
+                "presentation policy resolve failed in dispatch_batch; falling back to adapter probe"
+            );
+            adapter.uses_assistant_status()
+        });
     if !assistant_status {
         let queued_emoji = &target.reactions_config().emojis.queued;
         for msg in batch.iter() {
@@ -1454,6 +1499,21 @@ mod tests {
     impl DispatchTarget for MockDispatchTarget {
         fn reactions_config(&self) -> &ReactionsConfig {
             &self.reactions
+        }
+
+        async fn presentation_policy_for_channel(
+            &self,
+            adapter: &dyn ChatAdapter,
+            channel: &ChannelRef,
+            _workspace_id: Option<&str>,
+            other_bot_present: bool,
+        ) -> Result<crate::presentation::PresentationPolicy> {
+            Ok(crate::presentation::PresentationPolicy::resolve(
+                adapter.presentation_capabilities(&channel.platform, other_bot_present),
+                &self.reactions,
+                crate::markdown::TableMode::default(),
+                &crate::presentation::PresentationOverrides::INHERIT,
+            ))
         }
 
         fn workspace_aliases(&self) -> std::collections::HashMap<String, String> {

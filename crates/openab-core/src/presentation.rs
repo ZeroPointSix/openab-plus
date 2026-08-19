@@ -70,6 +70,9 @@ pub struct PresentationOverrides {
     pub streaming: Option<bool>,
     /// Post the "…" placeholder when streaming starts. May only tighten.
     pub streaming_placeholder: Option<bool>,
+    /// Label for a session deep link appended to progress / final messages.
+    /// Empty string clears the adapter default.
+    pub session_link_label: Option<String>,
 }
 
 impl PresentationOverrides {
@@ -84,6 +87,7 @@ impl PresentationOverrides {
         native_tables: None,
         streaming: None,
         streaming_placeholder: None,
+        session_link_label: None,
     };
 
     /// Overlay every explicitly configured value from `other`.
@@ -91,7 +95,7 @@ impl PresentationOverrides {
         macro_rules! merge {
             ($field:ident) => {
                 if other.$field.is_some() {
-                    self.$field = other.$field;
+                    self.$field = other.$field.clone();
                 }
             };
         }
@@ -103,6 +107,7 @@ impl PresentationOverrides {
         merge!(native_tables);
         merge!(streaming);
         merge!(streaming_placeholder);
+        merge!(session_link_label);
     }
 }
 
@@ -208,7 +213,7 @@ impl ChannelCapabilities {
 ///
 /// Field names match the locals the router used before this type existed, so the
 /// send path reads the policy instead of interrogating the adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PresentationPolicy {
     /// Adapter-reported delivery semantics for this channel.
     pub delivery_mode: DeliveryMode,
@@ -234,7 +239,7 @@ pub struct PresentationPolicy {
     /// Whether a placeholder message is posted at streaming start.
     pub streaming_placeholder: bool,
     /// Session deep-link label, if the channel has a session console.
-    pub session_link_label: Option<&'static str>,
+    pub session_link_label: Option<String>,
 }
 
 /// One requested value that a physical channel capability changed.
@@ -411,6 +416,17 @@ impl PresentationPolicy {
             },
         );
 
+        let requested_link = overrides
+            .session_link_label
+            .clone()
+            .or_else(|| caps.session_link_label.map(str::to_string));
+        requested.insert(
+            "session_link_label".into(),
+            requested_link.clone().unwrap_or_default(),
+        );
+        // Empty string is the explicit "no link" override.
+        let session_link_label = requested_link.filter(|label| !label.is_empty());
+
         let effective = Self {
             delivery_mode: caps.delivery_mode,
             intermediate_text,
@@ -423,7 +439,7 @@ impl PresentationPolicy {
             reply_tool_display,
             tool_progress_message,
             streaming_placeholder,
-            session_link_label: caps.session_link_label,
+            session_link_label,
         };
 
         PresentationResolution {
@@ -545,7 +561,7 @@ mod tests {
         assert_eq!(p.reply_tool_display, reactions.tool_display);
         assert!(!p.tool_progress_message);
         assert!(p.streaming_placeholder);
-        assert_eq!(p.session_link_label, None);
+        assert_eq!(p.session_link_label.as_deref(), None);
     }
 
     #[test]
@@ -572,7 +588,7 @@ mod tests {
             matches!(p.table_mode, TableMode::Off),
             "Slack renders tables natively"
         );
-        assert_eq!(p.session_link_label, Some("Open session"));
+        assert_eq!(p.session_link_label.as_deref(), Some("Open session"));
     }
 
     #[test]
@@ -669,6 +685,25 @@ mod tests {
             is_default_table_mode(p.table_mode),
             "config cannot claim native table support the adapter lacks"
         );
+    }
+
+    #[test]
+    fn session_link_label_override_can_set_or_clear() {
+        let reactions = ReactionsConfig::default();
+        let set = PresentationOverrides {
+            session_link_label: Some("Open console".into()),
+            ..Default::default()
+        };
+        let p = PresentationPolicy::resolve(slack_like(), &reactions, TableMode::default(), &set);
+        assert_eq!(p.session_link_label.as_deref(), Some("Open console"));
+
+        let clear = PresentationOverrides {
+            session_link_label: Some(String::new()),
+            ..Default::default()
+        };
+        let p =
+            PresentationPolicy::resolve(slack_like(), &reactions, TableMode::default(), &clear);
+        assert_eq!(p.session_link_label.as_deref(), None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # ADR: Channel Presentation Layering (Control Plane vs IM Presentation)
 
-- **Status:** Accepted (docs) / Partially implemented (runtime via PR #55)
-- **Runtime follow-up:** PR #55 ships `PresentationPolicy`, `DeliveryMode`, hierarchical channel profiles, and adapter-reported delivery mode. Remaining follow-ups: semantic events / renderer split, Admin Web profile management UI, HITL channel affordances (ZER-554).
+- **Status:** Accepted and implemented for ZER-569 acceptance scope (interface inventory + Profile invariant + onboarding checklist + runtime PresentationPolicy / DeliveryMode / channel profiles)
+- **Out of scope for ZER-569:** Admin Web profile management UI polish, semantic-event/renderer split beyond current policy, ZER-554 HITL channel affordances
 - **Date:** 2026-08-18
 - **Tracking issues:** ZER-569 (parent ZER-565); related ZER-414 (Slack thread presentation), ZER-525 (hide Slack thinking chain), ZER-506 (MetaMCP boundary), ZER-554 (Ask User / Webhook HITL)
 - **Supersedes:** nothing. Extends `docs/adr/multi-platform-adapters.md` (ChatAdapter / AdapterRouter) with an explicit presentation-vs-control-plane boundary.
@@ -74,7 +74,7 @@ This is the ZER-569 acceptance deliverable. Classification of the current `ChatA
 | Directive parsing (`[[reply_to:...]]`, `[[ws:...]]`, profile directives) | `directives.rs`, `adapter.rs` |
 | Config load / validation / defaults | `config.rs` |
 
-### 3.4 Proposed shape (sketch, not implemented in this PR)
+### 3.4 Resolved shape (implemented)
 
 ```rust
 /// Resolved per-channel presentation policy. Every field defaults to the
@@ -97,7 +97,7 @@ Resolution order (each step optional, later steps override earlier ones):
 2. global `[reactions]` / display config
 3. `[channel.<name>.presentation]` in gateway config
 
-The router keeps reading a single resolved `PresentationPolicy`; adapters keep only capability probes.
+The router / dispatch path reads a single resolved `PresentationPolicy`; adapters keep capability probes. Runtime lives in `crates/openab-core/src/presentation.rs`, `channel_profile.rs`, and `AdapterRouter` / `DispatchTarget`.
 
 ## 4. Where does channel presentation config live?
 
@@ -168,7 +168,7 @@ Human-in-the-loop is a **control-plane** capability: the request, its pending st
 
 ## 9. Open questions
 
-1. Should `PresentationPolicy` be per channel, or per (channel, workspace) pair for multi-tenant deployments?
+1. ~~Should `PresentationPolicy` be per channel, or per (channel, workspace) pair?~~ **Answered:** hierarchical profiles support platform / workspace / channel / workspace+channel.
 2. Does `tool_display` need a per-thread override via control directives, or is deployment scope enough?
 3. Should capability probes and policy be split into two traits (`ChatAdapter` + `ChannelPresentation`), or is one trait with a documented split sufficient?
 4. When a policy asks for something the platform cannot do (native streaming where the API is absent), is the correct behaviour a startup validation error or a silent documented downgrade?

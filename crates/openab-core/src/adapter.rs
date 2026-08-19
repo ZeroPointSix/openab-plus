@@ -870,14 +870,36 @@ impl AdapterRouter {
         {
             Ok(created) => created,
             Err(e) => {
-                let content = if adapter.exposes_intermediate_text() {
+                let policy = self
+                    .presentation_resolution_for_channel(
+                        adapter.as_ref(),
+                        &thread_channel,
+                        None,
+                        other_bot_present,
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::presentation::PresentationPolicy::resolve_with_report(
+                            adapter.presentation_capabilities(
+                                &thread_channel.platform,
+                                other_bot_present,
+                            ),
+                            &self.reactions_config,
+                            self.table_mode,
+                            self.presentation
+                                .get(thread_channel.platform.as_str())
+                                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+                        )
+                    })
+                    .effective;
+                let content = if policy.intermediate_text {
                     let msg = format_user_error(&e.to_string());
                     format!("⚠️ {msg}")
                 } else {
                     append_observability_footer(
                         &format_public_error(&e.to_string()),
                         None,
-                        adapter.session_link_label(),
+                        policy.session_link_label.as_deref(),
                     )
                 };
                 let _ = adapter.send_message(&thread_channel, &content).await;
@@ -893,10 +915,18 @@ impl AdapterRouter {
         };
         let content_blocks = Self::pack_arrival_event(&sender_json, &prompt, extra_blocks);
 
-        // In assistant-status mode (e.g. Slack assistant_mode), status is conveyed
-        // via assistant.threads.setStatus, so the emoji-reaction lifecycle is skipped
-        // entirely — mirrors dispatch_batch so per-message and batched modes agree.
-        let assistant_status = adapter.uses_assistant_status();
+        // Resolve presentation once for this turn so emoji/status decisions and
+        // error rendering stay on the policy path, not adapter presentation probes.
+        let turn_policy = self
+            .presentation_resolution_for_channel(
+                adapter.as_ref(),
+                &thread_channel,
+                None,
+                other_bot_present,
+            )
+            .await?
+            .effective;
+        let assistant_status = turn_policy.assistant_status;
 
         let reactions = Arc::new(StatusReactionController::new(
             self.reactions_config.enabled,
@@ -941,14 +971,14 @@ impl AdapterRouter {
         }
 
         if let Err(ref e) = result {
-            let content = if adapter.exposes_intermediate_text() {
+            let content = if turn_policy.intermediate_text {
                 format!("⚠️ {e}")
             } else {
                 let snapshot = self.pool.session_snapshot(&thread_key).await;
                 append_observability_footer(
                     &format_public_error(&e.to_string()),
                     snapshot.as_ref(),
-                    adapter.session_link_label(),
+                    turn_policy.session_link_label.as_deref(),
                 )
             };
             let _ = adapter.send_message(&thread_channel, &content).await;
@@ -1076,7 +1106,7 @@ impl AdapterRouter {
                         adapter.clone(),
                         thread_channel.clone(),
                         external_url.clone(),
-                        session_link_label,
+                        session_link_label.clone(),
                         tool_display,
                     );
                     // Acknowledge the request immediately. The first tool event
@@ -1553,13 +1583,13 @@ impl AdapterRouter {
                         append_session_link(
                             &final_content,
                             external_url.as_deref(),
-                            session_link_label,
+                            session_link_label.as_deref(),
                         )
                     } else {
                         append_observability_footer(
                             &final_content,
                             final_snapshot.as_ref(),
-                            session_link_label,
+                            session_link_label.as_deref(),
                         )
                     };
 
@@ -1857,7 +1887,7 @@ struct ToolProgressMessage {
     channel: ChannelRef,
     message: Option<MessageRef>,
     external_url: Option<String>,
-    link_label: Option<&'static str>,
+    link_label: Option<String>,
     display: ToolDisplay,
 }
 
@@ -1867,7 +1897,7 @@ impl ToolProgressMessage {
         adapter: Arc<dyn ChatAdapter>,
         channel: ChannelRef,
         external_url: Option<String>,
-        link_label: Option<&'static str>,
+        link_label: Option<String>,
         display: ToolDisplay,
     ) -> Self {
         Self {
@@ -1921,7 +1951,7 @@ impl ToolProgressMessage {
         self.write(append_session_link(
             "OpenAB · 正在处理…",
             self.external_url.as_deref(),
-            self.link_label,
+            self.link_label.as_deref(),
         ))
         .await;
     }
@@ -1934,7 +1964,7 @@ impl ToolProgressMessage {
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
-            self.link_label,
+            self.link_label.as_deref(),
         ))
         .await;
     }
@@ -1956,7 +1986,7 @@ impl ToolProgressMessage {
                 self.write(append_session_link(
                     state,
                     self.external_url.as_deref(),
-                    self.link_label,
+                    self.link_label.as_deref(),
                 ))
                 .await;
             }
@@ -1966,7 +1996,7 @@ impl ToolProgressMessage {
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
-            self.link_label,
+            self.link_label.as_deref(),
         ))
         .await;
     }
@@ -3154,7 +3184,7 @@ mod tests {
             adapter.clone(),
             channel,
             Some("https://openab.example/sessions/slack%3A1700.1".into()),
-            Some("Open in OpenAB Plus"),
+            Some("Open in OpenAB Plus".into()),
             ToolDisplay::Full,
         );
         let mut tools = vec![tool("1", "web_search", ToolState::Running)];
@@ -3234,7 +3264,7 @@ mod tests {
             adapter.clone(),
             channel,
             Some("https://openab.example/sessions/slack%3A1700.1".into()),
-            Some("Open in OpenAB Plus"),
+            Some("Open in OpenAB Plus".into()),
             ToolDisplay::Full,
         );
 
@@ -3371,7 +3401,7 @@ mod tests {
         let output = append_session_link(
             "完成",
             Some("https://openab.example/sessions/slack%3A1700.1"),
-            Some("Open in OpenAB Plus"),
+            Some("Open in OpenAB Plus".into()),
         );
         assert_eq!(
             output,
