@@ -736,7 +736,7 @@ impl SessionPool {
             .or(stored_profile_id);
 
         let effective_overrides = match (overrides, stored_overrides) {
-            (Some(request), Some(stored)) => Some(merge_profile_overrides(stored, request)),
+            (Some(request), Some(stored)) => Some(merge_profile_overrides(&stored, request)),
             (Some(request), None) => Some(request.clone()),
             (None, Some(stored)) => Some(stored),
             (None, None) => None,
