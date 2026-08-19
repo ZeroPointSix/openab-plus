@@ -113,11 +113,12 @@ pub type PresentationConfig = HashMap<String, PresentationOverrides>;
 ///
 /// Operators never set these. They are the ceiling that
 /// [`PresentationPolicy::resolve`] clamps configuration against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryMode {
     /// Ordinary chat delivery: tool progress can be folded into message text,
     /// replies use the adapter's message limit, and message edits may stream.
+    #[default]
     Chat,
     /// Structured append-only delivery: tool events travel separately from the
     /// answer text, the reply is delivered as one snapshot, and edits are off.
@@ -138,12 +139,6 @@ impl DeliveryMode {
             Self::Chat => adapter_limit,
             Self::AppendOnly => usize::MAX,
         }
-    }
-}
-
-impl Default for DeliveryMode {
-    fn default() -> Self {
-        Self::Chat
     }
 }
 
