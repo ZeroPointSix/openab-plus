@@ -213,8 +213,9 @@ pub struct TurnResult {
 }
 
 impl TurnResult {
-    /// Returns true when the turn ended normally but produced zero output —
-    /// a strong signal of silent provider/auth failure.
+    /// Returns true when the turn ended normally but produced zero output.
+    /// Callers must inspect the tool history before treating this as a failure:
+    /// completed tools can make it recoverable with a final-summary retry.
     pub fn is_silent_failure(&self) -> bool {
         matches!(
             (self.stop_reason.as_deref(), self.output_tokens),
