@@ -141,6 +141,8 @@ pub struct SessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_source: Option<SessionMetadataSource>,
     pub status: SessionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,6 +178,7 @@ impl SessionSnapshot {
             profile_status,
             model,
             reasoning_effort: None,
+            applied_provider: None,
             metadata_source: None,
             status: SessionStatus::Idle,
             last_error: None,
@@ -240,6 +243,11 @@ impl SessionSnapshot {
         if metadata.metadata_source.is_some() {
             self.metadata_source = metadata.metadata_source;
         }
+        self.updated_at = Utc::now();
+    }
+
+    pub fn set_applied_provider(&mut self, provider_id: Option<String>) {
+        self.applied_provider = provider_id;
         self.updated_at = Utc::now();
     }
 

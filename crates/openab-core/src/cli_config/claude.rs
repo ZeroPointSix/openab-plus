@@ -1,4 +1,6 @@
-use super::atomic::{atomic_write, ensure_openab_bak, openab_bak_path, restore_from_openab_bak};
+use super::atomic::{
+    atomic_write_private, ensure_openab_bak, openab_bak_path, restore_from_openab_bak,
+};
 use super::home::claude_settings_path;
 use super::merge::merge_json_owned_keys;
 use super::thinking::{claude_effort_value, is_supported};
@@ -38,7 +40,7 @@ pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
     let owned = owned_keys(request)?;
     let (merged, changes) = merge_json_owned_keys(&existing, &owned)?;
     let bak = ensure_openab_bak(&path).await?;
-    atomic_write(&path, merged).await?;
+    atomic_write_private(&path, merged).await?;
     Ok(DryRunReport {
         agent_type: "claude".into(),
         unsupported_thinking: unsupported_thinking(request),

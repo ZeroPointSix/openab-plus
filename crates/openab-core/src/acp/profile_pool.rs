@@ -178,18 +178,20 @@ impl SessionPool {
         let _guard = gate.lock().await;
 
         if let Some(pool) = self.existing_pool(thread_id).await {
-            let result = pool.get_or_create(thread_id, working_dir_override).await;
-            return match result {
-                Ok(outcome) => {
-                    self.backfill_source_permalink(thread_id, source_permalink)
-                        .await;
-                    Ok(self.apply_ensure_outcome(thread_id, outcome).await)
-                }
-                Err(err) => {
-                    self.mark_session_error(thread_id, err.to_string()).await;
-                    Err(err)
-                }
-            };
+            if pool.has_live_active_connection(thread_id).await {
+                let result = pool.get_or_create(thread_id, working_dir_override).await;
+                return match result {
+                    Ok(outcome) => {
+                        self.backfill_source_permalink(thread_id, source_permalink)
+                            .await;
+                        Ok(self.apply_ensure_outcome(thread_id, outcome).await)
+                    }
+                    Err(err) => {
+                        self.mark_session_error(thread_id, err.to_string()).await;
+                        Err(err)
+                    }
+                };
+            }
         }
 
         let resolved = self
@@ -217,6 +219,32 @@ impl SessionPool {
         };
 
         if let Some(profile) = resolved.profile.clone() {
+            if let Some(provider_id) = profile.provider.as_deref() {
+                let provider = self
+                    .provider_store
+                    .get(provider_id)
+                    .await?
+                    .ok_or_else(|| anyhow!("provider {provider_id} not found"))?;
+                let api_key_env = api_key_env_name(&provider.provider_type).to_string();
+                let base_url_env = base_url_env_name(&provider.provider_type).to_string();
+                let api_key_value = resolve_env_secret_ref(&provider.api_key_ref)?;
+                resolved
+                    .config
+                    .env
+                    .insert(api_key_env.clone(), api_key_value);
+                if let Some(base_url) = provider
+                    .base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    resolved
+                        .config
+                        .env
+                        .insert(base_url_env, base_url.to_string());
+                }
+            }
+
             if crate::cli_config::supports_file_renderer(&profile.agent_type) {
                 let model = configured_model(&resolved.config, &resolved.config_options);
                 let reasoning_effort =
@@ -237,26 +265,16 @@ impl SessionPool {
                         .await?
                         .ok_or_else(|| anyhow!("provider {provider_id} not found"))?;
                     let api_key_env = api_key_env_name(&provider.provider_type).to_string();
-                    let base_url_env = base_url_env_name(&provider.provider_type).to_string();
-                    let api_key_value = resolve_env_secret_ref(&provider.api_key_ref)?;
-                    resolved
-                        .config
-                        .env
-                        .insert(api_key_env.clone(), api_key_value);
+                    request.provider_type = Some(provider.provider_type.clone());
+                    request.api_key_env = Some(api_key_env);
                     if let Some(base_url) = provider
                         .base_url
                         .as_deref()
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                     {
-                        resolved
-                            .config
-                            .env
-                            .insert(base_url_env, base_url.to_string());
                         request.base_url = Some(base_url.to_string());
                     }
-                    request.provider_type = Some(provider.provider_type.clone());
-                    request.api_key_env = Some(api_key_env);
                 }
                 crate::cli_config::apply_unlocked(&request).await?;
                 // File renderer owns model/thinking for codex/claude.
@@ -264,6 +282,10 @@ impl SessionPool {
                 resolved.config_options.remove("reasoning_effort");
             }
         }
+        let applied_provider = resolved
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.provider.clone());
         let pool_key = if resolved.profile.is_none() && overrides.is_none() {
             "system".to_string()
         } else {
@@ -322,11 +344,21 @@ impl SessionPool {
                         self.external_base_url.as_deref(),
                     );
                     snapshot.replace_runtime_metadata(runtime_metadata);
+                    snapshot.set_applied_provider(applied_provider.clone());
                     snapshot.set_source_permalink(source_permalink);
                     if !profile_config_errors.is_empty() {
                         snapshot.set_profile_config_errors(profile_config_errors);
                     }
                     self.record_session_created(snapshot).await;
+                } else if applied_provider.is_some() {
+                    self.update_snapshot(
+                        thread_id,
+                        SessionEventKind::ConfigChanged,
+                        |snapshot| {
+                            snapshot.set_applied_provider(applied_provider.clone());
+                        },
+                    )
+                    .await;
                 }
                 self.sync_pool_snapshot_statuses(&pool_key, &pool).await;
                 Ok(created)

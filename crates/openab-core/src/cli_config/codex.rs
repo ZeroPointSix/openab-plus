@@ -1,4 +1,6 @@
-use super::atomic::{atomic_write, ensure_openab_bak, openab_bak_path, restore_from_openab_bak};
+use super::atomic::{
+    atomic_write_private, ensure_openab_bak, openab_bak_path, restore_from_openab_bak,
+};
 use super::home::codex_config_path;
 use super::merge::{merge_toml_owned_keys, FieldChange};
 use super::thinking::{codex_effort_value, is_supported};
@@ -37,7 +39,7 @@ pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
     let owned = owned_keys(request)?;
     let (merged, changes) = merge_toml_owned_keys(&existing, &owned)?;
     let bak = ensure_openab_bak(&path).await?;
-    atomic_write(&path, merged).await?;
+    atomic_write_private(&path, merged).await?;
     Ok(DryRunReport {
         agent_type: "codex".into(),
         unsupported_thinking: unsupported_thinking(request),
