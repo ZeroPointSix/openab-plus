@@ -230,4 +230,10 @@ impl ChatAdapter for UnifiedGatewayAdapter {
         // Only applies to Telegram; other platforms in unified mode keep wrapping.
         platform == "telegram" && self.gw_state.telegram_rich_messages
     }
+
+    fn delivery_mode(&self, platform: &str) -> openab_core::presentation::DeliveryMode {
+        // Same transport table as the gateway WebSocket adapter. Shared policy
+        // code consumes only the reported DeliveryMode.
+        openab_core::presentation::delivery_mode_for_gateway_platform(platform)
+    }
 }

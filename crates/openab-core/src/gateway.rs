@@ -235,6 +235,7 @@ pub struct GatewayAdapter {
     ws_tx: SharedWsTx,
     pending: PendingRequests,
     platform_name: &'static str,
+    delivery_mode: crate::presentation::DeliveryMode,
     streaming: bool,
     streaming_placeholder: bool,
     telegram_rich_messages: bool,
@@ -253,6 +254,7 @@ impl GatewayAdapter {
             ws_tx,
             pending,
             platform_name,
+            delivery_mode: crate::presentation::delivery_mode_for_gateway_platform(platform_name),
             streaming,
             streaming_placeholder,
             telegram_rich_messages,
@@ -758,13 +760,9 @@ impl ChatAdapter for GatewayAdapter {
     }
 
     fn delivery_mode(&self, _platform: &str) -> crate::presentation::DeliveryMode {
-        // The concrete gateway adapter owns this transport distinction. Shared
-        // presentation and routing code consume only the reported mode.
-        if self.platform_name == "acp" {
-            crate::presentation::DeliveryMode::AppendOnly
-        } else {
-            crate::presentation::DeliveryMode::Chat
-        }
+        // Resolved once at construction from the gateway transport table.
+        // Shared presentation / routing code never branches on platform names.
+        self.delivery_mode
     }
 }
 
@@ -1744,6 +1742,29 @@ mod tests {
             assert!(
                 platform_supports_streaming(platform),
                 "{platform} should still support streaming",
+            );
+        }
+    }
+
+    #[test]
+    fn acp_gateway_reports_append_only_delivery_mode() {
+        assert_eq!(
+            crate::presentation::delivery_mode_for_gateway_platform("acp"),
+            crate::presentation::DeliveryMode::AppendOnly
+        );
+        for platform in [
+            "telegram",
+            "line",
+            "feishu",
+            "teams",
+            "googlechat",
+            "wecom",
+            "slack",
+        ] {
+            assert_eq!(
+                crate::presentation::delivery_mode_for_gateway_platform(platform),
+                crate::presentation::DeliveryMode::Chat,
+                "{platform} should stay on Chat delivery",
             );
         }
     }

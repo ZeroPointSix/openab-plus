@@ -142,6 +142,17 @@ impl DeliveryMode {
     }
 }
 
+/// Gateway / unified-adapter transport table for append-only platforms.
+///
+/// Concrete adapters resolve this once and report [`DeliveryMode`]; shared
+/// presentation and routing code must not re-branch on platform names.
+pub fn delivery_mode_for_gateway_platform(platform: &str) -> DeliveryMode {
+    match platform {
+        "acp" => DeliveryMode::AppendOnly,
+        _ => DeliveryMode::Chat,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelCapabilities {
     /// How this adapter delivers answer text and tool progress.
@@ -590,6 +601,18 @@ mod tests {
         assert_eq!(DeliveryMode::Chat.message_limit(2_000), 2_000);
         assert!(!DeliveryMode::AppendOnly.combines_tool_progress());
         assert_eq!(DeliveryMode::AppendOnly.message_limit(4_096), usize::MAX);
+    }
+
+    #[test]
+    fn gateway_platform_table_maps_acp_to_append_only() {
+        assert_eq!(
+            delivery_mode_for_gateway_platform("acp"),
+            DeliveryMode::AppendOnly
+        );
+        assert_eq!(
+            delivery_mode_for_gateway_platform("telegram"),
+            DeliveryMode::Chat
+        );
     }
 
     #[test]

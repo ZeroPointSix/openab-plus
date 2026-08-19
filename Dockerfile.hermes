@@ -29,12 +29,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # HERMES_HOME points to agent user's data dir for OAuth tokens and config
 ARG HERMES_INSTALL_COMMIT=2bd1977d8fad185c9b4be47884f7e87f1add0ce3
 ARG HERMES_INSTALL_SHA256=dbd9d555ed4ac67bd1fc71ba6a39b410cf2af0ebcfd8f4889e086af78c9ddcaa
-RUN curl -fsSL "https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_INSTALL_COMMIT}/scripts/install.sh" \
-      -o /tmp/install-hermes.sh && \
-    echo "${HERMES_INSTALL_SHA256}  /tmp/install-hermes.sh" | sha256sum -c - && \
-    HERMES_HOME=/home/agent/.hermes bash /tmp/install-hermes.sh && \
-    rm /tmp/install-hermes.sh && \
-    (test -d /root/.local/share/uv && chmod -R a+rX /root/.local/share/uv && chmod a+rx /root /root/.local /root/.local/share || true) && \
+# raw.githubusercontent.com is rate-limited (HTTP 429) in CI; retry with backoff
+# and fall back to jsDelivr before failing the image build.
+RUN set -eux; \
+    primary="https://raw.githubusercontent.com/NousResearch/hermes-agent/${HERMES_INSTALL_COMMIT}/scripts/install.sh"; \
+    fallback="https://cdn.jsdelivr.net/gh/NousResearch/hermes-agent@${HERMES_INSTALL_COMMIT}/scripts/install.sh"; \
+    ok=0; \
+    for i in 1 2 3 4 5; do \
+      if curl -fsSL "$primary" -o /tmp/install-hermes.sh; then ok=1; break; fi; \
+      sleep $((i * 5)); \
+    done; \
+    if [ "$ok" -ne 1 ]; then \
+      curl -fsSL "$fallback" -o /tmp/install-hermes.sh; \
+    fi; \
+    echo "${HERMES_INSTALL_SHA256}  /tmp/install-hermes.sh" | sha256sum -c -; \
+    HERMES_HOME=/home/agent/.hermes bash /tmp/install-hermes.sh; \
+    rm /tmp/install-hermes.sh; \
+    (test -d /root/.local/share/uv && chmod -R a+rX /root/.local/share/uv && chmod a+rx /root /root/.local /root/.local/share || true); \
     ln -sf /usr/local/lib/hermes-agent/venv/bin/hermes-acp /usr/local/bin/hermes-acp
 
 # Install gh CLI
