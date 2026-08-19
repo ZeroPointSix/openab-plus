@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
     let path = claude_settings_path()?;
     let existing = if path.exists() {
-        std::fs::read_to_string(&path).unwrap_or_default()
+        std::fs::read_to_string(&path)?
     } else {
         String::new()
     };
@@ -33,7 +33,7 @@ pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
 pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
     let path = claude_settings_path()?;
     let existing = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        tokio::fs::read_to_string(&path).await.unwrap_or_default()
+        tokio::fs::read_to_string(&path).await?
     } else {
         String::new()
     };

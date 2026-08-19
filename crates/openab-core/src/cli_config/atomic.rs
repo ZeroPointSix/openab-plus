@@ -43,16 +43,43 @@ pub async fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> Result<()>
     Ok(())
 }
 
-/// Write via a temp file then enforce owner-only permissions on the final path.
 pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
-    atomic_write(path, contents).await?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = {
+        let mut name = path
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| "config".into());
+        name.push(".tmp");
+        path.with_file_name(name)
+    };
+    let contents = contents.as_ref().to_vec();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = tokio::fs::metadata(path).await?.permissions();
-        perms.set_mode(0o600);
-        tokio::fs::set_permissions(path, perms).await?;
+        let tmp_path = tmp.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            file.write_all(&contents)?;
+            file.sync_all()?;
+            Ok(())
+        })
+        .await??;
     }
+    #[cfg(not(unix))]
+    {
+        tokio::fs::write(&tmp, contents).await?;
+    }
+    tokio::fs::rename(&tmp, path).await?;
     Ok(())
 }
 
