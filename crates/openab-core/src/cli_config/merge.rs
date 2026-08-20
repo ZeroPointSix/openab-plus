@@ -3,6 +3,35 @@ use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, Item, Value as TomlEditValue};
 
+const REDACTED_ENV_VALUE: &str = "<redacted>";
+
+pub fn redact_sensitive_field_changes(changes: &mut BTreeMap<String, FieldChange>) {
+    for (key, change) in changes.iter_mut() {
+        if key == "env" {
+            if let Some(from) = change.from.as_ref() {
+                change.from = Some(redact_json_env_display(from));
+            }
+            if let Some(to) = change.to.as_ref() {
+                change.to = Some(redact_json_env_display(to));
+            }
+        }
+    }
+}
+
+fn redact_json_env_display(value: &str) -> String {
+    match serde_json::from_str::<JsonValue>(value) {
+        Ok(JsonValue::Object(map)) => {
+            let redacted = map
+                .keys()
+                .map(|key| (key.clone(), JsonValue::String(REDACTED_ENV_VALUE.into())))
+                .collect::<Map<_, _>>();
+            serde_json::to_string(&JsonValue::Object(redacted))
+                .unwrap_or_else(|_| REDACTED_ENV_VALUE.into())
+        }
+        _ => REDACTED_ENV_VALUE.into(),
+    }
+}
+
 pub fn merge_toml_owned_keys(
     existing: &str,
     owned: &BTreeMap<String, toml::Value>,
@@ -100,6 +129,22 @@ fn toml_to_edit(value: &toml::Value) -> Result<TomlEditValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_sensitive_field_changes_masks_env_values() {
+        let mut changes = BTreeMap::from([(
+            "env".into(),
+            FieldChange {
+                from: Some(r#"{"KEEP":"secret","ANTHROPIC_API_KEY":"old"}"#.into()),
+                to: Some(r#"{"ANTHROPIC_BASE_URL":"https://api.example.com"}"#.into()),
+            },
+        )]);
+        redact_sensitive_field_changes(&mut changes);
+        let env = changes.get("env").expect("env change");
+        assert!(env.from.as_deref().unwrap().contains("<redacted>"));
+        assert!(!env.from.as_deref().unwrap().contains("secret"));
+        assert!(env.to.as_deref().unwrap().contains("ANTHROPIC_BASE_URL"));
+    }
 
     #[test]
     fn toml_merge_preserves_unknown_keys() {

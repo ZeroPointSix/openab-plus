@@ -2,7 +2,7 @@ use super::atomic::{
     atomic_write_private, ensure_openab_bak, openab_bak_path, restore_from_openab_bak,
 };
 use super::home::claude_settings_path;
-use super::merge::merge_json_owned_keys;
+use super::merge::{merge_json_owned_keys, redact_sensitive_field_changes};
 use super::thinking::{claude_effort_value, is_supported};
 use super::{ApplyRequest, DryRunFile, DryRunReport};
 use anyhow::{anyhow, Result};
@@ -17,7 +17,8 @@ pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
         String::new()
     };
     let owned = owned_keys(request)?;
-    let (_merged, changes) = merge_json_owned_keys(&existing, &owned)?;
+    let (_merged, mut changes) = merge_json_owned_keys(&existing, &owned)?;
+    redact_sensitive_field_changes(&mut changes);
     Ok(DryRunReport {
         agent_type: "claude".into(),
         unsupported_thinking: unsupported_thinking(request),
@@ -91,12 +92,11 @@ fn owned_keys(request: &ApplyRequest) -> Result<BTreeMap<String, JsonValue>> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let key = match request.provider_type.as_deref() {
-            Some("openai_compatible") | Some("openai") => "OPENAI_BASE_URL",
-            _ => "ANTHROPIC_BASE_URL",
-        };
         let mut env = serde_json::Map::new();
-        env.insert(key.into(), JsonValue::String(base_url.to_string()));
+        env.insert(
+            "ANTHROPIC_BASE_URL".into(),
+            JsonValue::String(base_url.to_string()),
+        );
         owned.insert("env".into(), JsonValue::Object(env));
     }
     // API keys stay in process env (request.api_key_env); never write secret values.

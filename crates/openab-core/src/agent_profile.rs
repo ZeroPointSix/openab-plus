@@ -619,6 +619,13 @@ fn validate_profiles(
                 "required",
                 "agent type is required",
             );
+        } else if !is_safe_profile_agent_type(&profile.agent_type) {
+            push_error(
+                &mut errors,
+                format!("{base}.agent_type"),
+                "invalid_agent_type",
+                "agent type may contain only ascii letters, numbers, dash, or underscore",
+            );
         }
         if profile
             .command
@@ -895,11 +902,18 @@ fn apply_startup_command(config: &mut AgentConfig, command: &str, args: &[String
     }
 }
 
+pub(crate) fn is_safe_profile_agent_type(agent_type: &str) -> bool {
+    agent_type
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn is_external_secret_ref(value: &str) -> bool {
+    if crate::provider::is_env_only_secret_ref(value) {
+        return true;
+    }
     let value = value.trim();
-    (value.starts_with("${") && value.ends_with('}'))
-        || value.starts_with("env://")
-        || value.starts_with("aws-sm://")
+    value.starts_with("aws-sm://")
         || value.starts_with("vault://")
         || value.starts_with("gcp-sm://")
         || value.starts_with("azure-kv://")

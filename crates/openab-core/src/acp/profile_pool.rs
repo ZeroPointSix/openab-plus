@@ -52,6 +52,7 @@ pub struct SessionPool {
     snapshots: RwLock<HashMap<String, SessionSnapshot>>,
     external_base_url: Option<String>,
     thread_profile_path: PathBuf,
+    thread_profile_flush_lock: Mutex<()>,
     #[cfg(any(test, feature = "test-support"))]
     config_options_for_test: RwLock<HashMap<String, Vec<ConfigOption>>>,
 }
@@ -106,6 +107,7 @@ impl SessionPool {
             snapshots: RwLock::new(HashMap::new()),
             external_base_url,
             thread_profile_path,
+            thread_profile_flush_lock: Mutex::new(()),
             #[cfg(any(test, feature = "test-support"))]
             config_options_for_test: RwLock::new(HashMap::new()),
         }
@@ -789,6 +791,7 @@ impl SessionPool {
     }
 
     async fn flush_thread_sessions(&self) {
+        let _guard = self.thread_profile_flush_lock.lock().await;
         let sessions = {
             let pools = self.thread_pools.read().await;
             let policies = self.thread_policies.read().await;
@@ -1063,7 +1066,10 @@ fn save_thread_sessions(path: &Path, sessions: &HashMap<String, PersistedThreadS
             return;
         }
     };
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_file_name(format!(
+        "thread_profile_context.{}.tmp",
+        uuid::Uuid::new_v4()
+    ));
     if let Err(e) = std::fs::write(&tmp, &data).and_then(|_| std::fs::rename(&tmp, path)) {
         warn!(path = %path.display(), error = %e, "failed to persist thread profile context");
     }

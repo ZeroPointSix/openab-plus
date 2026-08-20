@@ -82,7 +82,8 @@ pub async fn restore_from_openab_bak(path: &Path) -> Result<bool> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::copy(&bak, path).await?;
+    let contents = tokio::fs::read(&bak).await?;
+    atomic_write_private(path, contents).await?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

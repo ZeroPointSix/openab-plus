@@ -52,9 +52,32 @@ impl Provider {
     }
 }
 
-pub fn is_env_only_secret_ref(value: &str) -> bool {
+pub fn env_ref_variable_name(value: &str) -> Option<&str> {
     let value = value.trim();
-    (value.starts_with("${") && value.ends_with('}')) || value.starts_with("env://")
+    if let Some(name) = value
+        .strip_prefix("${")
+        .and_then(|v| v.strip_suffix('}'))
+    {
+        let name = name.strip_prefix("env:").unwrap_or(name).trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    } else if let Some(name) = value.strip_prefix("env://") {
+        let name = name.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    } else {
+        None
+    }
+}
+
+pub fn is_env_only_secret_ref(value: &str) -> bool {
+    env_ref_variable_name(value).is_some()
 }
 
 pub fn validate_provider(provider: &Provider) -> Result<()> {
@@ -108,20 +131,9 @@ pub fn validate_document(document: &ProviderDocument) -> Result<()> {
 
 /// Resolve env-only refs for process injection. Does not accept other schemes.
 pub fn resolve_env_secret_ref(value: &str) -> Result<String> {
-    let value = value.trim();
-    if let Some(name) = value
-        .strip_prefix("${")
-        .and_then(|v| v.strip_suffix('}'))
-    {
-        let name = name.strip_prefix("env:").unwrap_or(name);
-        std::env::var(name).map_err(|_| anyhow!("environment variable {name} is not set"))
-    } else if let Some(name) = value.strip_prefix("env://") {
-        std::env::var(name).map_err(|_| anyhow!("environment variable {name} is not set"))
-    } else {
-        Err(anyhow!(
-            "secret ref must be ${{VAR}} or env://VAR, got unsupported form"
-        ))
-    }
+    let name = env_ref_variable_name(value)
+        .ok_or_else(|| anyhow!("secret ref must be ${{VAR}} or env://VAR with a non-empty name"))?;
+    std::env::var(name).map_err(|_| anyhow!("environment variable {name} is not set"))
 }
 
 pub fn api_key_env_name(provider_type: &str) -> &'static str {
@@ -141,6 +153,18 @@ pub fn base_url_env_name(provider_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_empty_env_ref() {
+        let err = validate_provider(&Provider::new("p1", "P", "openai_compatible", "${}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plaintext") || err.contains("non-empty"));
+        let err = validate_provider(&Provider::new("p1", "P", "openai_compatible", "env://"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("plaintext") || err.contains("non-empty"));
+    }
 
     #[test]
     fn rejects_plaintext_api_key_ref() {

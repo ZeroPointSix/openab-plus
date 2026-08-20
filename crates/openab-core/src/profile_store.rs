@@ -1,4 +1,4 @@
-use crate::agent_profile::{AgentProfile, AgentProfileDocument};
+use crate::agent_profile::{is_safe_profile_agent_type, AgentProfile, AgentProfileDocument};
 use anyhow::{anyhow, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -219,6 +219,11 @@ impl ProfileStore {
         }
         let mut written = BTreeSet::new();
         for (agent_type, profiles) in by_agent {
+            if !is_safe_profile_agent_type(&agent_type) {
+                return Err(anyhow!(
+                    "invalid agent_type for profile file: {agent_type} (path traversal rejected)"
+                ));
+            }
             let file_name = format!("{agent_type}.toml");
             let path = self.dir.join(&file_name);
             written.insert(file_name);
