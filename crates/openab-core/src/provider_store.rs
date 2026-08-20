@@ -33,6 +33,10 @@ impl ProviderStore {
     }
 
     pub async fn load(&self) -> Result<ProviderDocument> {
+        self.load_inner().await
+    }
+
+    async fn load_inner(&self) -> Result<ProviderDocument> {
         match self.try_load_path(&self.path).await {
             Ok(document) => {
                 validate_document(&document)?;
@@ -68,6 +72,10 @@ impl ProviderStore {
 
     pub async fn save_atomic(&self, document: &ProviderDocument) -> Result<()> {
         let _guard = self.write_lock.lock().await;
+        self.save_inner(document).await
+    }
+
+    async fn save_inner(&self, document: &ProviderDocument) -> Result<()> {
         validate_document(document)?;
         let mut document = document.clone();
         document.schema_version = PROVIDER_SCHEMA_VERSION;
@@ -98,8 +106,9 @@ impl ProviderStore {
     }
 
     pub async fn upsert(&self, provider: Provider) -> Result<Provider> {
+        let _guard = self.write_lock.lock().await;
         crate::provider::validate_provider(&provider)?;
-        let mut document = self.load().await?;
+        let mut document = self.load_inner().await?;
         if let Some(existing) = document
             .providers
             .iter_mut()
@@ -109,18 +118,19 @@ impl ProviderStore {
         } else {
             document.providers.push(provider.clone());
         }
-        self.save_atomic(&document).await?;
+        self.save_inner(&document).await?;
         Ok(provider)
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let mut document = self.load().await?;
+        let _guard = self.write_lock.lock().await;
+        let mut document = self.load_inner().await?;
         let before = document.providers.len();
         document.providers.retain(|provider| provider.id != id);
         if document.providers.len() == before {
             return Ok(false);
         }
-        self.save_atomic(&document).await?;
+        self.save_inner(&document).await?;
         Ok(true)
     }
 
