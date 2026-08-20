@@ -32,38 +32,39 @@ fn private_temp_path(path: &Path) -> PathBuf {
     parent.join(format!(".openab-{}.tmp", Uuid::new_v4()))
 }
 
-pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+pub fn atomic_write_private_sync(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        std::fs::create_dir_all(parent)?;
     }
-    let contents = contents.as_ref().to_vec();
-    let final_path = path.to_path_buf();
     #[cfg(unix)]
     {
-        let tmp_path = private_temp_path(&final_path);
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            use std::fs::OpenOptions;
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            file.write_all(&contents)?;
-            file.sync_all()?;
-            std::fs::rename(&tmp_path, &final_path)?;
-            Ok(())
-        })
-        .await??;
+        let tmp_path = private_temp_path(path);
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp_path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp_path, path)?;
     }
     #[cfg(not(unix))]
     {
-        let tmp_path = private_temp_path(&final_path);
-        tokio::fs::write(&tmp_path, contents).await?;
-        tokio::fs::rename(&tmp_path, &final_path).await?;
+        let tmp_path = private_temp_path(path);
+        std::fs::write(&tmp_path, contents)?;
+        std::fs::rename(&tmp_path, path)?;
     }
     Ok(())
+}
+
+pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    let contents = contents.as_ref().to_vec();
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || atomic_write_private_sync(&path, &contents))
+        .await?
 }
 
 pub async fn restore_from_openab_bak(path: &Path) -> Result<bool> {

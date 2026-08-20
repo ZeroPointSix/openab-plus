@@ -1,6 +1,9 @@
+use crate::cli_config::atomic::atomic_write_private_sync;
 use crate::provider::{validate_document, Provider, ProviderDocument, PROVIDER_SCHEMA_VERSION};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::warn;
 
 const DEFAULT_PROVIDERS_PATH: &str = "config/providers.toml";
@@ -8,17 +11,21 @@ const DEFAULT_PROVIDERS_PATH: &str = "config/providers.toml";
 #[derive(Debug, Clone)]
 pub struct ProviderStore {
     path: PathBuf,
+    write_lock: Arc<Mutex<()>>,
 }
 
 impl ProviderStore {
     pub fn from_env() -> Self {
         let path = std::env::var("OPENAB_PROVIDERS_PATH")
             .unwrap_or_else(|_| DEFAULT_PROVIDERS_PATH.to_string());
-        Self { path: path.into() }
+        Self::new(path)
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            write_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -60,6 +67,7 @@ impl ProviderStore {
     }
 
     pub async fn save_atomic(&self, document: &ProviderDocument) -> Result<()> {
+        let _guard = self.write_lock.lock().await;
         validate_document(document)?;
         let mut document = document.clone();
         document.schema_version = PROVIDER_SCHEMA_VERSION;
@@ -70,9 +78,9 @@ impl ProviderStore {
         if tokio::fs::try_exists(&self.path).await.unwrap_or(false) {
             tokio::fs::copy(&self.path, self.backup_path()).await?;
         }
-        let tmp = self.path.with_extension("toml.tmp");
-        tokio::fs::write(&tmp, raw).await?;
-        tokio::fs::rename(&tmp, &self.path).await?;
+        let path = self.path.clone();
+        tokio::task::spawn_blocking(move || atomic_write_private_sync(&path, raw.as_bytes()))
+            .await??;
         Ok(())
     }
 
@@ -170,5 +178,30 @@ mod tests {
             .unwrap();
         let loaded = store.get("newapi").await.unwrap().unwrap();
         assert_eq!(loaded.name, "NewAPI");
+    }
+
+    #[tokio::test]
+    async fn concurrent_upserts_do_not_corrupt_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(ProviderStore::new(dir.path().join("providers.toml")));
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .upsert(Provider::new(
+                        format!("provider-{index}"),
+                        format!("Provider {index}"),
+                        "openai_compatible",
+                        "env://OPENAI_API_KEY",
+                    ))
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let providers = store.list().await.unwrap();
+        assert_eq!(providers.len(), 8);
     }
 }

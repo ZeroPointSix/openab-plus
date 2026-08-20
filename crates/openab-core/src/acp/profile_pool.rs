@@ -1,7 +1,8 @@
 use super::connection::{runtime_metadata_from_options, AcpConnection};
 use super::pool;
 use super::protocol::ConfigOption;
-use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy};
+use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy, overrides_for_persistence};
+use crate::cli_config::atomic::atomic_write_private_sync;
 use crate::config::AgentConfig;
 use crate::provider::{api_key_env_name, base_url_env_name, resolve_env_secret_ref};
 use crate::provider_store::ProviderStore;
@@ -86,7 +87,8 @@ impl SessionPool {
         let persisted_sessions = load_thread_sessions(&thread_profile_path);
         let mut thread_pools = HashMap::new();
         let mut thread_policies = HashMap::new();
-        for (thread_id, entry) in persisted_sessions {
+        for (thread_id, mut entry) in persisted_sessions {
+            entry.policy = policy_for_persistence(&entry.policy);
             thread_pools.insert(thread_id.clone(), entry.pool_key);
             thread_policies.insert(thread_id, entry.policy);
         }
@@ -803,7 +805,7 @@ impl SessionPool {
                             thread_id.clone(),
                             PersistedThreadSession {
                                 pool_key: pool_key.clone(),
-                                policy: policy.clone(),
+                                policy: policy_for_persistence(policy),
                             },
                         )
                     })
@@ -1041,6 +1043,18 @@ fn merge_profile_overrides(
     merged
 }
 
+fn policy_for_persistence(policy: &ThreadProfilePolicy) -> ThreadProfilePolicy {
+    ThreadProfilePolicy {
+        timeout_secs: policy.timeout_secs,
+        recovery_strategy: policy.recovery_strategy.clone(),
+        profile_id: policy.profile_id.clone(),
+        overrides: policy
+            .overrides
+            .as_ref()
+            .and_then(overrides_for_persistence),
+    }
+}
+
 fn openab_data_dir() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
@@ -1066,11 +1080,7 @@ fn save_thread_sessions(path: &Path, sessions: &HashMap<String, PersistedThreadS
             return;
         }
     };
-    let tmp = path.with_file_name(format!(
-        "thread_profile_context.{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
-    if let Err(e) = std::fs::write(&tmp, &data).and_then(|_| std::fs::rename(&tmp, path)) {
+    if let Err(e) = atomic_write_private_sync(path, data.as_bytes()) {
         warn!(path = %path.display(), error = %e, "failed to persist thread profile context");
     }
 }
@@ -1318,7 +1328,7 @@ mod tests {
     #[tokio::test]
     async fn thread_profile_context_persists_across_pool_restart() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("HOME", dir.path());
+        let _home_guard = HomeEnvGuard::set(dir.path());
 
         {
             let outer = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
@@ -1331,12 +1341,28 @@ mod tests {
                         overrides: Some(ProfileSessionOverrides {
                             model: Some("gpt-5.1".into()),
                             reasoning_effort: Some("high".into()),
+                            env: HashMap::from([("SECRET".into(), "plain-text".into())]),
                             ..ProfileSessionOverrides::default()
                         }),
                         ..ThreadProfilePolicy::default()
                     },
                 )
                 .await;
+        }
+
+        let persisted = std::fs::read_to_string(dir.path().join(".openab/thread_profile_context.json"))
+            .expect("persisted context");
+        assert!(!persisted.contains("plain-text"));
+        assert!(!persisted.contains("SECRET"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join(".openab/thread_profile_context.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
         }
 
         let reloaded = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
@@ -1348,10 +1374,32 @@ mod tests {
         assert_eq!(profile_id.as_deref(), Some("deep"));
         assert_eq!(overrides.model.as_deref(), Some("gpt-5.1"));
         assert_eq!(overrides.reasoning_effort.as_deref(), Some("high"));
+        assert!(overrides.env.is_empty());
         assert_eq!(
             reloaded.thread_pools.read().await.get("slack:thread").map(String::as_str),
             Some("profile:deep")
         );
+    }
+
+    struct HomeEnvGuard {
+        previous: Option<String>,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let previous = std::env::var("HOME").ok();
+            std::env::set_var("HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 
     #[test]

@@ -159,6 +159,22 @@ pub struct ProfileSessionOverrides {
     pub config_options: HashMap<String, String>,
 }
 
+/// Strip process-level secrets before persisting session overrides to disk.
+pub(crate) fn overrides_for_persistence(
+    overrides: &ProfileSessionOverrides,
+) -> Option<ProfileSessionOverrides> {
+    let sanitized = ProfileSessionOverrides {
+        model: overrides.model.clone(),
+        reasoning_effort: overrides.reasoning_effort.clone(),
+        config_options: overrides.config_options.clone(),
+        ..ProfileSessionOverrides::default()
+    };
+    let has_overrides = sanitized.model.is_some()
+        || sanitized.reasoning_effort.is_some()
+        || !sanitized.config_options.is_empty();
+    has_overrides.then_some(sanitized)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProfileSnapshot {
     pub id: String,
