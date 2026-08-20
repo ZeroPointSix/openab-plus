@@ -5,6 +5,8 @@ mod home;
 mod merge;
 mod thinking;
 
+pub use atomic::atomic_write_private_sync;
+
 pub use home::{claude_settings_path, cli_home_dir, codex_config_path};
 pub use merge::FieldChange;
 pub use thinking::{disabled_levels, is_supported, supported_levels, THINKING_LEVELS};

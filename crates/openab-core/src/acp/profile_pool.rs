@@ -2,7 +2,7 @@ use super::connection::{runtime_metadata_from_options, AcpConnection};
 use super::pool;
 use super::protocol::ConfigOption;
 use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy, overrides_for_persistence};
-use crate::cli_config::atomic::atomic_write_private_sync;
+use crate::cli_config::atomic_write_private_sync;
 use crate::config::AgentConfig;
 use crate::provider::{api_key_env_name, base_url_env_name, resolve_env_secret_ref};
 use crate::provider_store::ProviderStore;

@@ -1,4 +1,4 @@
-use crate::cli_config::atomic::atomic_write_private_sync;
+use crate::cli_config::atomic_write_private_sync;
 use crate::provider::{validate_document, Provider, ProviderDocument, PROVIDER_SCHEMA_VERSION};
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
