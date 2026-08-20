@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
   DrawerForm,
   ProFormSelect,
@@ -8,6 +8,7 @@ import { Form, Typography } from 'antd';
 import { AgentProfile, CreateSessionRequest } from '../types';
 
 interface SessionFormValues {
+  agent_type?: string;
   profile_id: string;
   working_dir?: string;
 }
@@ -15,7 +16,7 @@ interface SessionFormValues {
 interface NewSessionDrawerProps {
   open: boolean;
   profiles: AgentProfile[];
-  defaultProfile?: string;
+  defaultProfiles?: Record<string, string>;
   submitting?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (request: CreateSessionRequest) => Promise<unknown>;
@@ -24,7 +25,7 @@ interface NewSessionDrawerProps {
 export function NewSessionDrawer({
   open,
   profiles,
-  defaultProfile,
+  defaultProfiles = {},
   submitting,
   onOpenChange,
   onSubmit,
@@ -35,18 +36,40 @@ export function NewSessionDrawer({
     () => profiles.filter((profile) => profile.enabled),
     [profiles],
   );
+  const agentTypes = useMemo(
+    () => [...new Set(enabledProfiles.map((profile) => profile.agent_type))].sort(),
+    [enabledProfiles],
+  );
+  const selectedAgentType = Form.useWatch('agent_type', form);
+  const agentProfiles = enabledProfiles.filter(
+    (profile) => !selectedAgentType || profile.agent_type === selectedAgentType,
+  );
   const selectedProfile = enabledProfiles.find(
     (profile) => profile.id === profileId,
   );
 
+  const selectDefaultForAgent = useCallback((agentType?: string) => {
+    const candidates = enabledProfiles.filter(
+      (profile) => profile.agent_type === agentType,
+    );
+    const profile =
+      candidates.find((candidate) => candidate.id === defaultProfiles[agentType || '']) ||
+      candidates[0];
+    form.setFieldValue('profile_id', profile?.id);
+  }, [defaultProfiles, enabledProfiles, form]);
+
   useEffect(() => {
     if (!open) return;
-    const initialProfile =
-      enabledProfiles.find((profile) => profile.id === defaultProfile) ||
-      enabledProfiles[0];
+    const initialAgent = agentTypes[0];
     form.resetFields();
-    form.setFieldsValue({ profile_id: initialProfile?.id });
-  }, [defaultProfile, enabledProfiles, form, open]);
+    form.setFieldsValue({ agent_type: initialAgent });
+    selectDefaultForAgent(initialAgent);
+  }, [agentTypes, form, open, selectDefaultForAgent]);
+
+  useEffect(() => {
+    if (!open || !selectedAgentType) return;
+    selectDefaultForAgent(selectedAgentType);
+  }, [open, selectedAgentType, selectDefaultForAgent]);
 
   return (
     <DrawerForm<SessionFormValues>
@@ -71,9 +94,15 @@ export function NewSessionDrawer({
       }}
     >
       <ProFormSelect
+        name="agent_type"
+        label="Agent 类型"
+        options={agentTypes.map((agentType) => ({ label: agentType, value: agentType }))}
+        rules={[{ required: true, message: '请选择 Agent 类型' }]}
+      />
+      <ProFormSelect
         name="profile_id"
         label="Profile"
-        options={enabledProfiles.map((profile) => ({
+        options={agentProfiles.map((profile) => ({
           label: profile.name + ' · ' + profile.agent_type,
           value: profile.id,
         }))}

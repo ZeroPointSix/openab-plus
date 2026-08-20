@@ -281,7 +281,7 @@ export function SessionWorkbenchPage() {
       <NewSessionDrawer
         open={newSessionOpen}
         profiles={profiles}
-        defaultProfile={profilesQuery.data?.default_profile}
+        defaultProfiles={profilesQuery.data?.default_profiles}
         submitting={createSessionMutation.isPending}
         onOpenChange={setNewSessionOpen}
         onSubmit={(request) => createSessionMutation.mutateAsync(request)}

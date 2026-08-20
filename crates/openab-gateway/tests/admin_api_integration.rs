@@ -672,7 +672,7 @@ async fn profiles_crud_default_and_validate() {
     let default_set = client
         .put(format!("{}/api/v1/agent-profiles/default", server.base_url))
         .bearer_auth(&env.token)
-        .json(&json!({ "profile_id": "codex-main" }))
+        .json(&json!({ "profile_id": "codex-main", "agent_type": "codex" }))
         .send()
         .await
         .expect("set default")
@@ -691,6 +691,54 @@ async fn profiles_crud_default_and_validate() {
         .await
         .expect("default json");
     assert_eq!(default_get["default_profile"], "codex-main");
+    assert_eq!(default_get["default_profiles"]["codex"], "codex-main");
+
+    let created_claude = client
+        .post(format!("{}/api/v1/agent-profiles", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&AgentProfile::new("claude-main", "Claude Main", "claude"))
+        .send()
+        .await
+        .expect("create Claude profile");
+    assert_eq!(created_claude.status(), reqwest::StatusCode::CREATED);
+
+    let scoped_default_set = client
+        .put(format!("{}/api/v1/agent-profiles/default", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({ "profile_id": "claude-main", "agent_type": "claude" }))
+        .send()
+        .await
+        .expect("set Claude default")
+        .json::<Value>()
+        .await
+        .expect("scoped default document");
+    assert_eq!(
+        scoped_default_set["default_profiles"]["codex"],
+        "codex-main"
+    );
+    assert_eq!(
+        scoped_default_set["default_profiles"]["claude"],
+        "claude-main"
+    );
+
+    let scoped_default_get = client
+        .get(format!("{}/api/v1/agent-profiles/default", server.base_url))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get scoped defaults")
+        .json::<Value>()
+        .await
+        .expect("scoped defaults json");
+    assert!(scoped_default_get["default_profile"].is_null());
+    assert_eq!(
+        scoped_default_get["default_profiles"]["codex"],
+        "codex-main"
+    );
+    assert_eq!(
+        scoped_default_get["default_profiles"]["claude"],
+        "claude-main"
+    );
 
     let deleted = client
         .delete(format!(

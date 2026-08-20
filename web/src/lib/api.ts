@@ -140,11 +140,11 @@ export const adminApi = {
       '/api/v1/agent-profiles/' + encodeURIComponent(id),
       { method: 'DELETE' },
     ),
-  setDefaultProfile: (id: string) =>
-    apiRequest<AgentProfileDocument>(
-      '/api/v1/agent-profiles/default/' + encodeURIComponent(id),
-      { method: 'PUT' },
-    ),
+  setDefaultProfile: (id: string, agentType: string) =>
+    apiRequest<AgentProfileDocument>('/api/v1/agent-profiles/default', {
+      method: 'PUT',
+      body: JSON.stringify({ profile_id: id, agent_type: agentType }),
+    }),
   clearDefaultProfile: () =>
     apiRequest<AgentProfileDocument>('/api/v1/agent-profiles/default', {
       method: 'DELETE',

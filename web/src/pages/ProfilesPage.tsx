@@ -313,7 +313,9 @@ export function ProfilesPage() {
     queryFn: adminApi.agents,
   });
   const profiles = profilesQuery.data?.profiles || [];
-  const defaultProfile = profilesQuery.data?.default_profile;
+  const defaultProfiles = profilesQuery.data?.default_profiles || {};
+  const isDefaultProfile = (profile: AgentProfile) =>
+    defaultProfiles[profile.agent_type] === profile.id;
   const agentTypes = useMemo(
     () =>
       [
@@ -385,9 +387,9 @@ export function ProfilesPage() {
           <Space direction="vertical" size={0}>
             <Space size={6}>
               <Typography.Text strong>{profile.name}</Typography.Text>
-              {profile.id === defaultProfile ? (
+              {isDefaultProfile(profile) ? (
                 <Tag color="gold" icon={<StarFilled />}>
-                  默认
+                  {profile.agent_type} 默认
                 </Tag>
               ) : null}
             </Space>
@@ -480,13 +482,13 @@ export function ProfilesPage() {
           <Button
             type="text"
             icon={
-              profile.id === defaultProfile ? <StarFilled /> : <StarOutlined />
+              isDefaultProfile(profile) ? <StarFilled /> : <StarOutlined />
             }
             aria-label="设为默认 Profile"
-            disabled={profile.id === defaultProfile}
+            disabled={isDefaultProfile(profile)}
             onClick={async () => {
-              await adminApi.setDefaultProfile(profile.id);
-              message.success('默认 Profile 已更新');
+              await adminApi.setDefaultProfile(profile.id, profile.agent_type);
+              message.success(`${profile.agent_type} 默认 Profile 已更新`);
               await refresh();
             }}
           />
@@ -521,12 +523,12 @@ export function ProfilesPage() {
       subTitle="Agent 启动参数、运行策略与动态配置"
       className="page-container"
       extra={[
-        defaultProfile ? (
+        Object.keys(defaultProfiles).length > 0 ? (
           <Button
             key="clear-default"
             onClick={async () => {
               await adminApi.clearDefaultProfile();
-              message.success('已清除默认 Profile');
+              message.success('已清除全部 Agent 默认 Profile');
               await refresh();
             }}
           >

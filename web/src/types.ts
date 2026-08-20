@@ -216,7 +216,9 @@ export interface AgentProfile {
 
 export interface AgentProfileDocument {
   schema_version?: number;
+  /** Legacy compatibility field; use default_profiles for new behavior. */
   default_profile?: string;
+  default_profiles?: Record<string, string>;
   providers?: never;
   profiles?: AgentProfile[];
 }
