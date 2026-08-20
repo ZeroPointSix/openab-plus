@@ -1063,13 +1063,20 @@ fn openab_data_dir() -> PathBuf {
 }
 
 fn load_thread_sessions(path: &Path) -> HashMap<String, PersistedThreadSession> {
-    match std::fs::read_to_string(path) {
+    let sessions: HashMap<String, PersistedThreadSession> = match std::fs::read_to_string(path) {
         Ok(data) => serde_json::from_str(&data).unwrap_or_else(|e| {
             warn!(path = %path.display(), error = %e, "corrupt thread profile context, starting fresh");
             HashMap::new()
         }),
         Err(_) => HashMap::new(),
-    }
+    };
+    sessions
+        .into_iter()
+        .map(|(thread_id, mut entry)| {
+            entry.policy = policy_for_persistence(&entry.policy);
+            (thread_id, entry)
+        })
+        .collect()
 }
 
 fn save_thread_sessions(path: &Path, sessions: &HashMap<String, PersistedThreadSession>) {
