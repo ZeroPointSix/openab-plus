@@ -325,11 +325,7 @@ fn session_owner_matches(registry: &AcpReplyRegistry, channel_id: &str, owner_id
         .is_some_and(|current| current == owner_id)
 }
 
-fn register_reply_sink(
-    registry: &AcpReplyRegistry,
-    channel_id: &str,
-    sink: ReplySink,
-) -> bool {
+fn register_reply_sink(registry: &AcpReplyRegistry, channel_id: &str, sink: ReplySink) -> bool {
     // Lock in the same owners -> sinks order as connection cleanup so ownership
     // cannot be released between validation and sink insertion.
     let owners = registry.owners.lock().unwrap_or_else(|e| e.into_inner());
@@ -368,7 +364,10 @@ fn release_connection_state(registry: &AcpReplyRegistry, sessions: &[(String, St
     let mut owners = registry.owners.lock().unwrap_or_else(|e| e.into_inner());
     let mut sinks = registry.sinks.lock().unwrap_or_else(|e| e.into_inner());
     for (channel_id, owner_id) in sessions {
-        if owners.get(channel_id).is_some_and(|current| current == owner_id) {
+        if owners
+            .get(channel_id)
+            .is_some_and(|current| current == owner_id)
+        {
             if sinks
                 .get(channel_id)
                 .is_some_and(|sink| sink.owner_id == *owner_id)
@@ -598,8 +597,11 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
             Ok(r) => r,
             Err(e) => {
                 if !is_notification {
-                    let err_resp =
-                        JsonRpcResponse::error(Value::Null, -32600, format!("Invalid Request: {e}"));
+                    let err_resp = JsonRpcResponse::error(
+                        Value::Null,
+                        -32600,
+                        format!("Invalid Request: {e}"),
+                    );
                     let _ = out_tx.send(serde_json::to_string(&err_resp).unwrap()).await;
                 }
                 continue;
@@ -650,9 +652,9 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                     continue;
                 }
                 // Required params per schema: { cwd, mcpServers }.
-                if let Err(msg) =
-                    validate_params::<crate::adapters::acp_schema::NewSessionRequest>(req.params.as_ref())
-                {
+                if let Err(msg) = validate_params::<crate::adapters::acp_schema::NewSessionRequest>(
+                    req.params.as_ref(),
+                ) {
                     let resp = JsonRpcResponse::error(id, -32602, msg);
                     let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
@@ -679,9 +681,9 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                 }
                 // Required params per schema: { sessionId, cwd, mcpServers? }. The
                 // sessionId's `sess_<uuid>` shape is checked further in the handler.
-                if let Err(msg) =
-                    validate_params::<crate::adapters::acp_schema::ResumeSessionRequest>(req.params.as_ref())
-                {
+                if let Err(msg) = validate_params::<crate::adapters::acp_schema::ResumeSessionRequest>(
+                    req.params.as_ref(),
+                ) {
                     let resp = JsonRpcResponse::error(id, -32602, msg);
                     let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                     continue;
@@ -738,9 +740,7 @@ async fn handle_acp_connection(state: Arc<crate::AppState>, socket: WebSocket) {
                         let resp = JsonRpcResponse::error(
                             id,
                             ACP_OVERLOADED,
-                            format!(
-                                "Too many ACP backend prompts (max {MAX_INFLIGHT_PROMPTS})"
-                            ),
+                            format!("Too many ACP backend prompts (max {MAX_INFLIGHT_PROMPTS})"),
                         );
                         let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                         continue;
@@ -881,7 +881,11 @@ fn handle_initialize(req: &JsonRpcRequest) -> JsonRpcResponse {
         match serde_json::from_value(req.params.clone().unwrap_or(Value::Null)) {
             Ok(r) => r,
             Err(e) => {
-                return JsonRpcResponse::error(id, -32602, format!("Invalid initialize params: {e}"));
+                return JsonRpcResponse::error(
+                    id,
+                    -32602,
+                    format!("Invalid initialize params: {e}"),
+                );
             }
         };
     // Negotiate: respond with the version we will use = the lower of the client's and
@@ -960,7 +964,10 @@ async fn handle_session_resume(
     id: Value,
     params: Option<&Value>,
 ) -> JsonRpcResponse {
-    let session_id = match params.and_then(|p| p.get("sessionId")).and_then(|v| v.as_str()) {
+    let session_id = match params
+        .and_then(|p| p.get("sessionId"))
+        .and_then(|v| v.as_str())
+    {
         Some(s) => s.to_string(),
         None => return JsonRpcResponse::error(id, -32602, "Missing sessionId"),
     };
@@ -1031,7 +1038,9 @@ async fn handle_session_cancel(
             "session/cancel is a notification and must not carry an id",
         ));
     }
-    let sess_key = params.and_then(|p| p.get("sessionId")).and_then(|v| v.as_str());
+    let sess_key = params
+        .and_then(|p| p.get("sessionId"))
+        .and_then(|v| v.as_str());
     if let Some(k) = sess_key {
         let notify = sessions.lock().await.get(k).and_then(|s| s.cancel.clone());
         if let Some(n) = notify {
@@ -1073,11 +1082,7 @@ struct AcpPromptTask<'a> {
     _backend_permit: OwnedSemaphorePermit,
 }
 
-async fn handle_session_prompt(
-    task: AcpPromptTask<'_>,
-    id: Value,
-    params: Option<&Value>,
-) {
+async fn handle_session_prompt(task: AcpPromptTask<'_>, id: Value, params: Option<&Value>) {
     let AcpPromptTask {
         state,
         sessions,
@@ -1100,19 +1105,15 @@ async fn handle_session_prompt(
     let (channel_id, owner_id) = match sessions.lock().await.get(&session_id) {
         Some(session) => (session.channel_id.clone(), session.owner_id.clone()),
         None => {
-            let resp =
-                JsonRpcResponse::error(id, -32602, format!("Unknown session: {session_id}"));
+            let resp = JsonRpcResponse::error(id, -32602, format!("Unknown session: {session_id}"));
             let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
             release_prompt(sessions, &session_id).await;
             return;
         }
     };
     if !session_owner_matches(registry, &channel_id, &owner_id) {
-        let resp = JsonRpcResponse::error(
-            id,
-            -32001,
-            "Session ownership moved to another connection",
-        );
+        let resp =
+            JsonRpcResponse::error(id, -32001, "Session ownership moved to another connection");
         let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
         release_prompt(sessions, &session_id).await;
         return;
@@ -1147,11 +1148,7 @@ async fn handle_session_prompt(
             tx: reply_tx,
         },
     ) {
-        let resp = JsonRpcResponse::error(
-            id,
-            -32001,
-            "Session already has active backend work",
-        );
+        let resp = JsonRpcResponse::error(id, -32001, "Session already has active backend work");
         let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
         release_prompt(sessions, &session_id).await;
         return;
@@ -1161,8 +1158,7 @@ async fn handle_session_prompt(
         Ok(json) => {
             if state.event_tx.send(json).is_err() {
                 warn!("ACP: event_tx send failed - no agent connected");
-                let resp =
-                    JsonRpcResponse::error(id, -32603, "No agent backend connected");
+                let resp = JsonRpcResponse::error(id, -32603, "No agent backend connected");
                 let _ = out_tx.send(serde_json::to_string(&resp).unwrap()).await;
                 remove_reply_sink_if_matches(registry, &channel_id, &owner_id, &turn_id);
                 release_prompt(sessions, &session_id).await;
@@ -1347,7 +1343,10 @@ pub async fn handle_reply(reply: &GatewayReply, registry: &AcpReplyRegistry) {
             return;
         };
         if !reply.reply_to.is_empty() && reply.reply_to != sink.turn_id {
-            debug!(channel = key, "ACP dropping stale reply from a superseded turn");
+            debug!(
+                channel = key,
+                "ACP dropping stale reply from a superseded turn"
+            );
             return;
         }
 
@@ -1407,12 +1406,21 @@ mod acp_conformance {
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
-        let a: T = serde_json::from_value(wire.clone())
-            .unwrap_or_else(|e| panic!("emitted wire is not valid ACP {}: {e}\n  wire={wire}", std::any::type_name::<T>()));
+        let a: T = serde_json::from_value(wire.clone()).unwrap_or_else(|e| {
+            panic!(
+                "emitted wire is not valid ACP {}: {e}\n  wire={wire}",
+                std::any::type_name::<T>()
+            )
+        });
         let v1 = serde_json::to_value(&a).unwrap();
         let b: T = serde_json::from_value(v1.clone()).expect("re-parse of generated form");
         let v2 = serde_json::to_value(&b).unwrap();
-        assert_eq!(v1, v2, "ACP serde is not a stable fixed point for {}", std::any::type_name::<T>());
+        assert_eq!(
+            v1,
+            v2,
+            "ACP serde is not a stable fixed point for {}",
+            std::any::type_name::<T>()
+        );
     }
 
     // --- outbound responses (exact shapes handle_* emit) ---
@@ -1434,7 +1442,9 @@ mod acp_conformance {
 
     #[test]
     fn new_session_response() {
-        conforms::<sc::NewSessionResponse>(json!({ "sessionId": "sess_00000000-0000-0000-0000-000000000000" }));
+        conforms::<sc::NewSessionResponse>(
+            json!({ "sessionId": "sess_00000000-0000-0000-0000-000000000000" }),
+        );
     }
 
     #[test]
@@ -1478,12 +1488,12 @@ mod acp_conformance {
     // astral-plane emoji, ZWJ sequence, regional-indicator flag, VS16 emoji,
     // astral-plane CJK, and a mixed run.
     const EDGE_TEXT: &[&str] = &[
-        "🎉",                     // U+1F389, 4-byte astral emoji
-        "👨‍👩‍👧‍👦",                 // ZWJ family (7 codepoints joined by ZWJ)
-        "🇹🇼",                     // regional-indicator pair (flag)
-        "❤️",                     // U+2764 + U+FE0F (VS16)
-        "𠀀",                     // U+20000, astral-plane CJK
-        "🎉 你好 (๑•̀ㅂ•́)و ❤️",      // mixed emoji + CJK + kaomoji + VS16
+        "🎉",                  // U+1F389, 4-byte astral emoji
+        "👨‍👩‍👧‍👦",                  // ZWJ family (7 codepoints joined by ZWJ)
+        "🇹🇼",                  // regional-indicator pair (flag)
+        "❤️",                  // U+2764 + U+FE0F (VS16)
+        "𠀀",                  // U+20000, astral-plane CJK
+        "🎉 你好 (๑•̀ㅂ•́)و ❤️", // mixed emoji + CJK + kaomoji + VS16
     ];
 
     #[test]
@@ -1524,7 +1534,13 @@ mod acp_conformance {
 
     #[test]
     fn prompt_response_all_stop_reasons() {
-        for sr in ["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"] {
+        for sr in [
+            "end_turn",
+            "max_tokens",
+            "max_turn_requests",
+            "refusal",
+            "cancelled",
+        ] {
             conforms::<sc::PromptResponse>(json!({ "stopReason": sr }));
         }
     }
@@ -1551,8 +1567,12 @@ mod acp_conformance {
             serde_json::from_str(r#"{"jsonrpc":"2.0","method":"session/cancel"}"#).unwrap();
         assert!(notif.get("id").is_none(), "no id member → notification");
         let req_null: Value =
-            serde_json::from_str(r#"{"jsonrpc":"2.0","method":"session/cancel","id":null}"#).unwrap();
-        assert!(req_null.get("id").is_some(), "explicit id:null → request (id member present)");
+            serde_json::from_str(r#"{"jsonrpc":"2.0","method":"session/cancel","id":null}"#)
+                .unwrap();
+        assert!(
+            req_null.get("id").is_some(),
+            "explicit id:null → request (id member present)"
+        );
         let req_num: Value =
             serde_json::from_str(r#"{"jsonrpc":"2.0","method":"initialize","id":7}"#).unwrap();
         assert_eq!(req_num.get("id"), Some(&json!(7)));
@@ -1564,14 +1584,36 @@ mod acp_conformance {
     fn session_param_validation() {
         use super::validate_params;
         // session/new requires { cwd, mcpServers }
-        assert!(validate_params::<sc::NewSessionRequest>(Some(&json!({"cwd": "/w", "mcpServers": []}))).is_ok());
-        assert!(validate_params::<sc::NewSessionRequest>(Some(&json!({"mcpServers": []}))).is_err(), "missing cwd");
-        assert!(validate_params::<sc::NewSessionRequest>(Some(&json!({"cwd": "/w"}))).is_err(), "missing mcpServers");
-        assert!(validate_params::<sc::NewSessionRequest>(None).is_err(), "missing params");
+        assert!(validate_params::<sc::NewSessionRequest>(Some(
+            &json!({"cwd": "/w", "mcpServers": []})
+        ))
+        .is_ok());
+        assert!(
+            validate_params::<sc::NewSessionRequest>(Some(&json!({"mcpServers": []}))).is_err(),
+            "missing cwd"
+        );
+        assert!(
+            validate_params::<sc::NewSessionRequest>(Some(&json!({"cwd": "/w"}))).is_err(),
+            "missing mcpServers"
+        );
+        assert!(
+            validate_params::<sc::NewSessionRequest>(None).is_err(),
+            "missing params"
+        );
         // session/resume requires { sessionId, cwd }
-        assert!(validate_params::<sc::ResumeSessionRequest>(Some(&json!({"sessionId": "sess_x", "cwd": "/w", "mcpServers": []}))).is_ok());
-        assert!(validate_params::<sc::ResumeSessionRequest>(Some(&json!({"cwd": "/w"}))).is_err(), "missing sessionId");
-        assert!(validate_params::<sc::ResumeSessionRequest>(Some(&json!({"sessionId": "sess_x"}))).is_err(), "missing cwd");
+        assert!(validate_params::<sc::ResumeSessionRequest>(Some(
+            &json!({"sessionId": "sess_x", "cwd": "/w", "mcpServers": []})
+        ))
+        .is_ok());
+        assert!(
+            validate_params::<sc::ResumeSessionRequest>(Some(&json!({"cwd": "/w"}))).is_err(),
+            "missing sessionId"
+        );
+        assert!(
+            validate_params::<sc::ResumeSessionRequest>(Some(&json!({"sessionId": "sess_x"})))
+                .is_err(),
+            "missing cwd"
+        );
     }
 
     // --- prompt content blocks (F10): unsupported block types rejected, not dropped ---
@@ -1622,13 +1664,16 @@ mod acp_conformance {
         // R17-F3a — a plain-string prompt is non-conformant (schema requires
         // `prompt: [ContentBlock]`) → rejected, surfaced as -32602 at the call site.
         assert!(
-            extract_prompt_params(Some(&json!({"sessionId": "sess_x", "prompt": "hello"}))).is_err(),
+            extract_prompt_params(Some(&json!({"sessionId": "sess_x", "prompt": "hello"})))
+                .is_err(),
             "a bare string prompt must be rejected, not coerced"
         );
         // an object (non-array, non-string) prompt is likewise rejected.
         assert!(
-            extract_prompt_params(Some(&json!({"sessionId": "sess_x", "prompt": {"type": "text"}})))
-                .is_err(),
+            extract_prompt_params(Some(
+                &json!({"sessionId": "sess_x", "prompt": {"type": "text"}})
+            ))
+            .is_err(),
             "a non-array prompt must be rejected"
         );
     }
@@ -1659,8 +1704,11 @@ mod acp_conformance {
         use axum::http::HeaderMap;
         let mut h = HeaderMap::new();
         assert_eq!(subprotocol_token(&h), None); // no header
-        // the browser offers "openab.bearer.<token>, acp.v1" → extract the token
-        h.insert("sec-websocket-protocol", "openab.bearer.abc123, acp.v1".parse().unwrap());
+                                                 // the browser offers "openab.bearer.<token>, acp.v1" → extract the token
+        h.insert(
+            "sec-websocket-protocol",
+            "openab.bearer.abc123, acp.v1".parse().unwrap(),
+        );
         assert_eq!(subprotocol_token(&h), Some("abc123"));
         // only the real protocol, no bearer entry → None
         h.insert("sec-websocket-protocol", "acp.v1".parse().unwrap());
@@ -1699,14 +1747,7 @@ mod acp_streaming {
     #[test]
     fn multibyte_codepoints_never_split() {
         // each snapshot appends a whole multi-byte grapheme; reconstruction is exact
-        let snaps = [
-            "a",
-            "a🎉",
-            "a🎉你",
-            "a🎉你👨‍👩‍👧‍👦",
-            "a🎉你👨‍👩‍👧‍👦🇹🇼",
-            "a🎉你👨‍👩‍👧‍👦🇹🇼❤️",
-        ];
+        let snaps = ["a", "a🎉", "a🎉你", "a🎉你👨‍👩‍👧‍👦", "a🎉你👨‍👩‍👧‍👦🇹🇼", "a🎉你👨‍👩‍👧‍👦🇹🇼❤️"];
         assert_eq!(replay(&snaps), *snaps.last().unwrap());
     }
 
@@ -1766,7 +1807,10 @@ mod acp_handlers {
 
     #[test]
     fn initialize_returns_conformant_capabilities() {
-        let v = serde_json::to_value(handle_initialize(&init_req(Some(json!({"protocolVersion": 1}))))).unwrap();
+        let v = serde_json::to_value(handle_initialize(&init_req(Some(
+            json!({"protocolVersion": 1}),
+        ))))
+        .unwrap();
         assert_eq!(v["id"], json!(1));
         let result = &v["result"];
         assert_eq!(result["protocolVersion"], json!(1));
@@ -1778,10 +1822,16 @@ mod acp_handlers {
     #[test]
     fn initialize_negotiates_version_and_rejects_bad() {
         // a higher client version negotiates down to ours (1)
-        let v = serde_json::to_value(handle_initialize(&init_req(Some(json!({"protocolVersion": 5}))))).unwrap();
+        let v = serde_json::to_value(handle_initialize(&init_req(Some(
+            json!({"protocolVersion": 5}),
+        ))))
+        .unwrap();
         assert_eq!(v["result"]["protocolVersion"], json!(1));
         // version 0 is below our minimum → -32602
-        let v = serde_json::to_value(handle_initialize(&init_req(Some(json!({"protocolVersion": 0}))))).unwrap();
+        let v = serde_json::to_value(handle_initialize(&init_req(Some(
+            json!({"protocolVersion": 0}),
+        ))))
+        .unwrap();
         assert_eq!(v["error"]["code"], json!(-32602));
         // missing protocolVersion → -32602
         let v = serde_json::to_value(handle_initialize(&init_req(Some(json!({}))))).unwrap();
@@ -1800,8 +1850,14 @@ mod acp_handlers {
         )
         .unwrap();
         let sid = v["result"]["sessionId"].as_str().unwrap();
-        assert!(sid.starts_with("sess_"), "sessionId must be sess_<uuid>: {sid}");
-        assert!(sessions.lock().await.contains_key(sid), "session must be stored");
+        assert!(
+            sid.starts_with("sess_"),
+            "sessionId must be sess_<uuid>: {sid}"
+        );
+        assert!(
+            sessions.lock().await.contains_key(sid),
+            "session must be stored"
+        );
     }
 
     #[tokio::test]
@@ -1867,14 +1923,7 @@ mod acp_review_fixes {
             let sid = format!("sess_{}", Uuid::new_v4());
             let p = json!({ "sessionId": sid });
             let v = serde_json::to_value(
-                handle_session_resume(
-                    &sessions,
-                    &registry,
-                    owner_id,
-                    json!(1),
-                    Some(&p),
-                )
-                .await,
+                handle_session_resume(&sessions, &registry, owner_id, json!(1), Some(&p)).await,
             )
             .unwrap();
             assert_eq!(v["result"], json!({}), "resume under cap should succeed");
@@ -1884,31 +1933,25 @@ mod acp_review_fixes {
         // A new distinct session over the cap is refused with ACP_OVERLOADED.
         let over = json!({ "sessionId": format!("sess_{}", Uuid::new_v4()) });
         let v = serde_json::to_value(
-            handle_session_resume(
-                &sessions,
-                &registry,
-                owner_id,
-                json!(2),
-                Some(&over),
-            )
-            .await,
+            handle_session_resume(&sessions, &registry, owner_id, json!(2), Some(&over)).await,
         )
         .unwrap();
-        assert_eq!(v["error"]["code"], json!(ACP_OVERLOADED), "over-cap resume must be refused");
+        assert_eq!(
+            v["error"]["code"],
+            json!(ACP_OVERLOADED),
+            "over-cap resume must be refused"
+        );
         // Re-resuming an already-present session is exempt (idempotent).
         let existing = json!({ "sessionId": ids[0] });
         let v = serde_json::to_value(
-            handle_session_resume(
-                &sessions,
-                &registry,
-                owner_id,
-                json!(3),
-                Some(&existing),
-            )
-            .await,
+            handle_session_resume(&sessions, &registry, owner_id, json!(3), Some(&existing)).await,
         )
         .unwrap();
-        assert_eq!(v["result"], json!({}), "re-resume of existing session must bypass the cap");
+        assert_eq!(
+            v["result"],
+            json!({}),
+            "re-resume of existing session must bypass the cap"
+        );
     }
 
     fn reply(channel_id: &str, reply_to: &str, text: &str, command: Option<&str>) -> GatewayReply {
@@ -1916,7 +1959,10 @@ mod acp_review_fixes {
             schema: "openab.gateway.reply.v1".into(),
             reply_to: reply_to.into(),
             platform: "acp".into(),
-            channel: crate::schema::ReplyChannel { id: channel_id.into(), thread_id: None },
+            channel: crate::schema::ReplyChannel {
+                id: channel_id.into(),
+                thread_id: None,
+            },
             content: crate::schema::Content {
                 content_type: "text".into(),
                 text: text.into(),
@@ -1946,13 +1992,22 @@ mod acp_review_fixes {
         ));
 
         // Stale reply (previous turn's event id) → dropped.
-        handle_reply(&reply("acp_chan", "evt_stale", "leaked", Some("edit_message")), &registry)
-            .await;
-        assert!(rx.try_recv().is_err(), "stale reply must not reach the active turn");
+        handle_reply(
+            &reply("acp_chan", "evt_stale", "leaked", Some("edit_message")),
+            &registry,
+        )
+        .await;
+        assert!(
+            rx.try_recv().is_err(),
+            "stale reply must not reach the active turn"
+        );
 
         // Matching reply → delivered.
-        handle_reply(&reply("acp_chan", "evt_current", "hello", Some("edit_message")), &registry)
-            .await;
+        handle_reply(
+            &reply("acp_chan", "evt_current", "hello", Some("edit_message")),
+            &registry,
+        )
+        .await;
         match rx.try_recv() {
             Ok(ReplyChunk::Text(t)) => assert_eq!(t, "hello"),
             _ => panic!("expected the matching reply to be delivered"),
@@ -1971,27 +2026,13 @@ mod acp_review_fixes {
         let params = json!({ "sessionId": sid });
 
         let first = serde_json::to_value(
-            handle_session_resume(
-                &sessions_a,
-                &registry,
-                "conn_a",
-                json!(1),
-                Some(&params),
-            )
-            .await,
+            handle_session_resume(&sessions_a, &registry, "conn_a", json!(1), Some(&params)).await,
         )
         .unwrap();
         assert_eq!(first["result"], json!({}));
 
         let concurrent = serde_json::to_value(
-            handle_session_resume(
-                &sessions_b,
-                &registry,
-                "conn_b",
-                json!(2),
-                Some(&params),
-            )
-            .await,
+            handle_session_resume(&sessions_b, &registry, "conn_b", json!(2), Some(&params)).await,
         )
         .unwrap();
         assert_eq!(
@@ -2000,19 +2041,9 @@ mod acp_review_fixes {
             "a concurrent resume must not steal the active owner"
         );
 
-        release_connection_state(
-            &registry,
-            &[(channel_id.clone(), "conn_a".to_string())],
-        );
+        release_connection_state(&registry, &[(channel_id.clone(), "conn_a".to_string())]);
         let replacement = serde_json::to_value(
-            handle_session_resume(
-                &sessions_b,
-                &registry,
-                "conn_b",
-                json!(3),
-                Some(&params),
-            )
-            .await,
+            handle_session_resume(&sessions_b, &registry, "conn_b", json!(3), Some(&params)).await,
         )
         .unwrap();
         assert_eq!(replacement["result"], json!({}));
@@ -2030,16 +2061,8 @@ mod acp_review_fixes {
 
         // Delayed prompt completion and disconnect cleanup from conn_a must not
         // remove conn_b's ownership or its active reply sink.
-        remove_reply_sink_if_matches(
-            &registry,
-            &channel_id,
-            "conn_a",
-            "evt_old",
-        );
-        release_connection_state(
-            &registry,
-            &[(channel_id.clone(), "conn_a".to_string())],
-        );
+        remove_reply_sink_if_matches(&registry, &channel_id, "conn_a", "evt_old");
+        release_connection_state(&registry, &[(channel_id.clone(), "conn_a".to_string())]);
         assert!(session_owner_matches(&registry, &channel_id, "conn_b"));
         assert!(
             registry
@@ -2047,9 +2070,7 @@ mod acp_review_fixes {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(&channel_id)
-                .is_some_and(|sink| {
-                    sink.owner_id == "conn_b" && sink.turn_id == "evt_new"
-                }),
+                .is_some_and(|sink| { sink.owner_id == "conn_b" && sink.turn_id == "evt_new" }),
             "stale cleanup must not remove the replacement owner's sink"
         );
     }
@@ -2107,12 +2128,7 @@ mod acp_review_fixes {
         );
 
         handle_reply(
-            &reply(
-                "acp_slow",
-                "evt_slow",
-                "final answer",
-                Some("send_message"),
-            ),
+            &reply("acp_slow", "evt_slow", "final answer", Some("send_message")),
             &registry,
         )
         .await;
@@ -2134,7 +2150,10 @@ mod acp_review_fixes {
                 _ => {}
             }
         }
-        assert!(saw_final && saw_done, "terminal Text + Done must survive saturation");
+        assert!(
+            saw_final && saw_done,
+            "terminal Text + Done must survive saturation"
+        );
     }
 
     // R17-F1 — keyless-mode browser `Origin` gating. A WS handshake bypasses the browser
@@ -2144,10 +2163,19 @@ mod acp_review_fixes {
     // the `else` of the bearer branch), so a keyed bind is unaffected by the allowlist.
     #[test]
     fn acp_origin_ok_keyless_gating() {
-        let allow = vec!["https://app.example".to_string(), "http://localhost:5173".to_string()];
+        let allow = vec![
+            "https://app.example".to_string(),
+            "http://localhost:5173".to_string(),
+        ];
         // Absent Origin (non-browser client) → accept, regardless of allowlist.
-        assert!(acp_origin_ok(None, &allow), "no Origin (non-browser) must be admitted");
-        assert!(acp_origin_ok(None, &[]), "no Origin must be admitted even with empty allowlist");
+        assert!(
+            acp_origin_ok(None, &allow),
+            "no Origin (non-browser) must be admitted"
+        );
+        assert!(
+            acp_origin_ok(None, &[]),
+            "no Origin must be admitted even with empty allowlist"
+        );
         // Allowlisted browser Origin → accept (exact match, both entries).
         assert!(acp_origin_ok(Some("https://app.example"), &allow));
         assert!(acp_origin_ok(Some("http://localhost:5173"), &allow));
@@ -2177,7 +2205,10 @@ mod acp_review_fixes {
         assert_eq!(ws_bearer_token(&h), Some("sekret"));
         // The subprotocol path still carries the key.
         let mut h = HeaderMap::new();
-        h.insert("sec-websocket-protocol", "openab.bearer.sekret, acp.v1".parse().unwrap());
+        h.insert(
+            "sec-websocket-protocol",
+            "openab.bearer.sekret, acp.v1".parse().unwrap(),
+        );
         assert_eq!(ws_bearer_token(&h), Some("sekret"));
     }
 
@@ -2186,10 +2217,18 @@ mod acp_review_fixes {
     #[test]
     fn ws_subprotocol_token_charset() {
         for &b in b"AZaz09._~+-!#$%&'*^`|" {
-            assert!(is_ws_subprotocol_token_char(b), "{} should be token-safe", b as char);
+            assert!(
+                is_ws_subprotocol_token_char(b),
+                "{} should be token-safe",
+                b as char
+            );
         }
         for &b in b"=/,; @\"" {
-            assert!(!is_ws_subprotocol_token_char(b), "{} should be rejected", b as char);
+            assert!(
+                !is_ws_subprotocol_token_char(b),
+                "{} should be rejected",
+                b as char
+            );
         }
     }
 
@@ -2232,8 +2271,7 @@ mod acp_review_fixes {
         let sid2 = sid.clone();
         let cancel2 = cancel.clone();
         let handle = tokio::spawn(async move {
-            let params =
-                json!({"sessionId": sid2, "prompt": [{"type": "text", "text": "hi"}]});
+            let params = json!({"sessionId": sid2, "prompt": [{"type": "text", "text": "hi"}]});
             handle_session_prompt(
                 AcpPromptTask {
                     state: &st2,
@@ -2267,27 +2305,20 @@ mod acp_review_fixes {
         let turn_id = turn_id.expect("handler must register a reply sink");
 
         cancel.notify_one();
-        let cancelled = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            async {
-                loop {
-                    let frame = out_rx.recv().await.expect("client response channel closed");
-                    let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
-                    if value.get("id") == Some(&json!(7)) {
-                        break value;
-                    }
+        let cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let frame = out_rx.recv().await.expect("client response channel closed");
+                let value: serde_json::Value = serde_json::from_str(&frame).unwrap();
+                if value.get("id") == Some(&json!(7)) {
+                    break value;
                 }
-            },
-        )
+            }
+        })
         .await
         .expect("cancelled response must be immediate");
         assert_eq!(cancelled["result"]["stopReason"], json!("cancelled"));
         assert!(
-            registry
-                .backend_slots
-                .clone()
-                .try_acquire_owned()
-                .is_err(),
+            registry.backend_slots.clone().try_acquire_owned().is_err(),
             "cancel must not recycle the backend slot before terminal completion"
         );
         assert!(
@@ -2351,23 +2382,23 @@ mod acp_review_fixes {
 
         let params = json!({"sessionId": sid, "cwd": "/w", "mcpServers": []});
         let v = serde_json::to_value(
-            handle_session_resume(
-                &sessions,
-                &registry,
-                owner_id,
-                json!(9),
-                Some(&params),
-            )
-            .await,
+            handle_session_resume(&sessions, &registry, owner_id, json!(9), Some(&params)).await,
         )
         .unwrap();
-        assert_eq!(v["error"]["code"], json!(-32001), "resume while busy must be rejected");
+        assert_eq!(
+            v["error"]["code"],
+            json!(-32001),
+            "resume while busy must be rejected"
+        );
 
         // The in-flight turn's state survives untouched.
         let g = sessions.lock().await;
         let s = g.get(&sid).unwrap();
         assert!(s.busy, "busy must remain set after a rejected resume");
-        assert!(s.cancel.is_some(), "the active prompt's cancel handle must survive resume");
+        assert!(
+            s.cancel.is_some(),
+            "the active prompt's cancel handle must survive resume"
+        );
     }
 
     // R16-F3(A) — Phase-1 send-once: the ACP path streams the whole reply as a SINGLE terminal
@@ -2441,7 +2472,11 @@ mod acp_review_fixes {
             tokio::task::yield_now().await;
         }
         let turn_id = turn_id.expect("handler must register a reply sink");
-        handle_reply(&reply(&channel_id, &turn_id, "hello world", Some("send_message")), &registry).await;
+        handle_reply(
+            &reply(&channel_id, &turn_id, "hello world", Some("send_message")),
+            &registry,
+        )
+        .await;
         handle.await.unwrap();
 
         let mut chunks = Vec::new();
@@ -2451,15 +2486,28 @@ mod acp_review_fixes {
             if v["method"] == json!("session/update")
                 && v["params"]["update"]["sessionUpdate"] == json!("agent_message_chunk")
             {
-                chunks.push(v["params"]["update"]["content"]["text"].as_str().unwrap_or("").to_string());
+                chunks.push(
+                    v["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string(),
+                );
             }
             if v.get("id") == Some(&json!(11)) {
                 final_stop = v["result"]["stopReason"].as_str().map(str::to_string);
             }
         }
-        assert_eq!(chunks.len(), 1, "Phase-1 must stream exactly one terminal chunk, got {chunks:?}");
+        assert_eq!(
+            chunks.len(),
+            1,
+            "Phase-1 must stream exactly one terminal chunk, got {chunks:?}"
+        );
         assert_eq!(chunks[0], "hello world");
-        assert_eq!(final_stop.as_deref(), Some("end_turn"), "a completed turn ends end_turn");
+        assert_eq!(
+            final_stop.as_deref(),
+            Some("end_turn"),
+            "a completed turn ends end_turn"
+        );
     }
 
     // R17-F3c — a request-shaped `session/cancel` (id present) must NOT be acknowledged with
@@ -2473,7 +2521,11 @@ mod acp_review_fixes {
             .await
             .expect("a request-shaped cancel must produce a response, not silence");
         let v = serde_json::to_value(&resp).unwrap();
-        assert_eq!(v["error"]["code"], json!(-32600), "request-shaped cancel must be -32600");
+        assert_eq!(
+            v["error"]["code"],
+            json!(-32600),
+            "request-shaped cancel must be -32600"
+        );
         assert_eq!(v["id"], json!(42));
         assert!(
             v.get("result").is_none(),
@@ -2499,7 +2551,10 @@ mod acp_review_fixes {
         );
         let params = json!({"sessionId": sid});
         let resp = handle_session_cancel(&sessions, Value::Null, Some(&params), true).await;
-        assert!(resp.is_none(), "a notification cancel must produce no response frame");
+        assert!(
+            resp.is_none(),
+            "a notification cancel must produce no response frame"
+        );
         // notify_one stored a permit, so notified() resolves immediately — the signal fired.
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(200), cancel.notified())

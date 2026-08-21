@@ -71,7 +71,12 @@ fn unsupported_thinking(request: &ApplyRequest) -> Option<String> {
 
 fn owned_keys(request: &ApplyRequest) -> Result<BTreeMap<String, toml::Value>> {
     let mut owned = BTreeMap::new();
-    if let Some(model) = request.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         owned.insert("model".into(), toml::Value::String(model.to_string()));
     }
     if let Some(level) = request
@@ -99,6 +104,12 @@ fn owned_keys(request: &ApplyRequest) -> Result<BTreeMap<String, toml::Value>> {
         );
     }
     // API keys stay in process env (request.api_key_env); never write secret values.
-    let _ = (&request.api_key_env, FieldChange { from: None, to: None });
+    let _ = (
+        &request.api_key_env,
+        FieldChange {
+            from: None,
+            to: None,
+        },
+    );
     Ok(owned)
 }

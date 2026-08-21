@@ -9,10 +9,7 @@ use openab_core::provider_store::ProviderStore;
 use serde_json::json;
 use std::sync::Arc;
 
-pub fn router<S>(
-    providers: Arc<ProviderStore>,
-    profiles: Arc<AgentProfileService>,
-) -> Router<S>
+pub fn router<S>(providers: Arc<ProviderStore>, profiles: Arc<AgentProfileService>) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -26,9 +23,8 @@ where
     Router::new()
         .route(
             "/api/v1/providers",
-            get(move |headers| list(headers, list_providers.clone())).post(move |headers, body| {
-                create(headers, body, create_providers.clone())
-            }),
+            get(move |headers| list(headers, list_providers.clone()))
+                .post(move |headers, body| create(headers, body, create_providers.clone())),
         )
         .route(
             "/api/v1/providers/{provider_id}",

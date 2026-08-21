@@ -1,6 +1,6 @@
 use crate::markdown::TableMode;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -188,6 +188,10 @@ pub struct Config {
     pub stt: SttConfig,
     #[serde(default)]
     pub markdown: MarkdownConfig,
+    /// Per-channel presentation overrides: `[presentation.<platform>]`.
+    /// Absent or empty means every channel keeps the global display behaviour.
+    #[serde(default)]
+    pub presentation: crate::presentation::PresentationConfig,
     #[serde(default)]
     pub cron: CronConfig,
     #[serde(default)]
@@ -1605,12 +1609,23 @@ fn default_disable_on_success_timeout_secs() -> u64 {
 /// - `full`: show complete tool title including arguments (default, original behavior)
 /// - `compact`: show only a count summary, e.g. `✅ 3 · 🔧 1 tool(s)`
 /// - `none`: hide tool lines entirely, only show final response
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ToolDisplay {
     #[default]
     Full,
     Compact,
     None,
+}
+
+impl std::fmt::Display for ToolDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => write!(f, "full"),
+            Self::Compact => write!(f, "compact"),
+            Self::None => write!(f, "none"),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for ToolDisplay {

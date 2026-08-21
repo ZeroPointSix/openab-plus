@@ -1,7 +1,9 @@
 use super::connection::{runtime_metadata_from_options, AcpConnection};
 use super::pool;
 use super::protocol::ConfigOption;
-use crate::agent_profile::{AgentProfileService, ProfileSessionOverrides, RecoveryStrategy, overrides_for_persistence};
+use crate::agent_profile::{
+    overrides_for_persistence, AgentProfileService, ProfileSessionOverrides, RecoveryStrategy,
+};
 use crate::cli_config::atomic_write_private_sync;
 use crate::config::AgentConfig;
 use crate::provider::{api_key_env_name, base_url_env_name, resolve_env_secret_ref};
@@ -379,13 +381,9 @@ impl SessionPool {
                     }
                     self.record_session_created(snapshot).await;
                 } else if applied_provider.is_some() {
-                    self.update_snapshot(
-                        thread_id,
-                        SessionEventKind::ConfigChanged,
-                        |snapshot| {
-                            snapshot.set_applied_provider(applied_provider.clone());
-                        },
-                    )
+                    self.update_snapshot(thread_id, SessionEventKind::ConfigChanged, |snapshot| {
+                        snapshot.set_applied_provider(applied_provider.clone());
+                    })
                     .await;
                 }
                 self.sync_pool_snapshot_statuses(&pool_key, &pool).await;
@@ -735,9 +733,7 @@ impl SessionPool {
             return (stored_profile_id, stored_overrides);
         }
 
-        let effective_profile_id = profile_id
-            .map(str::to_string)
-            .or(stored_profile_id);
+        let effective_profile_id = profile_id.map(str::to_string).or(stored_profile_id);
 
         let effective_overrides = match (overrides, stored_overrides) {
             (Some(request), Some(stored)) => Some(merge_profile_overrides(&stored, request)),
@@ -1357,8 +1353,9 @@ mod tests {
                 .await;
         }
 
-        let persisted = std::fs::read_to_string(dir.path().join(".openab/thread_profile_context.json"))
-            .expect("persisted context");
+        let persisted =
+            std::fs::read_to_string(dir.path().join(".openab/thread_profile_context.json"))
+                .expect("persisted context");
         assert!(!persisted.contains("plain-text"));
         assert!(!persisted.contains("SECRET"));
         #[cfg(unix)]
@@ -1383,7 +1380,12 @@ mod tests {
         assert_eq!(overrides.reasoning_effort.as_deref(), Some("high"));
         assert!(overrides.env.is_empty());
         assert_eq!(
-            reloaded.thread_pools.read().await.get("slack:thread").map(String::as_str),
+            reloaded
+                .thread_pools
+                .read()
+                .await
+                .get("slack:thread")
+                .map(String::as_str),
             Some("profile:deep")
         );
     }

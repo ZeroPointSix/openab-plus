@@ -27,17 +27,6 @@ pub struct OutputDirectives {
     pub reply_to: Option<String>,
 }
 
-/// Chunk limit for delivering a reply on `platform`. ACP is a WebSocket transport with
-/// no small per-message limit, and its reply route closes after the first delivered
-/// message. Deliver ACP replies whole so long responses are not truncated.
-fn reply_message_limit(platform: &str, adapter_limit: usize) -> usize {
-    if platform == "acp" {
-        usize::MAX
-    } else {
-        adapter_limit
-    }
-}
-
 /// Keep the visible user text in the transcript while deliberately excluding
 /// OpenAB's internal `<sender_context>` envelope from the read-only UI.
 fn record_prompt_transcript(pool: &SessionPool, session_id: &str, blocks: &[ContentBlock]) {
@@ -606,6 +595,24 @@ pub trait ChatAdapter: Send + Sync + 'static {
     fn show_streaming_placeholder(&self) -> bool {
         true
     }
+
+    /// Delivery semantics reported by the concrete adapter. Shared policy and
+    /// routing code consume this value without naming a platform.
+    fn delivery_mode(&self, _platform: &str) -> crate::presentation::DeliveryMode {
+        crate::presentation::DeliveryMode::Chat
+    }
+
+    /// Physical presentation capabilities for this adapter and routed platform.
+    ///
+    /// Shared adapters can override this once for platform-specific transport
+    /// constraints. Policy code must not branch on platform names.
+    fn presentation_capabilities(
+        &self,
+        platform: &str,
+        other_bot_present: bool,
+    ) -> crate::presentation::ChannelCapabilities {
+        crate::presentation::ChannelCapabilities::from_adapter(self, platform, other_bot_present)
+    }
 }
 
 // --- AdapterRouter ---
@@ -616,6 +623,10 @@ pub struct AdapterRouter {
     pool: Arc<SessionPool>,
     reactions_config: ReactionsConfig,
     table_mode: TableMode,
+    /// Per-channel presentation overrides from `[presentation.<platform>]`.
+    /// Empty default = every channel inherits the global display settings.
+    presentation: crate::presentation::PresentationConfig,
+    channel_profiles: Arc<crate::channel_profile::ChannelProfileService>,
     prompt_hard_timeout: std::time::Duration,
     /// Polling cadence for the recv-loop liveness check (#732).
     liveness_check_interval: std::time::Duration,
@@ -652,6 +663,8 @@ impl AdapterRouter {
             pool,
             reactions_config,
             table_mode,
+            presentation: crate::presentation::PresentationConfig::new(),
+            channel_profiles: Arc::new(crate::channel_profile::ChannelProfileService::from_env()),
             prompt_hard_timeout: std::time::Duration::from_secs(prompt_hard_timeout_secs),
             liveness_check_interval: std::time::Duration::from_secs(liveness_check_secs),
             workspace_aliases,
@@ -690,6 +703,93 @@ impl AdapterRouter {
     /// Access the reactions config (used by dispatch.rs).
     pub fn reactions_config(&self) -> &ReactionsConfig {
         &self.reactions_config
+    }
+
+    /// Attach per-channel presentation overrides from `[presentation.<platform>]`.
+    /// Channels without an entry inherit the global display configuration.
+    #[must_use]
+    pub fn with_presentation(
+        mut self,
+        presentation: crate::presentation::PresentationConfig,
+    ) -> Self {
+        self.presentation = presentation;
+        self
+    }
+
+    #[must_use]
+    pub fn with_channel_profiles(
+        mut self,
+        service: Arc<crate::channel_profile::ChannelProfileService>,
+    ) -> Self {
+        self.channel_profiles = service;
+        self
+    }
+
+    /// Resolve the complete policy for one concrete channel context.
+    pub async fn presentation_resolution_for_channel(
+        &self,
+        adapter: &dyn ChatAdapter,
+        channel: &ChannelRef,
+        workspace_id: Option<&str>,
+        other_bot_present: bool,
+    ) -> Result<crate::presentation::PresentationResolution> {
+        let base = self
+            .presentation
+            .get(channel.platform.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let profile = self
+            .channel_profiles
+            .resolve(
+                &channel.platform,
+                workspace_id,
+                Some(&channel.channel_id),
+                &base,
+            )
+            .await?;
+        let mut resolution = crate::presentation::PresentationPolicy::resolve_with_report(
+            adapter.presentation_capabilities(&channel.platform, other_bot_present),
+            &self.reactions_config,
+            self.table_mode,
+            &profile.presentation,
+        );
+        resolution.applied_layers = profile.applied_layers;
+        Ok(resolution)
+    }
+
+    /// Resolved presentation policy for a platform, as the router would use it.
+    /// Exposed for admin surfaces and tests.
+    pub fn presentation_policy(
+        &self,
+        adapter: &dyn ChatAdapter,
+        platform: &str,
+        other_bot_present: bool,
+    ) -> crate::presentation::PresentationPolicy {
+        crate::presentation::PresentationPolicy::resolve(
+            adapter.presentation_capabilities(platform, other_bot_present),
+            &self.reactions_config,
+            self.table_mode,
+            self.presentation
+                .get(platform)
+                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+        )
+    }
+
+    /// Explainable policy result for management surfaces and diagnostics.
+    pub fn presentation_resolution(
+        &self,
+        adapter: &dyn ChatAdapter,
+        platform: &str,
+        other_bot_present: bool,
+    ) -> crate::presentation::PresentationResolution {
+        crate::presentation::PresentationPolicy::resolve_with_report(
+            adapter.presentation_capabilities(platform, other_bot_present),
+            &self.reactions_config,
+            self.table_mode,
+            self.presentation
+                .get(platform)
+                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+        )
     }
 
     /// Workspace aliases for control directive resolution.
@@ -782,14 +882,36 @@ impl AdapterRouter {
         {
             Ok(created) => created,
             Err(e) => {
-                let content = if adapter.exposes_intermediate_text() {
+                let policy = self
+                    .presentation_resolution_for_channel(
+                        adapter.as_ref(),
+                        &thread_channel,
+                        None,
+                        other_bot_present,
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::presentation::PresentationPolicy::resolve_with_report(
+                            adapter.presentation_capabilities(
+                                &thread_channel.platform,
+                                other_bot_present,
+                            ),
+                            &self.reactions_config,
+                            self.table_mode,
+                            self.presentation
+                                .get(thread_channel.platform.as_str())
+                                .unwrap_or(&crate::presentation::PresentationOverrides::INHERIT),
+                        )
+                    })
+                    .effective;
+                let content = if policy.intermediate_text {
                     let msg = format_user_error(&e.to_string());
                     format!("⚠️ {msg}")
                 } else {
                     append_observability_footer(
                         &format_public_error(&e.to_string()),
                         None,
-                        adapter.session_link_label(),
+                        policy.session_link_label.as_deref(),
                     )
                 };
                 let _ = adapter.send_message(&thread_channel, &content).await;
@@ -805,10 +927,18 @@ impl AdapterRouter {
         };
         let content_blocks = Self::pack_arrival_event(&sender_json, &prompt, extra_blocks);
 
-        // In assistant-status mode (e.g. Slack assistant_mode), status is conveyed
-        // via assistant.threads.setStatus, so the emoji-reaction lifecycle is skipped
-        // entirely — mirrors dispatch_batch so per-message and batched modes agree.
-        let assistant_status = adapter.uses_assistant_status();
+        // Resolve presentation once for this turn so emoji/status decisions and
+        // error rendering stay on the policy path, not adapter presentation probes.
+        let turn_policy = self
+            .presentation_resolution_for_channel(
+                adapter.as_ref(),
+                &thread_channel,
+                None,
+                other_bot_present,
+            )
+            .await?
+            .effective;
+        let assistant_status = turn_policy.assistant_status;
 
         let reactions = Arc::new(StatusReactionController::new(
             self.reactions_config.enabled,
@@ -853,14 +983,14 @@ impl AdapterRouter {
         }
 
         if let Err(ref e) = result {
-            let content = if adapter.exposes_intermediate_text() {
+            let content = if turn_policy.intermediate_text {
                 format!("⚠️ {e}")
             } else {
                 let snapshot = self.pool.session_snapshot(&thread_key).await;
                 append_observability_footer(
                     &format_public_error(&e.to_string()),
                     snapshot.as_ref(),
-                    adapter.session_link_label(),
+                    turn_policy.session_link_label.as_deref(),
                 )
             };
             let _ = adapter.send_message(&thread_channel, &content).await;
@@ -908,46 +1038,40 @@ impl AdapterRouter {
     ) -> Result<()> {
         let adapter = adapter.clone();
         let thread_channel = thread_channel.clone();
-        let message_limit = reply_message_limit(&thread_channel.platform, adapter.message_limit());
-        let exposes_intermediate_text = adapter.exposes_intermediate_text();
-        // A strict privacy-boundary adapter (Slack) never publishes raw agent
-        // chunks while a turn is running. ACP uses snapshot edits to produce
-        // append-only agent_message_chunk updates, independent of Telegram streaming.
-        let streaming = if thread_channel.platform == "acp" {
-            false
-        } else {
-            adapter.use_streaming(other_bot_present) && exposes_intermediate_text
-        };
-        // Intermediate narration is never retained across a strict privacy
-        // boundary, even if the shared narration_display setting is enabled.
-        let keep_full_text =
-            exposes_intermediate_text && (streaming || self.reactions_config.narration_display);
-        let native = streaming && adapter.uses_native_streaming(other_bot_present);
-        let assistant_status = adapter.uses_assistant_status();
-        // Platforms that render Markdown tables natively (e.g. Slack Block Kit
-        // `markdown` blocks / `markdown_text` stream chunks) skip the
-        // table→code/bullets pre-pass so the raw table renders natively.
-        let table_mode = if adapter.renders_native_tables(&thread_channel.platform) {
-            TableMode::Off
-        } else {
-            self.table_mode
-        };
-        // Tool titles can contain command arguments or other execution detail.
-        // Strict privacy-boundary adapters expose only generic counts/states.
-        let tool_display = if exposes_intermediate_text {
-            self.reactions_config.tool_display
-        } else {
-            ToolDisplay::None
-        };
-        let tool_progress_enabled = adapter.uses_tool_progress_message();
-        let reply_tool_display = if tool_progress_enabled {
-            ToolDisplay::None
-        } else {
-            tool_display
-        };
-        // ACP chunks are append-only; do not re-render tool prefixes into text deltas.
-        let platform_is_acp = thread_channel.platform == "acp";
-        let session_link_label = adapter.session_link_label();
+        // Presentation policy for this turn: adapter capabilities are the
+        // ceiling, then the platform-agnostic display config, then the
+        // per-channel `[presentation.<platform>]` overrides. See
+        // `crate::presentation` and docs/adr/channel-presentation-layering.md.
+        let workspace_id = recipient.as_ref().map(|(_, workspace)| workspace.as_str());
+        let resolution = self
+            .presentation_resolution_for_channel(
+                adapter.as_ref(),
+                &thread_channel,
+                workspace_id,
+                other_bot_present,
+            )
+            .await?;
+        if !resolution.clamped_by.is_empty() {
+            tracing::debug!(
+                platform = %thread_channel.platform,
+                applied_layers = ?resolution.applied_layers,
+                clamped_by = ?resolution.clamped_by,
+                "presentation policy clamped by channel capabilities"
+            );
+        }
+        let policy = resolution.effective;
+        let delivery_mode = policy.delivery_mode;
+        let message_limit = delivery_mode.message_limit(adapter.message_limit());
+        let exposes_intermediate_text = policy.intermediate_text;
+        let streaming = policy.streaming;
+        let keep_full_text = policy.keep_full_text;
+        let native = policy.native_streaming;
+        let assistant_status = policy.assistant_status;
+        let table_mode = policy.table_mode;
+        let tool_display = policy.tool_display;
+        let tool_progress_enabled = policy.tool_progress_message;
+        let reply_tool_display = policy.reply_tool_display;
+        let session_link_label = policy.session_link_label;
         let external_url = self
             .pool
             .session_snapshot(thread_key)
@@ -995,7 +1119,7 @@ impl AdapterRouter {
                         adapter.clone(),
                         thread_channel.clone(),
                         external_url.clone(),
-                        session_link_label,
+                        session_link_label.clone(),
                         tool_display,
                     );
                     // Acknowledge the request immediately. The first tool event
@@ -1031,7 +1155,7 @@ impl AdapterRouter {
                         } else {
                             "…".to_string()
                         };
-                        let msg = if adapter.show_streaming_placeholder() {
+                        let msg = if policy.streaming_placeholder {
                             adapter.send_message(&thread_channel, &initial).await?
                         } else {
                             // Dummy ref for edit loop — gateway uses drafts, doesn't need real msg_id
@@ -1249,7 +1373,7 @@ impl AdapterRouter {
                                         }
                                     } else if let Some(tx) = &buf_tx {
                                         let _ = tx.send(display_for(
-                                            platform_is_acp,
+                                            delivery_mode,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1313,7 +1437,7 @@ impl AdapterRouter {
                                     // Post+edit live update (no-op under native streaming: buf_tx is None).
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(display_for(
-                                            platform_is_acp,
+                                            delivery_mode,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1362,7 +1486,7 @@ impl AdapterRouter {
                                     tool_progress.update(&tool_lines).await;
                                     if let Some(tx) = &buf_tx {
                                         let _ = tx.send(display_for(
-                                            platform_is_acp,
+                                            delivery_mode,
                                             &tool_lines,
                                             &text_buf,
                                             true,
@@ -1585,7 +1709,7 @@ impl AdapterRouter {
                     // Build final content
                     let final_content =
                         display_for(
-                            platform_is_acp,
+                            delivery_mode,
                             &tool_lines,
                             &text_buf,
                             false,
@@ -1653,13 +1777,13 @@ impl AdapterRouter {
                         append_session_link(
                             &final_content,
                             external_url.as_deref(),
-                            session_link_label,
+                            session_link_label.as_deref(),
                         )
                     } else {
                         append_observability_footer(
                             &final_content,
                             final_snapshot.as_ref(),
-                            session_link_label,
+                            session_link_label.as_deref(),
                         )
                     };
 
@@ -1957,7 +2081,7 @@ struct ToolProgressMessage {
     channel: ChannelRef,
     message: Option<MessageRef>,
     external_url: Option<String>,
-    link_label: Option<&'static str>,
+    link_label: Option<String>,
     display: ToolDisplay,
 }
 
@@ -1967,7 +2091,7 @@ impl ToolProgressMessage {
         adapter: Arc<dyn ChatAdapter>,
         channel: ChannelRef,
         external_url: Option<String>,
-        link_label: Option<&'static str>,
+        link_label: Option<String>,
         display: ToolDisplay,
     ) -> Self {
         Self {
@@ -2021,7 +2145,7 @@ impl ToolProgressMessage {
         self.write(append_session_link(
             "OpenAB · 正在处理…",
             self.external_url.as_deref(),
-            self.link_label,
+            self.link_label.as_deref(),
         ))
         .await;
     }
@@ -2034,7 +2158,7 @@ impl ToolProgressMessage {
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
-            self.link_label,
+            self.link_label.as_deref(),
         ))
         .await;
     }
@@ -2056,7 +2180,7 @@ impl ToolProgressMessage {
                 self.write(append_session_link(
                     state,
                     self.external_url.as_deref(),
-                    self.link_label,
+                    self.link_label.as_deref(),
                 ))
                 .await;
             }
@@ -2066,7 +2190,7 @@ impl ToolProgressMessage {
         self.write(append_session_link(
             &content,
             self.external_url.as_deref(),
-            self.link_label,
+            self.link_label.as_deref(),
         ))
         .await;
     }
@@ -2647,19 +2771,20 @@ pub(crate) fn classify_empty_turn(
     }
 }
 
-/// Select content for a reply. ACP receives raw append-only answer text; other
-/// platforms retain their existing tool-merged display.
+/// Select content from adapter-reported delivery semantics. Structured
+/// append-only transports receive raw answer text because tool progress is
+/// delivered separately; chat transports retain the tool-merged display.
 fn display_for(
-    platform_is_acp: bool,
+    delivery_mode: crate::presentation::DeliveryMode,
     tool_lines: &[ToolEntry],
     text: &str,
     streaming: bool,
     tool_display: ToolDisplay,
 ) -> String {
-    if platform_is_acp {
-        text.to_string()
-    } else {
+    if delivery_mode.combines_tool_progress() {
         compose_display(tool_lines, text, streaming, tool_display)
+    } else {
+        text.to_string()
     }
 }
 
@@ -2953,13 +3078,15 @@ mod tests {
     }
 
     #[test]
-    fn acp_reply_limit_is_unbounded_others_use_adapter_limit() {
-        assert_eq!(reply_message_limit("acp", 4096), usize::MAX);
-        assert_eq!(reply_message_limit("discord", 2000), 2000);
-        assert_eq!(reply_message_limit("slack", 4096), 4096);
+    fn append_only_reply_is_unbounded_chat_uses_adapter_limit() {
+        use crate::presentation::DeliveryMode;
+
+        assert_eq!(DeliveryMode::AppendOnly.message_limit(4096), usize::MAX);
+        assert_eq!(DeliveryMode::Chat.message_limit(2000), 2000);
+        assert_eq!(DeliveryMode::Chat.message_limit(4096), 4096);
         let long = "x".repeat(50_000);
         assert_eq!(
-            crate::format::split_message(&long, reply_message_limit("acp", 4096)).len(),
+            crate::format::split_message(&long, DeliveryMode::AppendOnly.message_limit(4096)).len(),
             1
         );
     }
@@ -3333,7 +3460,7 @@ mod tests {
             adapter.clone(),
             channel,
             Some("https://openab.example/sessions/slack%3A1700.1".into()),
-            Some("Open in OpenAB Plus"),
+            Some("Open in OpenAB Plus".into()),
             ToolDisplay::Full,
         );
         let mut tools = vec![tool("1", "web_search", ToolState::Running)];
@@ -3413,7 +3540,7 @@ mod tests {
             adapter.clone(),
             channel,
             Some("https://openab.example/sessions/slack%3A1700.1".into()),
-            Some("Open in OpenAB Plus"),
+            Some("Open in OpenAB Plus".into()),
             ToolDisplay::Full,
         );
 
@@ -3550,7 +3677,7 @@ mod tests {
         let output = append_session_link(
             "完成",
             Some("https://openab.example/sessions/slack%3A1700.1"),
-            Some("Open in OpenAB Plus"),
+            Some("Open in OpenAB Plus".into()),
         );
         assert_eq!(
             output,

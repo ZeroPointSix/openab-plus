@@ -1,6 +1,4 @@
-pub const THINKING_LEVELS: &[&str] = &[
-    "off", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+pub const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 const CLAUDE_SUPPORTED: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 const CODEX_SUPPORTED: &[&str] = THINKING_LEVELS;
@@ -41,7 +39,10 @@ pub fn codex_effort_value(level: &str) -> Option<&'static str> {
 
 /// Map unified level to Claude `effortLevel` / CLAUDE_CODE_EFFORT_LEVEL.
 pub fn claude_effort_value(level: &str) -> Option<&'static str> {
-    CLAUDE_SUPPORTED.iter().find(|value| **value == level).copied()
+    CLAUDE_SUPPORTED
+        .iter()
+        .find(|value| **value == level)
+        .copied()
 }
 
 #[cfg(test)]

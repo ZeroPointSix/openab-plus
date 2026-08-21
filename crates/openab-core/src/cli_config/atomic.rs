@@ -63,8 +63,7 @@ pub fn atomic_write_private_sync(path: &Path, contents: &[u8]) -> Result<()> {
 pub async fn atomic_write_private(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
     let contents = contents.as_ref().to_vec();
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || atomic_write_private_sync(&path, &contents))
-        .await?
+    tokio::task::spawn_blocking(move || atomic_write_private_sync(&path, &contents)).await?
 }
 
 pub async fn restore_from_openab_bak(path: &Path) -> Result<bool> {
@@ -132,7 +131,9 @@ mod tests {
     async fn atomic_write_private_sets_mode_600() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        atomic_write_private(&path, "secret = true\n").await.unwrap();
+        atomic_write_private(&path, "secret = true\n")
+            .await
+            .unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

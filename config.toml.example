@@ -278,6 +278,17 @@ tables = "code"  # "code" (default) | "bullets" | "off"
                  # natively. This setting applies to platforms that cannot render
                  # tables (Discord and gateway integrations).
 
+# --- Channel presentation overrides (ZER-569) ---
+# Optional. Capability is a ceiling: privacy/transport flags can only tighten.
+# Prefer config/channel-profiles.toml for workspace/channel overlays.
+# [presentation.slack]
+# intermediate_text = false
+# tool_display = "none"
+# session_link_label = "Open in OpenAB"
+#
+# [presentation.discord]
+# streaming_placeholder = true
+
 [reactions]
 enabled = true
 remove_after_reply = false

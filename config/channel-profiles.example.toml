@@ -1,0 +1,27 @@
+# Hierarchical channel presentation profiles (ZER-569).
+# Path override: OPENAB_CHANNEL_PROFILES_PATH (default config/channel-profiles.toml)
+#
+# Merge order (later wins):
+#   platform → workspace → channel → workspace/channel
+#
+# Presentation fields are flattened onto each [[profiles]] entry (same keys as
+# [presentation.<platform>] in the main config). Do NOT nest them under
+# [profiles.presentation] — ChannelProfile uses #[serde(flatten)].
+
+[[profiles]]
+platform = "slack"
+intermediate_text = false
+tool_display = "none"
+session_link_label = "Open in OpenAB"
+
+# Example: one Slack channel wants compact tool lines instead of none.
+# [[profiles]]
+# platform = "slack"
+# channel_id = "C0123456789"
+# tool_display = "compact"
+
+# Example: one workspace turns assistant status off.
+# [[profiles]]
+# platform = "slack"
+# workspace_id = "T0123456789"
+# assistant_status = false

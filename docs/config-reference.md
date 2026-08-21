@@ -528,6 +528,49 @@ bot_token = "${secrets.discord_token}"
 
 ---
 
+## `[presentation.<platform>]`
+
+Per-channel presentation overrides (ZER-569). Capability probes from the adapter are the ceiling; these overrides may only tighten privacy/transport limits (except `native_tables`, which is a two-way rendering preference). Absent section = inherit today's behaviour.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `intermediate_text` | bool | inherit | Publish raw intermediate agent text. Cannot open a privacy-boundary channel such as Slack. |
+| `narration` | bool | inherit `[reactions].narration_display` | Keep inter-tool narration in send-once replies. |
+| `assistant_status` | bool | inherit | Use the platform native assistant status line. |
+| `tool_progress_message` | bool | inherit | Keep tool activity in one editable progress message. |
+| `tool_display` | string | inherit `[reactions].tool_display` | `full` / `compact` / `none`. |
+| `native_tables` | bool | inherit adapter default | Skip table→code/bullets pre-pass when the platform can render Markdown tables. |
+| `streaming` | bool | inherit | Stream by editing a message. |
+| `streaming_placeholder` | bool | inherit | Post a placeholder when streaming starts. |
+| `session_link_label` | string | inherit adapter default | Deep-link label appended to progress/final messages. Empty string clears the link. |
+
+```toml
+[presentation.slack]
+intermediate_text = false
+tool_display = "none"
+session_link_label = "Open in OpenAB"
+
+[presentation.discord]
+streaming_placeholder = true
+```
+
+## Channel profiles (`config/channel-profiles.toml`)
+
+Hierarchical presentation profiles loaded from `OPENAB_CHANNEL_PROFILES_PATH` (default `config/channel-profiles.toml`). Merge order: platform → workspace → channel → workspace/channel.
+
+Each `[[profiles]]` entry has `platform` plus optional `workspace_id` / `channel_id`, and **flattens** the same presentation keys as `[presentation.<platform>]` onto the profile itself. Do not nest a `[profiles.presentation]` table — unknown nested tables fail `deny_unknown_fields`.
+
+```toml
+[[profiles]]
+platform = "slack"
+# workspace_id = "T123"
+# channel_id = "C456"
+tool_display = "compact"
+session_link_label = "Open in OpenAB"
+```
+
+No file / empty file = no extra overlays. Invalid file prefers `.bak`; if both fail, the turn errors so ops can restore.
+
 ## `[reactions]`
 
 Emoji reaction feedback on messages to show agent processing status.

@@ -1,10 +1,10 @@
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use unicode_width::UnicodeWidthStr;
 
 /// How to render markdown tables for a given channel.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TableMode {
     /// Wrap the table in a fenced code block (default).

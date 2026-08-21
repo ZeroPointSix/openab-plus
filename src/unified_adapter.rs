@@ -96,7 +96,10 @@ impl UnifiedGatewayAdapter {
                 }
             }
             other => {
-                tracing::warn!(platform = other, "unified adapter: unknown platform, cannot route reply");
+                tracing::warn!(
+                    platform = other,
+                    "unified adapter: unknown platform, cannot route reply"
+                );
             }
         }
     }
@@ -144,8 +147,13 @@ impl ChatAdapter for UnifiedGatewayAdapter {
         self.dispatch_reply(&reply).await;
         Ok(MessageRef {
             channel: channel.clone(),
-            message_id: format!("unified_{:x}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            message_id: format!(
+                "unified_{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
         })
     }
 
@@ -201,8 +209,13 @@ impl ChatAdapter for UnifiedGatewayAdapter {
         self.dispatch_reply(&reply).await;
         Ok(MessageRef {
             channel: channel.clone(),
-            message_id: format!("unified_{:x}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            message_id: format!(
+                "unified_{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
         })
     }
 
@@ -229,5 +242,11 @@ impl ChatAdapter for UnifiedGatewayAdapter {
         // table→code-block pre-pass so tables display with proper formatting.
         // Only applies to Telegram; other platforms in unified mode keep wrapping.
         platform == "telegram" && self.gw_state.telegram_rich_messages
+    }
+
+    fn delivery_mode(&self, platform: &str) -> openab_core::presentation::DeliveryMode {
+        // Same transport table as the gateway WebSocket adapter. Shared policy
+        // code consumes only the reported DeliveryMode.
+        openab_core::presentation::delivery_mode_for_gateway_platform(platform)
     }
 }

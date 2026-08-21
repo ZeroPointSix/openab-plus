@@ -321,10 +321,7 @@ mod tests {
         );
 
         let value = serde_json::to_value(snapshot).expect("snapshot should serialize");
-        assert_eq!(
-            value["source"]["permalink"],
-            "https://slack.example/thread"
-        );
+        assert_eq!(value["source"]["permalink"], "https://slack.example/thread");
     }
 
     #[test]

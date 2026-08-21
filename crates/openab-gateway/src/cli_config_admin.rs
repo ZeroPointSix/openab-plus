@@ -29,10 +29,7 @@ where
                 dry_run(headers, path, body, dry_run_providers.clone())
             }),
         )
-        .route(
-            "/api/v1/agents/{agent}/cli-config/restore",
-            post(restore),
-        )
+        .route("/api/v1/agents/{agent}/cli-config/restore", post(restore))
 }
 
 #[derive(Debug, Deserialize)]

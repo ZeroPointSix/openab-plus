@@ -54,10 +54,7 @@ impl Provider {
 
 pub fn env_ref_variable_name(value: &str) -> Option<&str> {
     let value = value.trim();
-    if let Some(name) = value
-        .strip_prefix("${")
-        .and_then(|v| v.strip_suffix('}'))
-    {
+    if let Some(name) = value.strip_prefix("${").and_then(|v| v.strip_suffix('}')) {
         let name = name.strip_prefix("env:").unwrap_or(name).trim();
         if name.is_empty() {
             None
