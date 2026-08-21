@@ -4,6 +4,7 @@ import { ProfileOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import { Button, Drawer, Tooltip, message } from 'antd';
 import { useNavigate, useParams } from 'react-router-dom';
 import { NewAgentWizard } from '../components/NewAgentWizard';
+import { NewSessionDrawer } from '../components/NewSessionDrawer';
 import { SessionInspector } from '../components/session-workbench/SessionInspector';
 import { SessionMainPanel } from '../components/session-workbench/SessionMainPanel';
 import { SessionSidebar } from '../components/session-workbench/SessionSidebar';
@@ -11,7 +12,7 @@ import { useMediaQuery } from '../hooks/useMediaQuery';
 import { useSessionTranscript } from '../hooks/useSessionTranscript';
 import { adminApi, ApiError } from '../lib/api';
 import { sortSessions, titleFromTranscript } from '../lib/session';
-import { AgentProfile, SessionSnapshot } from '../types';
+import { CreateSessionRequest, SessionSnapshot } from '../types';
 
 const COMMON_AGENT_TYPES = [
   'codex',
@@ -34,6 +35,7 @@ export function SessionWorkbenchPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
   const [newAgentOpen, setNewAgentOpen] = useState(false);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
 
   const sessionsQuery = useQuery({
     queryKey: ['sessions'],
@@ -66,8 +68,8 @@ export function SessionWorkbenchPage() {
   );
 
   const createSessionMutation = useMutation({
-    mutationFn: (profile: AgentProfile) =>
-      adminApi.createSession({ profile_id: profile.id }),
+    mutationFn: (request: CreateSessionRequest) =>
+      adminApi.createSession(request),
     onSuccess: (snapshot) => {
       queryClient.setQueryData<SessionSnapshot[]>(['sessions'], (current = []) => [
         snapshot,
@@ -75,6 +77,7 @@ export function SessionWorkbenchPage() {
       ]);
       queryClient.setQueryData(['session', snapshot.session_id], snapshot);
       message.success('新会话已启动');
+      setNewSessionOpen(false);
       setSidebarOpen(false);
       navigate('/sessions/' + encodeURIComponent(snapshot.session_id));
     },
@@ -147,7 +150,7 @@ export function SessionWorkbenchPage() {
       onSelect={selectSession}
       onReload={() => void sessionsQuery.refetch()}
       onNewAgent={() => setNewAgentOpen(true)}
-      onCreateSession={(profile) => createSessionMutation.mutate(profile)}
+      onCreateSession={() => setNewSessionOpen(true)}
     />
   );
 
@@ -274,6 +277,14 @@ export function SessionWorkbenchPage() {
         agentTypes={agentTypes}
         onCancel={() => setNewAgentOpen(false)}
         onCreated={handleProfileCreated}
+      />
+      <NewSessionDrawer
+        open={newSessionOpen}
+        profiles={profiles}
+        defaultProfiles={profilesQuery.data?.default_profiles}
+        submitting={createSessionMutation.isPending}
+        onOpenChange={setNewSessionOpen}
+        onSubmit={(request) => createSessionMutation.mutateAsync(request)}
       />
     </main>
   );

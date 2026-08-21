@@ -1,11 +1,14 @@
 pub mod adapters;
 pub mod agent_profile_admin;
+pub mod cli_config_admin;
 pub mod config_admin;
+pub mod provider_admin;
 pub mod session_admin;
 pub(crate) mod media;
 pub mod schema;
 pub mod store;
 pub mod web_admin;
+pub mod workspace_admin;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -586,6 +589,7 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     let reply_token_cache: ReplyTokenCache = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let config_manager = config_admin::ConfigManager::from_env();
     let profile_service = Arc::new(openab_core::agent_profile::AgentProfileService::from_env());
+    let provider_store = Arc::new(openab_core::provider_store::ProviderStore::from_env());
 
     let mut app = Router::new()
         .route("/ws", get(ws_handler))
@@ -891,7 +895,15 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     let app = app
         .merge(web_admin::router())
         .merge(agent_profile_admin::router(profile_service.clone()))
+        .merge(provider_admin::router(
+            provider_store.clone(),
+            profile_service.clone(),
+        ))
+        .merge(cli_config_admin::router_with_store(provider_store.clone()))
         .merge(config_admin::router(config_manager.clone()))
+        .merge(workspace_admin::router(
+            workspace_admin::WorkspaceManager::from_env(),
+        ))
         .with_state(state.clone());
 
     // Background: evict expired media files

@@ -212,7 +212,8 @@ async fn get_default_profile(headers: HeaderMap, service: Arc<AgentProfileServic
     }
     match service.list().await {
         Ok(document) => Json(DefaultProfile {
-            default_profile: document.default_profile,
+            default_profile: document.compatibility_default_profile(),
+            default_profiles: document.default_profiles,
         })
         .into_response(),
         Err(e) => internal_error(e),
@@ -224,7 +225,7 @@ async fn set_default_profile(
     Json(request): Json<SetDefaultRequest>,
     service: Arc<AgentProfileService>,
 ) -> Response {
-    set_default_common(headers, request.profile_id, service).await
+    set_default_common(headers, request.profile_id, request.agent_type, service).await
 }
 
 async fn set_default_profile_path(
@@ -232,16 +233,17 @@ async fn set_default_profile_path(
     Path(profile_id): Path<String>,
     service: Arc<AgentProfileService>,
 ) -> Response {
-    set_default_common(headers, Some(profile_id), service).await
+    set_default_common(headers, Some(profile_id), None, service).await
 }
 
 async fn clear_default_profile(headers: HeaderMap, service: Arc<AgentProfileService>) -> Response {
-    set_default_common(headers, None, service).await
+    set_default_common(headers, None, None, service).await
 }
 
 async fn set_default_common(
     headers: HeaderMap,
     profile_id: Option<String>,
+    agent_type: Option<String>,
     service: Arc<AgentProfileService>,
 ) -> Response {
     if let Err(err) = authorize(&headers) {
@@ -255,7 +257,15 @@ async fn set_default_common(
             Some(id)
         }
     });
-    match service.set_default(profile_id).await {
+    let agent_type = agent_type.and_then(|agent| {
+        let agent = agent.trim().to_string();
+        (!agent.is_empty()).then_some(agent)
+    });
+    let result = match agent_type.as_deref() {
+        Some(agent) => service.set_default_for_agent(agent, profile_id).await,
+        None => service.set_default(profile_id).await,
+    };
+    match result {
         Ok(document) => Json(document).into_response(),
         Err(e) if e.to_string().contains("invalid default profile") => (
             StatusCode::BAD_REQUEST,
@@ -314,11 +324,14 @@ async fn config_schema(
 #[derive(Deserialize)]
 struct SetDefaultRequest {
     profile_id: Option<String>,
+    #[serde(default)]
+    agent_type: Option<String>,
 }
 
 #[derive(Serialize)]
 struct DefaultProfile {
     default_profile: Option<String>,
+    default_profiles: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]

@@ -3,6 +3,7 @@ import {
   AgentProfile,
   AgentProfileDocument,
   AgentSummary,
+  CliConfigDryRunReport,
   CreateSessionRequest,
   ConfigDocument,
   ConfigReloadResponse,
@@ -11,8 +12,13 @@ import {
   ConfigValidationResult,
   ConfigValues,
   ProfileValidationResult,
+  Provider,
+  ProviderDocument,
   SessionSnapshot,
   TranscriptSnapshot,
+  WorkspaceFile,
+  WorkspaceFileDocument,
+  WorkspaceSaveResponse,
 } from '../types';
 import { notifyUnauthorized, readAdminToken } from './auth';
 
@@ -134,11 +140,11 @@ export const adminApi = {
       '/api/v1/agent-profiles/' + encodeURIComponent(id),
       { method: 'DELETE' },
     ),
-  setDefaultProfile: (id: string) =>
-    apiRequest<AgentProfileDocument>(
-      '/api/v1/agent-profiles/default/' + encodeURIComponent(id),
-      { method: 'PUT' },
-    ),
+  setDefaultProfile: (id: string, agentType: string) =>
+    apiRequest<AgentProfileDocument>('/api/v1/agent-profiles/default', {
+      method: 'PUT',
+      body: JSON.stringify({ profile_id: id, agent_type: agentType }),
+    }),
   clearDefaultProfile: () =>
     apiRequest<AgentProfileDocument>('/api/v1/agent-profiles/default', {
       method: 'DELETE',
@@ -150,6 +156,58 @@ export const adminApi = {
         '/validate',
       { method: 'POST' },
     ),
+  providers: () =>
+    apiRequest<ProviderDocument | { providers: Provider[] }>('/api/v1/providers'),
+  createProvider: (provider: Provider) =>
+    apiRequest<Provider>('/api/v1/providers', {
+      method: 'POST',
+      body: JSON.stringify(provider),
+    }),
+  updateProvider: (id: string, provider: Provider) =>
+    apiRequest<Provider>('/api/v1/providers/' + encodeURIComponent(id), {
+      method: 'PUT',
+      body: JSON.stringify(provider),
+    }),
+  deleteProvider: (id: string) =>
+    apiRequest<{ deleted: boolean }>(
+      '/api/v1/providers/' + encodeURIComponent(id),
+      { method: 'DELETE' },
+    ),
+  dryRunCliConfig: (
+    agentType: string,
+    body: {
+      model?: string;
+      reasoning_effort?: string;
+      provider_id?: string;
+    },
+  ) =>
+    apiRequest<CliConfigDryRunReport>(
+      '/api/v1/agents/' +
+        encodeURIComponent(agentType) +
+        '/cli-config/dry-run',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
+  restoreCliConfig: (agentType: string) =>
+    apiRequest<{ restored: boolean }>(
+      '/api/v1/agents/' +
+        encodeURIComponent(agentType) +
+        '/cli-config/restore',
+      { method: 'POST' },
+    ),
+  workspaceFiles: () =>
+    apiRequest<WorkspaceFile[]>('/api/v1/workspace/files'),
+  workspaceFile: (path: string) =>
+    apiRequest<WorkspaceFileDocument>(
+      '/api/v1/workspace/file?path=' + encodeURIComponent(path),
+    ),
+  saveWorkspaceFile: (path: string, content: string) =>
+    apiRequest<WorkspaceSaveResponse>('/api/v1/workspace/file', {
+      method: 'PUT',
+      body: JSON.stringify({ path, content }),
+    }),
   config: () => apiRequest<ConfigDocument>('/api/v1/config'),
   configStatus: () => apiRequest<ConfigStatus>('/api/v1/config/status'),
   validateConfig: (values: ConfigValues) =>

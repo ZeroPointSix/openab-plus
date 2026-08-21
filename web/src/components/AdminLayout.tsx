@@ -6,6 +6,7 @@ import {
   DownOutlined,
   LogoutOutlined,
   SettingOutlined,
+  FileTextOutlined,
   UserOutlined,
 } from '@ant-design/icons';
 import { ProLayout } from '@ant-design/pro-components';
@@ -70,6 +71,16 @@ export function AdminLayout({ onLogout }: AdminLayoutProps) {
           path: '/profiles',
           name: 'Agent Profile',
           icon: <UserOutlined />,
+        },
+        {
+          path: '/providers',
+          name: '服务商',
+          icon: <ApiOutlined />,
+        },
+        {
+          path: '/workspace',
+          name: '提示词与工作区',
+          icon: <FileTextOutlined />,
         },
         {
           path: '/config',

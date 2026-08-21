@@ -29,8 +29,8 @@ assert.match(
 );
 assert.match(
   source,
-  /schemaQuery\.data\.fields\.map\(fieldFor\)/,
-  "profile form must render the fields returned by the runtime schema",
+  /dynamicFields\.map\(fieldFor\)/,
+  "profile form must render the remaining fields returned by the runtime schema",
 );
 assert.match(
   source,
@@ -49,8 +49,43 @@ assert.match(
 );
 assert.match(
   source,
-  /来源：\{schemaQuery\.data\.source\}/,
+  /来源：\{schemaQuery\.data\?\.source\}/,
   "the active schema source must remain visible to administrators",
+);
+assert.match(
+  source,
+  /name="provider"/,
+  "profile UI must expose a provider selector for ZER-568 v2",
+);
+assert.match(
+  source,
+  /服务商/,
+  "profile UI must label the provider control in Chinese",
+);
+assert.match(
+  source,
+  /disabled: !supportedEfforts\.has\(value\)/,
+  "unsupported thinking levels must be greyed out",
+);
+assert.match(
+  source,
+  /adminApi\.dryRunCliConfig/,
+  "profile save must dry-run CLI config before writing profiles",
+);
+assert.match(
+  source,
+  /adminApi\.restoreCliConfig\('codex'\)/,
+  "profile UI must offer one-click restore for Codex CLI config",
+);
+assert.match(
+  source,
+  /adminApi\.restoreCliConfig\('claude'\)/,
+  "profile UI must offer one-click restore for Claude CLI config",
+);
+assert.match(
+  source,
+  /BUILTIN_MODELS/,
+  "profile UI must keep a builtin model catalog fallback",
 );
 
 console.log("profile UI schema smoke passed");

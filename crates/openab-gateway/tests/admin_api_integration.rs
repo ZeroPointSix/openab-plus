@@ -297,6 +297,296 @@ for line in sys.stdin:
         .is_some_and(|id| id.starts_with("admin:")));
 }
 
+/// ZER-568 v2: Codex model/thinking are rendered into ~/.codex before spawn.
+/// Session start may still override cwd and non-model ACP config options.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_creation_applies_start_overrides_to_acp_agent() {
+    let env = AdminTestEnv::new().await;
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let agent_dir = tempfile::tempdir().expect("fake agent tempdir");
+    let home_dir = tempfile::tempdir().expect("cli home tempdir");
+    std::env::set_var("OPENAB_TEST_HOME", home_dir.path());
+    let override_dir = agent_dir.path().join("override-project");
+    std::fs::create_dir_all(&override_dir).expect("override workdir");
+    let log_path = agent_dir.path().join("acp-trace.jsonl");
+    let agent_path = agent_dir.path().join("fake_acp_agent.py");
+    std::fs::write(
+        &agent_path,
+        r#"import json
+import sys
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/openab-fake-acp.jsonl"
+
+def trace(event):
+    with open(LOG, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    params = request.get("params") or {}
+    req_id = request.get("id")
+    if method == "initialize":
+        result = {
+            "agentInfo": {"name": "fake-codex-acp"},
+            "agentCapabilities": {"loadSession": False},
+        }
+    elif method == "session/new":
+        trace({"method": "session/new", "cwd": params.get("cwd")})
+        result = {"sessionId": "fake-codex-session"}
+    elif method == "session/set_config_option":
+        trace(
+            {
+                "method": "session/set_config_option",
+                "configId": params.get("configId"),
+                "value": params.get("value"),
+            }
+        )
+        config_id = params.get("configId")
+        value = params.get("value")
+        result = {
+            "configOptions": [
+                {
+                    "id": config_id,
+                    "name": config_id,
+                    "type": "enum",
+                    "currentValue": value,
+                    "options": [{"value": value, "name": value}],
+                }
+            ]
+        }
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}), flush=True)
+"#,
+    )
+    .expect("write fake ACP agent");
+
+    let mut profile = AgentProfile::new("codex-overrides", "Codex Overrides", "codex");
+    profile.command = Some("python3".into());
+    profile.args = vec![
+        agent_path.to_string_lossy().into_owned(),
+        log_path.to_string_lossy().into_owned(),
+    ];
+    profile.default_model = Some("gpt-5".into());
+    profile.reasoning_effort = Some("high".into());
+    profile.working_dir = Some("/profile/default".into());
+    profile
+        .config_options
+        .insert("approval_policy".into(), "on-request".into());
+    env.profile_service()
+        .upsert(profile)
+        .await
+        .expect("save codex override profile");
+
+    let override_workdir = override_dir.to_string_lossy().into_owned();
+    let created = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "profile_id": "codex-overrides",
+            "overrides": {
+                "working_dir": override_workdir,
+                "config_options": {
+                    "approval_policy": "never"
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("create session with overrides");
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let snapshot = created.json::<Value>().await.expect("created session json");
+    assert_eq!(snapshot["profile_id"], "codex-overrides");
+    assert_eq!(snapshot["agent"], "fake-codex-acp");
+    assert_eq!(snapshot["workdir"], override_workdir);
+    let config_errors = snapshot["profile_config_errors"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        config_errors.is_empty(),
+        "profile_config_errors: {config_errors:?}"
+    );
+    assert!(snapshot["session_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("admin:")));
+
+    let codex_config = home_dir.path().join(".codex/config.toml");
+    let codex_body = tokio::fs::read_to_string(&codex_config)
+        .await
+        .expect("codex config written before spawn");
+    assert!(
+        codex_body.contains("gpt-5"),
+        "expected profile model in ~/.codex/config.toml, got: {codex_body}"
+    );
+    assert!(
+        codex_body.contains("model_reasoning_effort") && codex_body.contains("high"),
+        "expected profile thinking in ~/.codex/config.toml, got: {codex_body}"
+    );
+    let trace = std::fs::read_to_string(&log_path).expect("ACP trace log");
+    let events: Vec<Value> = trace
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("trace json line"))
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["method"] == "session/new" && event["cwd"] == override_workdir }),
+        "expected session/new cwd override, got: {events:?}"
+    );
+    assert!(
+        events.iter().all(|event| {
+            !(event["method"] == "session/set_config_option"
+                && matches!(
+                    event["configId"].as_str(),
+                    Some("model") | Some("reasoning_effort")
+                ))
+        }),
+        "codex model/thinking must not use set_config_option in v2, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["method"] == "session/set_config_option"
+                && event["configId"] == "approval_policy"
+                && event["value"] == "never"
+        }),
+        "expected config_options override via set_config_option, got: {events:?}"
+    );
+    std::env::remove_var("OPENAB_TEST_HOME");
+}
+
+/// ZER-568: Claude model and effort must be present in the process environment
+/// before `session/new`, without ACP config calls or prompt injection.
+#[cfg(unix)]
+#[tokio::test]
+async fn session_creation_applies_claude_overrides_before_process_start() {
+    let env = AdminTestEnv::new().await;
+    let server = spawn_admin_server(&env).await;
+    let client = reqwest::Client::new();
+    let agent_dir = tempfile::tempdir().expect("fake agent tempdir");
+    let log_path = agent_dir.path().join("acp-trace.jsonl");
+    let agent_path = agent_dir.path().join("fake_claude_acp_agent.py");
+    std::fs::write(
+        &agent_path,
+        r#"import json
+import os
+import sys
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else "/tmp/openab-fake-acp.jsonl"
+
+def trace(event):
+    with open(LOG, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    params = request.get("params") or {}
+    req_id = request.get("id")
+    if method == "initialize":
+        result = {
+            "agentInfo": {"name": "fake-claude-acp"},
+            "agentCapabilities": {"loadSession": False},
+        }
+    elif method == "session/new":
+        trace({
+            "method": "session/new",
+            "cwd": params.get("cwd"),
+            "model": os.environ.get("ANTHROPIC_MODEL"),
+            "effort": os.environ.get("CLAUDE_CODE_EFFORT_LEVEL"),
+        })
+        result = {"sessionId": "fake-claude-session"}
+    elif method == "session/set_config_option":
+        trace({"method": "session/set_config_option", "rejected": True})
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            ),
+            flush=True,
+        )
+        continue
+    elif method == "session/prompt":
+        trace({"method": "session/prompt", "prompt": params.get("prompt")})
+        result = {}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result}), flush=True)
+"#,
+    )
+    .expect("write fake Claude ACP agent");
+
+    let mut profile = AgentProfile::new("claude-strict", "Claude Strict", "claude");
+    profile.command = Some("python3".into());
+    profile.args = vec![
+        agent_path.to_string_lossy().into_owned(),
+        log_path.to_string_lossy().into_owned(),
+    ];
+    profile.default_model = Some("claude-sonnet-4".into());
+    profile.reasoning_effort = Some("high".into());
+    env.profile_service()
+        .upsert(profile)
+        .await
+        .expect("save claude strict profile");
+
+    let created = client
+        .post(format!("{}/api/v1/sessions", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "profile_id": "claude-strict",
+            "overrides": {
+                "model": "claude-opus-4",
+                "reasoning_effort": "high"
+            }
+        }))
+        .send()
+        .await
+        .expect("create claude session");
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let snapshot = created.json::<Value>().await.expect("created session json");
+    assert_eq!(snapshot["profile_id"], "claude-strict");
+    assert_eq!(snapshot["model"], "claude-opus-4");
+    assert_eq!(snapshot["reasoning_effort"], "high");
+    assert_eq!(snapshot["metadata_source"], "configured");
+    assert!(snapshot["profile_config_errors"]
+        .as_array()
+        .is_none_or(Vec::is_empty));
+
+    let trace = std::fs::read_to_string(&log_path).expect("ACP trace log");
+    let events: Vec<Value> = trace
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("trace json line"))
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["method"] == "session/prompt"),
+        "profile apply must not use prompt fallback, got: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["method"] == "session/set_config_option"),
+        "Claude startup values must not depend on ACP config support, got: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| {
+            event["method"] == "session/new"
+                && event["model"] == "claude-opus-4"
+                && event["effort"] == "high"
+        }),
+        "expected Claude startup environment before session/new, got: {events:?}"
+    );
+}
+
 #[tokio::test]
 async fn profiles_crud_default_and_validate() {
     let env = AdminTestEnv::new().await;
@@ -382,7 +672,7 @@ async fn profiles_crud_default_and_validate() {
     let default_set = client
         .put(format!("{}/api/v1/agent-profiles/default", server.base_url))
         .bearer_auth(&env.token)
-        .json(&json!({ "profile_id": "codex-main" }))
+        .json(&json!({ "profile_id": "codex-main", "agent_type": "codex" }))
         .send()
         .await
         .expect("set default")
@@ -401,6 +691,54 @@ async fn profiles_crud_default_and_validate() {
         .await
         .expect("default json");
     assert_eq!(default_get["default_profile"], "codex-main");
+    assert_eq!(default_get["default_profiles"]["codex"], "codex-main");
+
+    let created_claude = client
+        .post(format!("{}/api/v1/agent-profiles", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&AgentProfile::new("claude-main", "Claude Main", "claude"))
+        .send()
+        .await
+        .expect("create Claude profile");
+    assert_eq!(created_claude.status(), reqwest::StatusCode::CREATED);
+
+    let scoped_default_set = client
+        .put(format!("{}/api/v1/agent-profiles/default", server.base_url))
+        .bearer_auth(&env.token)
+        .json(&json!({ "profile_id": "claude-main", "agent_type": "claude" }))
+        .send()
+        .await
+        .expect("set Claude default")
+        .json::<Value>()
+        .await
+        .expect("scoped default document");
+    assert_eq!(
+        scoped_default_set["default_profiles"]["codex"],
+        "codex-main"
+    );
+    assert_eq!(
+        scoped_default_set["default_profiles"]["claude"],
+        "claude-main"
+    );
+
+    let scoped_default_get = client
+        .get(format!("{}/api/v1/agent-profiles/default", server.base_url))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get scoped defaults")
+        .json::<Value>()
+        .await
+        .expect("scoped defaults json");
+    assert!(scoped_default_get["default_profile"].is_null());
+    assert_eq!(
+        scoped_default_get["default_profiles"]["codex"],
+        "codex-main"
+    );
+    assert_eq!(
+        scoped_default_get["default_profiles"]["claude"],
+        "claude-main"
+    );
 
     let deleted = client
         .delete(format!(

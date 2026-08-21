@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::acp::{
     classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult,
@@ -241,10 +241,18 @@ pub fn split_delivery(
 ) -> (OutputDirectives, String) {
     let (directives, _) = parse_output_directives(full);
     let delivered = select_delivery_text(full, answer_start, keep_full);
+    // If the agent emitted text before its last tool but no text after it,
+    // prefer the full buffer over delivering an empty slice. This preserves
+    // useful narration/results for the recovery fallback instead of turning
+    // a successful tool run into a blank message.
+    let use_full_fallback =
+        !keep_full && answer_start > 0 && delivered.trim().is_empty() && !full.trim().is_empty();
+    let delivered = if use_full_fallback { full } else { delivered };
     // Strip the directive header from the body only when the delivered slice
-    // begins at byte 0 (no tools ran, or keep_full). When answer_start > 0,
-    // delivered is the post-last-tool suffix — don't re-parse it.
-    let body = if answer_start == 0 || keep_full {
+    // begins at byte 0 (no tools ran, keep_full, or the full-buffer fallback).
+    // When answer_start > 0 and the suffix exists, delivered is mid-buffer text;
+    // any `[[…]]` there is reply content, not a directive header.
+    let body = if answer_start == 0 || keep_full || use_full_fallback {
         parse_output_directives(delivered).1
     } else {
         delivered.to_owned()
@@ -272,7 +280,11 @@ pub(crate) fn finalize_body(
     answer_start: usize,
     body: String,
 ) -> String {
-    if reset && !keep_full_text && answer_start > 0 {
+    if reset
+        && !keep_full_text
+        && answer_start > 0
+        && !body.starts_with("⚠️ _Session expired, starting fresh..._")
+    {
         format!("⚠️ _Session expired, starting fresh..._\n\n{body}")
     } else {
         body
@@ -1100,6 +1112,7 @@ impl AdapterRouter {
                     }
 
                     let mut text_buf = String::new();
+                    let mut last_assistant_text: Option<String> = None;
                     let mut tool_lines: Vec<ToolEntry> = Vec::new();
                     let mut tool_progress = ToolProgressMessage::new(
                         tool_progress_enabled,
@@ -1317,6 +1330,9 @@ impl AdapterRouter {
                             match event {
                                 AcpEvent::Text(t) => {
                                     text_buf.push_str(&t);
+                                    if !t.trim().is_empty() {
+                                        last_assistant_text = Some(t.clone());
+                                    }
                                     // Tool-progress adapters seed the session receipt on the
                                     // first text. A turn that never calls a tool would otherwise
                                     // open no progress message: the "会话已启动" receipt never
@@ -1490,9 +1506,151 @@ impl AdapterRouter {
                     }
 
                     conn.prompt_done().await;
+
+                    // A provider can execute tools successfully and still close the
+                    // turn with `end_turn` + zero output tokens. This is a delivery
+                    // failure, not evidence that the work failed. Give the same ACP
+                    // session one constrained chance to summarize the results it
+                    // already has, without entering another tool loop.
+                    let completed_tools = tool_lines
+                        .iter()
+                        .filter(|tool| tool.state == ToolState::Completed)
+                        .count();
+                    let silent_empty_turn =
+                        response_error.is_none() && turn_result.is_silent_failure();
+                    let recovery_attempted = silent_empty_turn && completed_tools > 0;
+                    let mut recovery_succeeded = false;
+                    let mut recovery_output_tokens = None;
+                    let mut recovery_error: Option<String> = None;
+
+                    if recovery_attempted {
+                        let recovery_blocks = vec![ContentBlock::Text {
+                            text: EMPTY_TURN_RECOVERY_PROMPT.to_string(),
+                        }];
+                        match conn.session_prompt(recovery_blocks).await {
+                            Ok((mut recovery_rx, recovery_request_id)) => {
+                                let mut recovery_text = String::new();
+                                let recovery_started = tokio::time::Instant::now();
+                                loop {
+                                    let notification = tokio::select! {
+                                        msg = recovery_rx.recv() => match msg {
+                                            Some(msg) => msg,
+                                            None => {
+                                                recovery_error = Some(
+                                                    "agent process exited during empty-turn recovery"
+                                                        .to_string(),
+                                                );
+                                                break;
+                                            }
+                                        },
+                                        _ = tokio::time::sleep(liveness_check_interval) => {
+                                            if !conn.alive() {
+                                                recovery_error =
+                                                    Some("agent process died during empty-turn recovery".into());
+                                                conn.abandon_request(recovery_request_id).await;
+                                                break;
+                                            }
+                                            if recovery_started.elapsed() > prompt_hard_timeout {
+                                                recovery_error = Some(format!(
+                                                    "empty-turn recovery exceeded hard timeout ({}s)",
+                                                    prompt_hard_timeout.as_secs(),
+                                                ));
+                                                conn.abandon_request(recovery_request_id).await;
+                                                break;
+                                            }
+                                            continue;
+                                        }
+                                    };
+
+                                    if let Some(notification_id) = notification.id {
+                                        if notification_id != recovery_request_id {
+                                            continue;
+                                        }
+                                        if let Some(err) = notification.error.as_ref() {
+                                            recovery_error = Some(format_coded_error(
+                                                err.code,
+                                                &err.message,
+                                                err.data_message(),
+                                            ));
+                                        }
+                                        if let Some(result) = notification.result.as_ref() {
+                                            recovery_output_tokens =
+                                                parse_turn_result(result).output_tokens;
+                                        }
+                                        break;
+                                    }
+
+                                    if let Some(event) = classify_notification(&notification) {
+                                        let transcript_store = session_pool.transcript_store();
+                                        record_acp_event_transcript(
+                                            &transcript_store,
+                                            &session_key,
+                                            &event,
+                                        );
+                                        match event {
+                                            AcpEvent::Text(text) => {
+                                                recovery_text.push_str(&text);
+                                                if !text.trim().is_empty() {
+                                                    last_assistant_text = Some(text);
+                                                }
+                                            }
+                                            AcpEvent::ToolStart { title, .. }
+                                            | AcpEvent::ToolDone { title, .. } => {
+                                                warn!(
+                                                    title = %title,
+                                                    "empty-turn recovery emitted a tool event despite the no-tools instruction"
+                                                );
+                                                recovery_error = Some(
+                                                    "empty-turn recovery attempted to call a tool"
+                                                        .to_string(),
+                                                );
+                                                conn.abandon_request(recovery_request_id).await;
+                                                break;
+                                            }
+                                            AcpEvent::Thinking { .. }
+                                            | AcpEvent::ConfigUpdate { .. }
+                                            | AcpEvent::Plan { .. } => {}
+                                        }
+                                    }
+                                }
+                                conn.prompt_done().await;
+                                if recovery_error.is_none() && !recovery_text.trim().is_empty() {
+                                    recovery_succeeded = true;
+                                    if text_buf.is_empty() {
+                                        text_buf = recovery_text;
+                                    } else {
+                                        text_buf.push_str("\n\n");
+                                        text_buf.push_str(&recovery_text);
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                recovery_error = Some(err.to_string());
+                                conn.prompt_done().await;
+                            }
+                        }
+                    }
+
                     session_pool
                         .transcript_store()
                         .finish_assistant_turn(&session_key);
+
+                    if silent_empty_turn {
+                        let last_tool = tool_lines.last().map(|tool| tool.title.as_str());
+                        info!(
+                            event = "silent_empty_turn",
+                            run_id = %session_key,
+                            stop_reason = ?turn_result.stop_reason,
+                            output_tokens = ?turn_result.output_tokens,
+                            last_tool = ?last_tool,
+                            successful_tools = completed_tools,
+                            recovery_attempted,
+                            recovery_succeeded,
+                            recovery_output_tokens = ?recovery_output_tokens,
+                            recovery_error = ?recovery_error,
+                            "classified empty end_turn after finalization"
+                        );
+                    }
                     // Stop the cosmetic edit loop before the finalize write path
                     // issues its authoritative edit. Dropping buf_tx closes the watch
                     // channel so the loop breaks on its next check, but it may be
@@ -1535,7 +1693,7 @@ impl AdapterRouter {
                     let text_buf = if exposes_intermediate_text {
                         text_buf
                     } else {
-                        sanitize_user_visible_text(&text_buf)
+                        sanitize_user_visible_text_or_empty(&text_buf)
                     };
 
                     let interrupted_tools = fail_running_tools(&mut tool_lines);
@@ -1545,8 +1703,8 @@ impl AdapterRouter {
                             "turn ended with running tools; marked them failed"
                         );
                     }
-                    let turn_failed =
-                        response_error.is_some() || turn_result.is_silent_failure();
+                    let turn_failed = response_error.is_some()
+                        || (turn_result.is_silent_failure() && completed_tools == 0);
                     tool_progress.finish(&tool_lines, turn_failed).await;
                     // Build final content
                     let final_content =
@@ -1557,24 +1715,60 @@ impl AdapterRouter {
                             false,
                             reply_tool_display,
                         );
-                    let final_content = if final_content.is_empty() {
-                        if turn_result.is_silent_failure() {
-                            warn!(
-                                stop_reason = ?turn_result.stop_reason,
-                                input_tokens = ?turn_result.input_tokens,
-                                output_tokens = ?turn_result.output_tokens,
-                                total_tokens = ?turn_result.total_tokens,
-                                "agent returned empty turn (0 output tokens) — likely provider/model/auth failure"
-                            );
-                        }
-                        if let Some(err) = response_error.as_deref() {
-                            format_response_error(err, exposes_intermediate_text)
-                        } else {
-                            classify_empty_turn(None, &turn_result)
-                        }
-                    } else if let Some(err) = response_error {
+                    if turn_result.is_silent_failure() {
+                        warn!(
+                            stop_reason = ?turn_result.stop_reason,
+                            input_tokens = ?turn_result.input_tokens,
+                            output_tokens = ?turn_result.output_tokens,
+                            total_tokens = ?turn_result.total_tokens,
+                            "agent returned empty turn (0 output tokens) — applying recovery policy"
+                        );
+                    }
+                    let fallback_text = last_assistant_text
+                        .as_deref()
+                        .map(|text| {
+                            if exposes_intermediate_text {
+                                text.to_string()
+                            } else {
+                                sanitize_user_visible_text_or_empty(text)
+                            }
+                        })
+                        .filter(|text| !text.trim().is_empty());
+                    let empty_turn_summary = turn_result
+                        .is_silent_failure()
+                        .then(|| {
+                            empty_turn_diagnostics(
+                                &session_key,
+                                &turn_result,
+                                &tool_lines,
+                                exposes_intermediate_text,
+                            )
+                        });
+                    let final_content = if let Some(err) = response_error {
                         let error = format_response_error(&err, exposes_intermediate_text);
                         format!("{error}\n\n{final_content}")
+                    } else if let Some(summary) = empty_turn_summary.as_deref() {
+                        if final_content.is_empty() {
+                            classify_empty_turn(
+                                None,
+                                &turn_result,
+                                fallback_text.as_deref(),
+                                Some(summary),
+                            )
+                        } else if recovery_succeeded {
+                            final_content
+                        } else {
+                            format!(
+                                "任务执行完成，但最终回答为空。\n\n{final_content}\n\n{summary}"
+                            )
+                        }
+                    } else if final_content.is_empty() {
+                        classify_empty_turn(
+                            None,
+                            &turn_result,
+                            fallback_text.as_deref(),
+                            None,
+                        )
                     } else {
                         final_content
                     };
@@ -2036,6 +2230,44 @@ fn fail_running_tools(tools: &mut [ToolEntry]) -> usize {
     failed
 }
 
+fn empty_turn_diagnostics(
+    run_id: &str,
+    turn_result: &TurnResult,
+    tools: &[ToolEntry],
+    expose_tool_details: bool,
+) -> String {
+    let completed = tools
+        .iter()
+        .filter(|tool| tool.state == ToolState::Completed)
+        .count();
+    let failed = tools
+        .iter()
+        .filter(|tool| tool.state == ToolState::Failed)
+        .count();
+    let last_tool = if !expose_tool_details {
+        if tools.is_empty() {
+            "无".to_string()
+        } else {
+            "已调用工具".to_string()
+        }
+    } else {
+        tools
+            .last()
+            .map(|tool| format!("`{}`", tool.title))
+            .unwrap_or_else(|| "无".to_string())
+    };
+    let stop_reason = turn_result.stop_reason.as_deref().unwrap_or("unknown");
+    let output_tokens = turn_result
+        .output_tokens
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "工具执行摘要：成功 {completed} 个，失败 {failed} 个；最后工具：{last_tool}。\n\
+         运行 ID：`{run_id}`；终止原因：`{}`；output tokens：`{}`。",
+        stop_reason, output_tokens,
+    )
+}
+
 fn compose_tool_progress(
     tools: &[ToolEntry],
     finished: bool,
@@ -2134,21 +2366,32 @@ fn assistant_tool_status(title: &str, exposes_intermediate_text: bool) -> String
 }
 
 fn format_public_error(message: &str) -> String {
-    let message = message.to_ascii_lowercase();
-    let summary = if message.contains("timeout waiting for") {
+    let code = extract_response_error_code(message);
+    let message_lower = message.to_ascii_lowercase();
+    let summary = if message_lower.contains("timeout waiting for") {
         "请求超时，请稍后重试。"
-    } else if message.contains("connection closed") || message.contains("channel closed") {
+    } else if message_lower.contains("connection closed")
+        || message_lower.contains("channel closed")
+    {
         "与 Agent 的连接已中断，请重试。"
-    } else if message.contains("failed to spawn") || message.contains("no such file") {
+    } else if message_lower.contains("failed to spawn") || message_lower.contains("no such file") {
         "无法启动 Agent，请检查配置。"
-    } else if message.contains("pool exhausted") {
+    } else if message_lower.contains("pool exhausted") {
         "服务繁忙，请稍后重试。"
-    } else if message.contains("invalid api key") || message.contains("unauthorized") {
+    } else if message_lower.contains("invalid api key") || message_lower.contains("unauthorized") {
         "鉴权失败，请检查配置。"
     } else {
         "请在 OpenAB 中查看运行详情。"
     };
-    format!("这次任务执行失败：{summary}")
+    match code {
+        Some(code) => format!("这次任务执行失败：{summary}（错误码：{code}）"),
+        None => format!("这次任务执行失败：{summary}"),
+    }
+}
+
+fn extract_response_error_code(message: &str) -> Option<i64> {
+    let (_, suffix) = message.split_once("code: ")?;
+    suffix.split(')').next()?.trim().parse().ok()
 }
 
 fn format_response_error(message: &str, exposes_intermediate_text: bool) -> String {
@@ -2261,6 +2504,15 @@ fn sanitize_user_visible_text(content: &str) -> String {
         "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。".to_string()
     } else {
         visible.to_string()
+    }
+}
+
+fn sanitize_user_visible_text_or_empty(content: &str) -> String {
+    let visible = sanitize_user_visible_text(content);
+    if visible == NO_PUBLIC_RESULT_MSG {
+        String::new()
+    } else {
+        visible
     }
 }
 
@@ -2487,21 +2739,35 @@ fn render_group(title: &str, state: ToolState, count: usize) -> String {
 
 // --- Empty-turn classification (pure helper, unit-testable) ---
 
-/// Message to show the consumer when a silent failure is detected.
-pub(crate) const SILENT_FAILURE_MSG: &str = "⚠️ The agent did not produce a response. This usually indicates a backend configuration issue — not an intentional empty reply. Please try again later.";
+/// Prompt used once after tools completed but the agent emitted an empty
+/// `end_turn`. It must not start another tool loop.
+const EMPTY_TURN_RECOVERY_PROMPT: &str = "OpenAB recovery: the previous turn completed its tool work but returned no final answer. Summarize only the results already available in this conversation. Do not call tools, do not start new work, and return a concise user-facing answer.";
+
+/// Message to show the consumer when a turn completed without answer text.
+pub(crate) const SILENT_FAILURE_MSG: &str =
+    "⚠️ 任务执行完成，但最终回答为空。请在 OpenAB 中查看运行详情。";
+
+/// Message to show the consumer when no public text can be delivered.
+const NO_PUBLIC_RESULT_MSG: &str = "这次任务没有返回可公开展示的结果。请在 OpenAB 中查看运行详情。";
 
 /// Classify what to display when the composed body is empty.
 /// Returns the final content string for the consumer.
 pub(crate) fn classify_empty_turn(
     response_error: Option<&str>,
     turn_result: &TurnResult,
+    fallback_text: Option<&str>,
+    tool_summary: Option<&str>,
 ) -> String {
     if let Some(err) = response_error {
         format!("⚠️ {err}")
+    } else if let Some(text) = fallback_text.filter(|text| !text.trim().is_empty()) {
+        format!("任务执行完成，但最终回答为空。\n\n最近一次有效的助手内容：\n{text}")
+    } else if let Some(summary) = tool_summary {
+        format!("任务执行完成，但最终回答为空。\n\n{summary}")
     } else if turn_result.is_silent_failure() {
         SILENT_FAILURE_MSG.to_string()
     } else {
-        "_(no response)_".to_string()
+        NO_PUBLIC_RESULT_MSG.to_string()
     }
 }
 
@@ -2898,6 +3164,14 @@ mod tests {
     }
 
     #[test]
+    fn split_delivery_send_once_falls_back_when_last_tool_has_no_text() {
+        let full = "completed result before tool";
+        let (directives, body) = split_delivery(full, full.len(), false);
+        assert_eq!(directives.reply_to, None);
+        assert_eq!(body, full);
+    }
+
+    #[test]
     fn split_delivery_send_once_no_tools_strips_directive_from_body() {
         // No tool ran (answer_start == 0): the slice still carries the header,
         // so the body must have it stripped while directives are still parsed.
@@ -2948,6 +3222,12 @@ mod tests {
             out, body,
             "send-once + reset + no tools → body already carries notice, pass through"
         );
+    }
+
+    #[test]
+    fn finalize_body_does_not_duplicate_reset_notice_on_full_fallback() {
+        let body = "⚠️ _Session expired, starting fresh..._\n\ncompleted result".to_string();
+        assert_eq!(finalize_body(true, false, 42, body.clone()), body);
     }
 
     #[test]
@@ -3514,6 +3794,15 @@ mod tests {
     }
 
     #[test]
+    fn private_adapter_response_error_preserves_original_code() {
+        let output =
+            format_response_error("**Internal Error** (code: -32603)\nupstream failed", false);
+        assert!(output.contains("任务执行失败"));
+        assert!(output.contains("错误码：-32603"));
+        assert!(!output.contains("upstream failed"));
+    }
+
+    #[test]
     fn non_private_adapter_response_error_preserves_existing_detail() {
         let output = format_response_error("Agent process died", true);
         assert_eq!(output, "⚠️ Agent process died");
@@ -3936,7 +4225,10 @@ mod tests {
 #[cfg(test)]
 mod directive_tests {
     use super::parse_output_directives;
-    use super::{classify_empty_turn, SILENT_FAILURE_MSG};
+    use super::{
+        classify_empty_turn, empty_turn_diagnostics, ToolEntry, ToolState, NO_PUBLIC_RESULT_MSG,
+        SILENT_FAILURE_MSG,
+    };
     use crate::acp::TurnResult;
 
     #[test]
@@ -4100,7 +4392,7 @@ mod directive_tests {
             input_tokens: Some(0),
             total_tokens: Some(0),
         };
-        let result = classify_empty_turn(None, &tr);
+        let result = classify_empty_turn(None, &tr, None, None);
         assert_eq!(result, SILENT_FAILURE_MSG);
     }
 
@@ -4112,7 +4404,7 @@ mod directive_tests {
             input_tokens: Some(150),
             total_tokens: Some(150),
         };
-        let result = classify_empty_turn(None, &tr);
+        let result = classify_empty_turn(None, &tr, None, None);
         assert_eq!(result, SILENT_FAILURE_MSG);
     }
 
@@ -4124,15 +4416,15 @@ mod directive_tests {
             input_tokens: Some(0),
             total_tokens: Some(0),
         };
-        let result = classify_empty_turn(Some("Agent process died"), &tr);
+        let result = classify_empty_turn(Some("Agent process died"), &tr, None, None);
         assert_eq!(result, "⚠️ Agent process died");
     }
 
     #[test]
     fn empty_turn_missing_usage_shows_no_response() {
         let tr = TurnResult::default();
-        let result = classify_empty_turn(None, &tr);
-        assert_eq!(result, "_(no response)_");
+        let result = classify_empty_turn(None, &tr, None, None);
+        assert_eq!(result, NO_PUBLIC_RESULT_MSG);
     }
 
     #[test]
@@ -4143,8 +4435,8 @@ mod directive_tests {
             input_tokens: Some(10),
             total_tokens: Some(60),
         };
-        let result = classify_empty_turn(None, &tr);
-        assert_eq!(result, "_(no response)_");
+        let result = classify_empty_turn(None, &tr, None, None);
+        assert_eq!(result, NO_PUBLIC_RESULT_MSG);
     }
 
     #[test]
@@ -4155,7 +4447,102 @@ mod directive_tests {
             input_tokens: Some(10),
             total_tokens: Some(10),
         };
-        let result = classify_empty_turn(None, &tr);
-        assert_eq!(result, "_(no response)_");
+        let result = classify_empty_turn(None, &tr, None, None);
+        assert_eq!(result, NO_PUBLIC_RESULT_MSG);
+    }
+
+    #[test]
+    fn empty_turn_recovery_success_prefers_last_valid_text() {
+        let tr = TurnResult {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(0),
+            input_tokens: Some(150),
+            total_tokens: Some(150),
+        };
+        let result = classify_empty_turn(
+            None,
+            &tr,
+            Some("工具已经完成，结果如下。"),
+            Some("工具执行摘要：成功 2 个，失败 0 个"),
+        );
+        assert!(result.contains("工具已经完成，结果如下。"));
+        assert!(!result.contains("任务执行失败"));
+    }
+
+    #[test]
+    fn empty_turn_recovery_failure_keeps_tool_summary() {
+        let tr = TurnResult {
+            stop_reason: Some("end_turn".into()),
+            output_tokens: Some(0),
+            input_tokens: Some(150),
+            total_tokens: Some(150),
+        };
+        let result = classify_empty_turn(
+            None,
+            &tr,
+            None,
+            Some("工具执行摘要：成功 2 个，失败 0 个；最后工具：`cargo test`。"),
+        );
+        assert!(result.contains("任务执行完成，但最终回答为空"));
+        assert!(result.contains("cargo test"));
+        assert!(!result.contains("任务执行失败"));
+    }
+
+    #[test]
+    fn empty_turn_diagnostics_preserve_run_metadata() {
+        let tools = vec![
+            ToolEntry {
+                id: "1".into(),
+                title: "search".into(),
+                state: ToolState::Completed,
+            },
+            ToolEntry {
+                id: "2".into(),
+                title: "cargo test".into(),
+                state: ToolState::Completed,
+            },
+            ToolEntry {
+                id: "3".into(),
+                title: "git diff".into(),
+                state: ToolState::Failed,
+            },
+        ];
+        let result = empty_turn_diagnostics(
+            "slack:1700.1",
+            &TurnResult {
+                stop_reason: Some("end_turn".into()),
+                output_tokens: Some(0),
+                ..TurnResult::default()
+            },
+            &tools,
+            true,
+        );
+        assert!(result.contains("slack:1700.1"));
+        assert!(result.contains("end_turn"));
+        assert!(result.contains("output tokens"));
+        assert!(result.contains('0'));
+        assert!(result.contains("最后工具：`git diff`"));
+        assert!(result.contains("成功 2 个"));
+    }
+
+    #[test]
+    fn empty_turn_diagnostics_hide_tool_titles_for_private_adapters() {
+        let tools = vec![ToolEntry {
+            id: "1".into(),
+            title: "shell token=private".into(),
+            state: ToolState::Completed,
+        }];
+        let result = empty_turn_diagnostics(
+            "slack:1700.1",
+            &TurnResult {
+                stop_reason: Some("end_turn".into()),
+                output_tokens: Some(0),
+                ..TurnResult::default()
+            },
+            &tools,
+            false,
+        );
+        assert!(result.contains("最后工具：已调用工具"));
+        assert!(!result.contains("private"));
     }
 }
