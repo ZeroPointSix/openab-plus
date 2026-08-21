@@ -335,6 +335,20 @@ impl SessionPool {
         }
     }
 
+    /// True only when the thread has a live ACP connection (busy lock counts as live).
+    /// Suspended/persisted entries without a live process must re-run profile apply.
+    pub async fn has_live_active_connection(&self, thread_id: &str) -> bool {
+        let state = self.state.read().await;
+        if let Some(conn) = state.active.get(thread_id) {
+            match conn.try_lock() {
+                Ok(c) => c.alive(),
+                Err(_) => true,
+            }
+        } else {
+            false
+        }
+    }
+
     /// Check if session state exists for this thread (active, suspended, or persisted).
     #[allow(dead_code)]
     pub async fn has_active_session(&self, thread_id: &str) -> bool {

@@ -2,6 +2,7 @@ pub mod acp;
 pub mod adapter;
 pub mod agent_profile;
 pub mod bot_turns;
+pub mod cli_config;
 pub mod config;
 pub mod cron;
 pub mod directives;
@@ -18,6 +19,8 @@ pub mod multibot_cache;
 #[cfg(feature = "pre-seed")]
 pub mod pre_seed;
 pub mod profile_store;
+pub mod provider;
+pub mod provider_store;
 pub mod reactions;
 #[cfg(feature = "discord")]
 pub mod remind;

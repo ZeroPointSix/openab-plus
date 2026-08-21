@@ -1,7 +1,7 @@
 {
   "name": "openab-admin-web",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.3.5",
   "type": "module",
   "packageManager": "pnpm@10.14.0",
   "scripts": {

@@ -202,6 +202,7 @@ export interface AgentProfile {
   args?: string[];
   default_model?: string;
   reasoning_effort?: string;
+  provider?: string;
   workdir_strategy: WorkdirStrategy;
   working_dir?: string;
   env_refs?: Record<string, string>;
@@ -214,8 +215,43 @@ export interface AgentProfile {
 }
 
 export interface AgentProfileDocument {
+  schema_version?: number;
+  /** Legacy compatibility field; use default_profiles for new behavior. */
   default_profile?: string;
+  default_profiles?: Record<string, string>;
+  providers?: never;
   profiles?: AgentProfile[];
+}
+
+export interface Provider {
+  id: string;
+  name: string;
+  provider_type: string;
+  base_url?: string;
+  api_key_ref: string;
+}
+
+export interface ProviderDocument {
+  schema_version?: number;
+  providers?: Provider[];
+}
+
+export interface CliConfigFieldChange {
+  from?: string;
+  to?: string;
+}
+
+export interface CliConfigDryRunFile {
+  path: string;
+  backup_path: string;
+  fields: Record<string, CliConfigFieldChange>;
+}
+
+export interface CliConfigDryRunReport {
+  agent_type: string;
+  unsupported_thinking?: string;
+  files: CliConfigDryRunFile[];
+  errors?: string[];
 }
 
 export interface AgentSummary {

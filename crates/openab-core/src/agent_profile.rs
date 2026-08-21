@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -40,6 +40,8 @@ pub struct AgentProfile {
     pub default_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     #[serde(default)]
     pub workdir_strategy: WorkdirStrategy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -79,6 +81,7 @@ impl AgentProfile {
             args: Vec::new(),
             default_model: None,
             reasoning_effort: None,
+            provider: None,
             workdir_strategy: WorkdirStrategy::default(),
             working_dir: None,
             env_refs: HashMap::new(),
@@ -92,12 +95,55 @@ impl AgentProfile {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProfileDocument {
+    #[serde(default = "default_profile_schema_version")]
+    pub schema_version: u32,
+    /// Legacy global default retained for backward-compatible reads. New writes use
+    /// `default_profiles`, which scopes a default to its Agent type.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub default_profiles: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub profiles: Vec<AgentProfile>,
+}
+
+impl Default for AgentProfileDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: default_profile_schema_version(),
+            default_profile: None,
+            default_profiles: BTreeMap::new(),
+            profiles: Vec::new(),
+        }
+    }
+}
+
+impl AgentProfileDocument {
+    pub fn default_profile_for_agent(&self, agent_type: &str) -> Option<&str> {
+        self.default_profiles
+            .get(agent_type)
+            .map(String::as_str)
+            .or_else(|| {
+                self.default_profiles
+                    .is_empty()
+                    .then_some(self.default_profile.as_deref())
+                    .flatten()
+            })
+    }
+
+    pub fn compatibility_default_profile(&self) -> Option<String> {
+        match self.default_profiles.len() {
+            0 => self.default_profile.clone(),
+            1 => self.default_profiles.values().next().cloned(),
+            _ => None,
+        }
+    }
+}
+
+fn default_profile_schema_version() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -140,11 +186,29 @@ pub struct ProfileSessionOverrides {
     pub config_options: HashMap<String, String>,
 }
 
+/// Strip process-level secrets before persisting session overrides to disk.
+pub(crate) fn overrides_for_persistence(
+    overrides: &ProfileSessionOverrides,
+) -> Option<ProfileSessionOverrides> {
+    let sanitized = ProfileSessionOverrides {
+        model: overrides.model.clone(),
+        reasoning_effort: overrides.reasoning_effort.clone(),
+        config_options: overrides.config_options.clone(),
+        ..ProfileSessionOverrides::default()
+    };
+    let has_overrides = sanitized.model.is_some()
+        || sanitized.reasoning_effort.is_some()
+        || !sanitized.config_options.is_empty();
+    has_overrides.then_some(sanitized)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentProfileSnapshot {
     pub id: String,
     pub name: String,
     pub agent_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     pub updated_at: Option<DateTime<Utc>>,
 }
 
@@ -242,7 +306,8 @@ impl AgentProfileService {
     }
 
     pub async fn upsert(&self, mut profile: AgentProfile) -> Result<AgentProfileDocument> {
-        let mut doc = self.store.load().await?;
+        let _guard = self.store.write_lock().await;
+        let mut doc = self.store.load_unlocked().await?;
         let now = Utc::now();
         match doc
             .profiles
@@ -268,37 +333,89 @@ impl AgentProfileService {
                 validation.errors
             ));
         }
-        self.store.save_atomic(&doc).await?;
+        self.store.save_atomic_unlocked(&doc).await?;
         Ok(doc)
     }
 
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let mut doc = self.store.load().await?;
+        let _guard = self.store.write_lock().await;
+        let mut doc = self.store.load_unlocked().await?;
         let before = doc.profiles.len();
         doc.profiles.retain(|profile| profile.id != id);
         let deleted = doc.profiles.len() != before;
         if doc.default_profile.as_deref() == Some(id) {
             doc.default_profile = None;
         }
+        doc.default_profiles
+            .retain(|_, default_id| default_id != id);
         if deleted {
-            self.store.save_atomic(&doc).await?;
+            self.store.save_atomic_unlocked(&doc).await?;
         }
         Ok(deleted)
     }
 
+    /// Set a default for the selected profile's Agent type. The legacy global field
+    /// is retained as a compatibility hint, but session/UI selection uses the map.
     pub async fn set_default(&self, id: Option<String>) -> Result<AgentProfileDocument> {
-        let mut doc = self.store.load().await?;
-        doc.default_profile = id;
+        let _guard = self.store.write_lock().await;
+        let mut doc = self.store.load_unlocked().await?;
+        match id {
+            Some(id) => {
+                let profile = find_enabled_profile(&doc, &id)?
+                    .ok_or_else(|| anyhow!("default profile not found: {id}"))?;
+                doc.default_profiles
+                    .insert(profile.agent_type.clone(), id.clone());
+                doc.default_profile = doc.compatibility_default_profile();
+            }
+            None => {
+                doc.default_profile = None;
+                doc.default_profiles.clear();
+            }
+        }
         let validation = validate_document(&doc);
         if !validation.ok {
             return Err(anyhow!("invalid default profile: {:?}", validation.errors));
         }
-        self.store.save_atomic(&doc).await?;
+        self.store.save_atomic_unlocked(&doc).await?;
+        Ok(doc)
+    }
+
+    pub async fn set_default_for_agent(
+        &self,
+        agent_type: &str,
+        id: Option<String>,
+    ) -> Result<AgentProfileDocument> {
+        let _guard = self.store.write_lock().await;
+        let mut doc = self.store.load_unlocked().await?;
+        match id {
+            Some(id) => {
+                let profile = find_enabled_profile(&doc, &id)?
+                    .ok_or_else(|| anyhow!("default profile not found: {id}"))?;
+                if profile.agent_type != agent_type {
+                    return Err(anyhow!(
+                        "profile {id} belongs to {}, not {agent_type}",
+                        profile.agent_type
+                    ));
+                }
+                doc.default_profiles
+                    .insert(agent_type.to_string(), id.clone());
+                doc.default_profile = doc.compatibility_default_profile();
+            }
+            None => {
+                doc.default_profiles.remove(agent_type);
+                doc.default_profile = doc.compatibility_default_profile();
+            }
+        }
+        let validation = validate_document(&doc);
+        if !validation.ok {
+            return Err(anyhow!("invalid default profile: {:?}", validation.errors));
+        }
+        self.store.save_atomic_unlocked(&doc).await?;
         Ok(doc)
     }
 
     pub fn validate_profile(&self, profile: &AgentProfile) -> ProfileValidationResult {
-        validate_profiles(None, std::slice::from_ref(profile))
+        validate_profiles(None, &BTreeMap::new(), std::slice::from_ref(profile))
     }
 
     pub async fn validate_existing(&self, id: &str) -> Result<ProfileValidationResult> {
@@ -335,7 +452,26 @@ impl AgentProfileService {
         let mut timeout_secs = None;
         let mut recovery_strategy = RecoveryStrategy::default();
 
-        if let Some(default_id) = doc.default_profile.as_deref() {
+        let specified_profile = match specified_profile_id {
+            Some(profile_id) => Some(
+                find_enabled_profile(&doc, profile_id)?
+                    .ok_or_else(|| anyhow!("specified profile is not enabled: {profile_id}"))?,
+            ),
+            None => None,
+        };
+        // A selected Profile provides the Agent type needed to resolve its scoped
+        // default. With no selection, retain the legacy global fallback; when a
+        // single scoped default exists it is also unambiguous to apply.
+        let default_id = if let Some(profile) = specified_profile {
+            doc.default_profile_for_agent(&profile.agent_type)
+        } else if doc.default_profiles.is_empty() {
+            doc.default_profile.as_deref()
+        } else if doc.default_profiles.len() == 1 {
+            doc.default_profiles.values().next().map(String::as_str)
+        } else {
+            None
+        };
+        if let Some(default_id) = default_id {
             if let Some(default_profile) = find_enabled_profile(&doc, default_id)? {
                 apply_profile(
                     &mut config,
@@ -349,10 +485,8 @@ impl AgentProfileService {
             }
         }
 
-        if let Some(profile_id) = specified_profile_id {
-            let Some(profile) = find_enabled_profile(&doc, profile_id)? else {
-                return Err(anyhow!("specified profile is not enabled: {profile_id}"));
-            };
+        if let Some(profile) = specified_profile {
+            let profile_id = &profile.id;
             apply_profile(
                 &mut config,
                 &mut config_options,
@@ -415,13 +549,15 @@ impl AgentProfileService {
                     .filter(|profile| profile.agent_type == agent_type)
                     .collect();
                 AgentSummary {
+                    default_profile: doc
+                        .default_profile_for_agent(&agent_type)
+                        .map(str::to_string),
                     agent_type,
                     profile_count: profiles.len(),
                     enabled_profile_count: profiles
                         .iter()
                         .filter(|profile| profile.enabled)
                         .count(),
-                    default_profile: doc.default_profile.clone(),
                 }
             })
             .collect())
@@ -544,11 +680,16 @@ impl AgentCapabilityResolver {
 }
 
 pub fn validate_document(document: &AgentProfileDocument) -> ProfileValidationResult {
-    validate_profiles(document.default_profile.as_deref(), &document.profiles)
+    validate_profiles(
+        document.default_profile.as_deref(),
+        &document.default_profiles,
+        &document.profiles,
+    )
 }
 
 fn validate_profiles(
     default_profile: Option<&str>,
+    default_profiles: &BTreeMap<String, String>,
     profiles: &[AgentProfile],
 ) -> ProfileValidationResult {
     let mut errors = Vec::new();
@@ -597,6 +738,13 @@ fn validate_profiles(
                 format!("{base}.agent_type"),
                 "required",
                 "agent type is required",
+            );
+        } else if !is_safe_profile_agent_type(&profile.agent_type) {
+            push_error(
+                &mut errors,
+                format!("{base}.agent_type"),
+                "invalid_agent_type",
+                "agent type may contain only ascii letters, numbers, dash, or underscore",
             );
         }
         if profile
@@ -703,6 +851,30 @@ fn validate_profiles(
         }
     }
 
+    for (agent_type, default_id) in default_profiles {
+        match profiles.iter().find(|profile| profile.id == *default_id) {
+            Some(profile) if !profile.enabled => push_error(
+                &mut errors,
+                format!("default_profiles.{agent_type}"),
+                "default_disabled",
+                "default profile must be enabled",
+            ),
+            Some(profile) if profile.agent_type != *agent_type => push_error(
+                &mut errors,
+                format!("default_profiles.{agent_type}"),
+                "agent_mismatch",
+                "default profile must belong to its Agent type",
+            ),
+            Some(_) => {}
+            None => push_error(
+                &mut errors,
+                format!("default_profiles.{agent_type}"),
+                "default_missing",
+                "default profile must refer to an existing profile",
+            ),
+        }
+    }
+
     ProfileValidationResult {
         ok: errors.is_empty(),
         errors,
@@ -747,6 +919,7 @@ fn snapshot(profile: &AgentProfile) -> AgentProfileSnapshot {
         id: profile.id.clone(),
         name: profile.name.clone(),
         agent_type: profile.agent_type.clone(),
+        provider: profile.provider.clone(),
         updated_at: profile.updated_at,
     }
 }
@@ -873,11 +1046,18 @@ fn apply_startup_command(config: &mut AgentConfig, command: &str, args: &[String
     }
 }
 
+pub(crate) fn is_safe_profile_agent_type(agent_type: &str) -> bool {
+    agent_type
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn is_external_secret_ref(value: &str) -> bool {
+    if crate::provider::is_env_only_secret_ref(value) {
+        return true;
+    }
     let value = value.trim();
-    (value.starts_with("${") && value.ends_with('}'))
-        || value.starts_with("env://")
-        || value.starts_with("aws-sm://")
+    value.starts_with("aws-sm://")
         || value.starts_with("vault://")
         || value.starts_with("gcp-sm://")
         || value.starts_with("azure-kv://")
@@ -947,6 +1127,7 @@ fn sorted_pairs(map: &HashMap<String, String>) -> Vec<(&String, &String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn base_config() -> AgentConfig {
         AgentConfig {
@@ -967,7 +1148,7 @@ mod tests {
             .env_refs
             .insert("OPENAI_API_KEY".into(), "plain".into());
 
-        let result = validate_profiles(None, &[profile]);
+        let result = validate_profiles(None, &BTreeMap::new(), &[profile]);
 
         assert!(!result.ok);
         assert_eq!(result.errors[0].code, "plain_secret_rejected");
@@ -978,6 +1159,7 @@ mod tests {
         let doc = AgentProfileDocument {
             default_profile: Some("missing".into()),
             profiles: vec![AgentProfile::new("codex", "Codex", "codex")],
+            ..Default::default()
         };
 
         let result = validate_document(&doc);
@@ -1004,6 +1186,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: Some("default".into()),
                 profiles: vec![default, specified],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1039,6 +1222,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_independent_defaults_for_multiple_agent_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProfileStore::new(dir.path().join("profiles.toml"));
+        let codex = AgentProfile::new("codex-default", "Codex", "codex");
+        let claude = AgentProfile::new("claude-default", "Claude", "claude");
+        let service = AgentProfileService::new(store);
+        service.upsert(codex).await.unwrap();
+        service.upsert(claude).await.unwrap();
+        service
+            .set_default_for_agent("codex", Some("codex-default".into()))
+            .await
+            .unwrap();
+        let document = service
+            .set_default_for_agent("claude", Some("claude-default".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            document.default_profile_for_agent("codex"),
+            Some("codex-default")
+        );
+        assert_eq!(
+            document.default_profile_for_agent("claude"),
+            Some("claude-default")
+        );
+        assert_eq!(
+            service.list_agents().await.unwrap()[0].default_profile,
+            Some("claude-default".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_profile_upserts_do_not_lose_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(AgentProfileService::new(ProfileStore::new(
+            dir.path().join("profiles.toml"),
+        )));
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let service = service.clone();
+            tasks.push(tokio::spawn(async move {
+                service
+                    .upsert(AgentProfile::new(
+                        format!("profile-{index}"),
+                        format!("Profile {index}"),
+                        "codex",
+                    ))
+                    .await
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let document = service.list().await.unwrap();
+        assert_eq!(document.profiles.len(), 8);
+    }
+
+    #[tokio::test]
     async fn selected_non_default_agent_profile_uses_its_own_acp_command() {
         let dir = tempfile::tempdir().unwrap();
         let store = ProfileStore::new(dir.path().join("profiles.toml"));
@@ -1048,6 +1290,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: None,
                 profiles: vec![claude],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1087,6 +1330,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: None,
                 profiles: vec![claude],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1127,6 +1371,7 @@ mod tests {
             .save_atomic(&AgentProfileDocument {
                 default_profile: None,
                 profiles: vec![claude],
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1215,6 +1460,7 @@ mod tests {
         let resolver = AgentCapabilityResolver::new(AgentProfileDocument {
             default_profile: Some("codex".into()),
             profiles: vec![profile],
+            ..Default::default()
         });
 
         let schema = resolver.config_schema("codex");
