@@ -266,11 +266,7 @@ mod tests {
         assert_eq!(resolved.presentation.narration, Some(true));
         assert_eq!(
             resolved.applied_layers,
-            [
-                "platform:slack",
-                "workspace:T1",
-                "workspace:T1/channel:C1"
-            ]
+            ["platform:slack", "workspace:T1", "workspace:T1/channel:C1"]
         );
     }
 
@@ -286,10 +282,7 @@ mod tests {
             .resolve("discord", None, Some("C1"), &Default::default())
             .unwrap();
         assert_eq!(resolved.presentation.narration, Some(true));
-        assert_eq!(
-            resolved.applied_layers,
-            ["platform:discord", "channel:C1"]
-        );
+        assert_eq!(resolved.applied_layers, ["platform:discord", "channel:C1"]);
     }
 
     #[test]

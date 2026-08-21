@@ -701,8 +701,7 @@ mod tests {
             session_link_label: Some(String::new()),
             ..Default::default()
         };
-        let p =
-            PresentationPolicy::resolve(slack_like(), &reactions, TableMode::default(), &clear);
+        let p = PresentationPolicy::resolve(slack_like(), &reactions, TableMode::default(), &clear);
         assert_eq!(p.session_link_label.as_deref(), None);
     }
 

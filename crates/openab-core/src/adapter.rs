@@ -3086,11 +3086,7 @@ mod tests {
         assert_eq!(DeliveryMode::Chat.message_limit(4096), 4096);
         let long = "x".repeat(50_000);
         assert_eq!(
-            crate::format::split_message(
-                &long,
-                DeliveryMode::AppendOnly.message_limit(4096)
-            )
-            .len(),
+            crate::format::split_message(&long, DeliveryMode::AppendOnly.message_limit(4096)).len(),
             1
         );
     }

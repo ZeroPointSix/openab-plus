@@ -189,12 +189,7 @@ impl DispatchTarget for AdapterRouter {
         other_bot_present: bool,
     ) -> Result<crate::presentation::PresentationPolicy> {
         Ok(self
-            .presentation_resolution_for_channel(
-                adapter,
-                channel,
-                workspace_id,
-                other_bot_present,
-            )
+            .presentation_resolution_for_channel(adapter, channel, workspace_id, other_bot_present)
             .await?
             .effective)
     }

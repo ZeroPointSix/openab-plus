@@ -176,7 +176,9 @@ impl ConfigStore {
     }
 
     pub async fn rollback_available(&self) -> bool {
-        tokio::fs::try_exists(self.backup_path()).await.unwrap_or(false)
+        tokio::fs::try_exists(self.backup_path())
+            .await
+            .unwrap_or(false)
     }
 
     fn backup_path(&self) -> PathBuf {
@@ -346,7 +348,9 @@ where
         )
         .route(
             "/api/v1/config/validate",
-            post(move |headers, body| validate_config_handler(headers, body, validate_manager.clone())),
+            post(move |headers, body| {
+                validate_config_handler(headers, body, validate_manager.clone())
+            }),
         )
         .route(
             "/api/v1/config/reload",
@@ -628,9 +632,7 @@ fn contains_masked_secret_value(value: &Value, key: Option<&str>) -> bool {
         Value::Object(map) => map
             .iter()
             .any(|(k, v)| contains_masked_secret_value(v, Some(k))),
-        Value::Array(values) => values
-            .iter()
-            .any(|v| contains_masked_secret_value(v, key)),
+        Value::Array(values) => values.iter().any(|v| contains_masked_secret_value(v, key)),
         _ => false,
     }
 }
@@ -703,7 +705,9 @@ fn get_bool(value: &Value, path: &[&str]) -> Option<bool> {
 }
 
 fn get_array<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Vec<Value>> {
-    path.iter().try_fold(value, |v, key| v.get(*key))?.as_array()
+    path.iter()
+        .try_fold(value, |v, key| v.get(*key))?
+        .as_array()
 }
 
 fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -820,7 +824,8 @@ mod tests {
         let loaded = store.load().await.unwrap();
         assert_eq!(loaded["line"]["webhook_path"], "/hook/line");
 
-        store.save_atomic(&json!({ "telegram": { "webhook_path": "/hook/tg" } }))
+        store
+            .save_atomic(&json!({ "telegram": { "webhook_path": "/hook/tg" } }))
             .await
             .unwrap();
         assert!(store.rollback_available().await);
@@ -920,10 +925,7 @@ mod tests {
                 "telegram.streaming"
             ]
         );
-        assert_eq!(
-            response.status.pending_restart,
-            vec!["line.webhook_path"]
-        );
+        assert_eq!(response.status.pending_restart, vec!["line.webhook_path"]);
         assert!(state.telegram_rich_messages().await);
         assert!(state.telegram_trusted_source_only().await);
         assert_eq!(

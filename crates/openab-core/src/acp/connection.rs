@@ -449,9 +449,7 @@ impl AcpConnection {
             "HOME",
             crate::cli_config::cli_home_dir()
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| {
-                    std::env::var("HOME").unwrap_or_else(|_| working_dir.into())
-                }),
+                .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| working_dir.into())),
         );
         cmd.env(
             "PATH",

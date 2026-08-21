@@ -96,7 +96,10 @@ impl UnifiedGatewayAdapter {
                 }
             }
             other => {
-                tracing::warn!(platform = other, "unified adapter: unknown platform, cannot route reply");
+                tracing::warn!(
+                    platform = other,
+                    "unified adapter: unknown platform, cannot route reply"
+                );
             }
         }
     }
@@ -144,8 +147,13 @@ impl ChatAdapter for UnifiedGatewayAdapter {
         self.dispatch_reply(&reply).await;
         Ok(MessageRef {
             channel: channel.clone(),
-            message_id: format!("unified_{:x}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            message_id: format!(
+                "unified_{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
         })
     }
 
@@ -201,8 +209,13 @@ impl ChatAdapter for UnifiedGatewayAdapter {
         self.dispatch_reply(&reply).await;
         Ok(MessageRef {
             channel: channel.clone(),
-            message_id: format!("unified_{:x}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()),
+            message_id: format!(
+                "unified_{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
         })
     }
 

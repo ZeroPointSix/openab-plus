@@ -73,7 +73,12 @@ fn unsupported_thinking(request: &ApplyRequest) -> Option<String> {
 
 fn owned_keys(request: &ApplyRequest) -> Result<BTreeMap<String, JsonValue>> {
     let mut owned = BTreeMap::new();
-    if let Some(model) = request.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         owned.insert("model".into(), JsonValue::String(model.to_string()));
     }
     if let Some(level) = request

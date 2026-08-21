@@ -2,10 +2,10 @@ pub mod adapters;
 pub mod agent_profile_admin;
 pub mod cli_config_admin;
 pub mod config_admin;
-pub mod provider_admin;
-pub mod session_admin;
 pub(crate) mod media;
+pub mod provider_admin;
 pub mod schema;
+pub mod session_admin;
 pub mod store;
 pub mod web_admin;
 pub mod workspace_admin;
@@ -210,7 +210,9 @@ impl AppState {
         #[cfg(feature = "acp")]
         let acp = adapters::acp_server::AcpConfig::from_env();
         #[cfg(feature = "acp")]
-        let acp_reply_registry = acp.as_ref().map(|_| adapters::acp_server::new_reply_registry());
+        let acp_reply_registry = acp
+            .as_ref()
+            .map(|_| adapters::acp_server::new_reply_registry());
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
