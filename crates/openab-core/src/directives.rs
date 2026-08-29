@@ -311,4 +311,33 @@ mod tests {
         assert!(err.contains("~/no_such_dir"));
         assert!(err.contains(&tmp.path().display().to_string()));
     }
+
+    #[test]
+    fn resolve_existing_user_workspace_still_ok() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("projects").join("app");
+        fs::create_dir_all(&ws).unwrap();
+        let aliases = HashMap::new();
+        let result = resolve_workspace(&format!("{}", ws.display()), &aliases, tmp.path()).unwrap();
+        assert_eq!(result, ws.canonicalize().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_symlink_escape_outside_bot_home_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_dir = outside.path().join("secret");
+        fs::create_dir_all(&outside_dir).unwrap();
+
+        let link = tmp.path().join("escape");
+        symlink(&outside_dir, &link).unwrap();
+
+        let aliases = HashMap::new();
+        let result = resolve_workspace(&format!("{}", link.display()), &aliases, tmp.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("outside allowed directory"));
+    }
 }
