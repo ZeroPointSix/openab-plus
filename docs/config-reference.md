@@ -288,6 +288,17 @@ When `[[agents]]` is non-empty:
 
 **Command resolution (once at load):** `openab run --agent-command` > config explicit `command` > basename lookup under `[discover].paths` > PATH (`which`-style) fallback. Absolute paths are used as-is and are never overwritten by discover. Missing binaries do **not** fail load (unresolved state is retained for doctor / ZER-867); load only fails on structural errors (empty/duplicate id, bad `default_agent`, empty command, exec-as-default).
 
+### `openab doctor` (ZER-867)
+
+OpenAB is a control plane only — it does **not** provision agent CLIs or pull container images. Use `openab doctor` / `openab doctor -c path` to load the same config parse path as `run` (without starting Discord/Slack or spawning ACP) and print a human-readable checklist:
+
+- each enabled `[[agents]]` entry (or legacy `[agent]` when the catalog is empty): non-empty `command`, resolved path exists + executable, `protocol=exec` → hard FAIL, PATH fallback → WARN
+- `HOME` / `USERPROFILE`, non-empty `PATH`, `git` on PATH (worktrees / ZER-865)
+- `[worktree]` when present (skipped with WARN if the field is not wired yet)
+- writable/creatable `~/.claude` and `~/.codex` via `cli_config::cli_home_dir()` (`OPENAB_TEST_HOME` respected); never prints token / cookie / API key values
+
+Exit code `0` when every hard check passes (warnings allowed); `1` on any hard failure (CI-friendly). Prefer absolute `command` paths or `[discover].paths` over PATH.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `default_agent` | string | first enabled `[[agents]]` id | Top-level preferred default when the catalog is non-empty. |

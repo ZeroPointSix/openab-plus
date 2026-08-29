@@ -160,7 +160,9 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # When non-empty, the default named agent is synthesized into [agent] for SessionPool.
 # Command resolution (load-time, once): --agent-command > explicit command >
 # [discover].paths basename lookup > PATH fallback. Missing binaries do not fail
-# load (doctor reports later); absolute paths are never overwritten by discover.
+# load; run `openab doctor` (ZER-867) to check that each command exists and is
+# executable — OpenAB never silently pulls images or installs CLIs.
+# Absolute paths are never overwritten by discover.
 # default_agent = "claude"
 # [discover]
 # paths = ["/usr/local/bin", "/opt/homebrew/bin"]

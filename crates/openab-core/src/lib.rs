@@ -9,6 +9,7 @@ pub mod config;
 pub mod cron;
 pub mod directives;
 pub mod dispatch;
+pub mod doctor;
 pub mod error_display;
 #[cfg(feature = "filestore")]
 pub mod filestore;

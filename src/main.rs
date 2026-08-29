@@ -117,6 +117,12 @@ enum Commands {
         #[arg(long)]
         thread: Option<String>,
     },
+    /// Check environment / agent commands without starting the bot (ZER-867)
+    Doctor {
+        /// Config file (default config.toml)
+        #[arg(short = 'c', long = "config")]
+        config: Option<String>,
+    },
 }
 
 #[cfg(any(
@@ -282,6 +288,40 @@ fn platform_trust_override(
     }
 }
 
+/// Load config and print doctor checklist (no bot / no agent spawn).
+async fn run_doctor_cmd(config: Option<String>) -> anyhow::Result<()> {
+    let config_source = config.unwrap_or_else(|| "config.toml".into());
+    let raw_expanded = config::load_config_raw_from_source(&config_source).await?;
+    // Same parse path as `run`, without secret resolution / adapter start.
+    let cfg = config::parse_config_str(&raw_expanded, &config_source)?;
+    let report = openab_core::doctor::run_doctor(&cfg);
+
+    println!("openab doctor — {}", config_source);
+    println!();
+    for check in &report.checks {
+        println!(
+            "[{}] {} — {}",
+            check.status_label(),
+            check.name,
+            check.message
+        );
+    }
+    println!();
+    if report.overall_ok() {
+        let warns = report.checks.iter().filter(|c| c.warn).count();
+        if warns > 0 {
+            println!("Overall: OK with {warns} warning(s)");
+        } else {
+            println!("Overall: OK");
+        }
+        Ok(())
+    } else {
+        let fails = report.checks.iter().filter(|c| !c.ok).count();
+        eprintln!("Overall: FAIL ({fails} hard check(s) failed)");
+        std::process::exit(1);
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -340,6 +380,9 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             return Ok(());
+        }
+        Commands::Doctor { config } => {
+            return run_doctor_cmd(config).await;
         }
         Commands::Run {
             config,
@@ -1594,7 +1637,13 @@ mod tests {
     fn cli_run_no_args_defaults_config() {
         let cli = Cli::try_parse_from(["openab", "run"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert!(config.is_none()),
+            Commands::Run {
+                config,
+                agent_command,
+            } => {
+                assert!(config.is_none());
+                assert!(agent_command.is_none());
+            }
             _ => panic!("expected Run"),
         }
     }
@@ -1603,7 +1652,7 @@ mod tests {
     fn cli_run_with_short_flag_local() {
         let cli = Cli::try_parse_from(["openab", "run", "-c", "my-config.toml"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            Commands::Run { config, .. } => assert_eq!(config.unwrap(), "my-config.toml"),
             _ => panic!("expected Run"),
         }
     }
@@ -1612,7 +1661,7 @@ mod tests {
     fn cli_run_with_long_flag_local() {
         let cli = Cli::try_parse_from(["openab", "run", "--config", "my-config.toml"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            Commands::Run { config, .. } => assert_eq!(config.unwrap(), "my-config.toml"),
             _ => panic!("expected Run"),
         }
     }
@@ -1622,7 +1671,7 @@ mod tests {
         let cli = Cli::try_parse_from(["openab", "run", "-c", "https://example.com/config.toml"])
             .unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert!(config.unwrap().starts_with("https://")),
+            Commands::Run { config, .. } => assert!(config.unwrap().starts_with("https://")),
             _ => panic!("expected Run"),
         }
     }
@@ -1631,6 +1680,20 @@ mod tests {
     fn cli_setup_subcommand() {
         let cli = Cli::try_parse_from(["openab", "setup"]).unwrap();
         assert!(matches!(cli.command.unwrap(), Commands::Setup { .. }));
+    }
+
+    #[test]
+    fn cli_doctor_subcommand() {
+        let cli = Cli::try_parse_from(["openab", "doctor"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Doctor { config } => assert!(config.is_none()),
+            _ => panic!("expected Doctor"),
+        }
+        let cli = Cli::try_parse_from(["openab", "doctor", "-c", "my-config.toml"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Doctor { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            _ => panic!("expected Doctor"),
+        }
     }
 
     #[cfg(any(
