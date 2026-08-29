@@ -1,0 +1,78 @@
+# openab daemon — systemd unit template (ZER-707 / ZER-869)
+#
+# Install:
+#   sudo install -m 0644 deploy/systemd/openab.service /etc/systemd/system/openab.service
+#   sudo install -m 0600 deploy/systemd/openab.env.example /etc/openab/openab.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now openab
+#
+# Design notes (do not "simplify" these away):
+#
+#  * HOME is pinned to the REAL home directory of the service user. Agent CLIs
+#    locate their own OAuth / login state under $HOME (~/.claude, ~/.codex,
+#    ~/.config/gh). openab deliberately preserves the host HOME when it spawns
+#    an agent, so overriding HOME here would break agent authentication.
+#    Per-session isolation is done with OPENAB_* / per-CLI config-dir variables,
+#    never by rewriting HOME.
+#
+#  * PATH is written explicitly. A systemd service does NOT inherit a login
+#    shell PATH, so version-manager install locations (nvm / bun / cargo /
+#    ~/.local/bin) are invisible unless listed here. This is the single most
+#    common cause of "works in my shell, fails under systemd".
+#
+#  * KillMode=control-group is required. openab puts each spawned agent in its
+#    own process group (setpgid) and kills that group on drop. If systemd only
+#    signals the main process, agent subtrees survive as orphans on a hard stop.
+
+[Unit]
+Description=openab agent broker (local daemon)
+Documentation=https://github.com/ZeroPointSix/openab-plus
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+
+# --- environment -----------------------------------------------------------
+# Secrets and tokens belong in the EnvironmentFile (mode 0600), never inline.
+EnvironmentFile=-/etc/openab/openab.env
+
+# Real HOME of the service user. See design notes above.
+Environment=HOME=/root
+
+# Explicit PATH. Add version-manager bin dirs where your agent CLIs live.
+Environment=PATH=/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# openab's own state and work roots, kept off HOME and separate from each other.
+Environment=OPENAB_HOME=/var/lib/openab
+Environment=OPENAB_WORK_DIR=/var/lib/openab/worktrees
+Environment=OPENAB_LOG_DIR=/var/log/openab
+
+# Keep temp traffic off the root filesystem.
+Environment=TMPDIR=/var/tmp/openab
+Environment=TEMP=/var/tmp/openab
+Environment=TMP=/var/tmp/openab
+
+Environment=RUST_LOG=openab=info
+
+# --- lifecycle -------------------------------------------------------------
+ExecStartPre=/bin/mkdir -p /var/lib/openab/worktrees /var/log/openab /var/tmp/openab
+ExecStart=/usr/local/bin/openab run --config /etc/openab/config.toml
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=6
+
+# Kill the whole cgroup so agent process subtrees cannot outlive the daemon.
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=openab
+
+[Install]
+WantedBy=multi-user.target
