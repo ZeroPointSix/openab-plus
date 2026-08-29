@@ -83,6 +83,16 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Check that this machine can actually run the configured agents.
+    ///
+    /// Reports every problem in one pass instead of stopping at the first, and
+    /// exits non-zero only on hard failures so install scripts and CI can gate
+    /// on it. Never installs anything.
+    Doctor {
+        /// Config file path or URL (default: config.toml)
+        #[arg(short = 'c', long = "config", value_name = "CONFIG")]
+        config: Option<String>,
+    },
     /// Internal: AgentCore WebSocket shell bridge (ACP↔WebSocket)
     #[cfg(feature = "agentcore")]
     AgentcoreBridge {
@@ -336,6 +346,23 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             return Ok(());
+        }
+        Commands::Doctor { config } => {
+            let source = config.unwrap_or_else(|| "config.toml".into());
+            // Load leniently: a broken document must still yield a report, so
+            // the read error becomes a check rather than an early return.
+            let (config_text, config_error) =
+                match config::load_config_raw_from_source(&source).await {
+                    Ok(text) => (Some(text), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
+            let report = openab_core::doctor::run(&openab_core::doctor::DoctorInput {
+                config_text,
+                config_source: source,
+                config_error,
+            });
+            print!("{}", report.render());
+            std::process::exit(report.exit_code());
         }
         Commands::Run { config } => config,
     };
