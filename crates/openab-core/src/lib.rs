@@ -28,6 +28,7 @@ pub mod reactions;
 pub mod remind;
 pub mod secrets;
 pub mod session_event;
+pub mod session_isolation;
 pub mod session_snapshot;
 pub mod setup;
 pub mod stt;
