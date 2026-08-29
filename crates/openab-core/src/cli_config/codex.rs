@@ -4,7 +4,7 @@ use super::atomic::{
 use super::home::codex_config_path;
 use super::merge::{merge_toml_owned_keys, FieldChange};
 use super::thinking::{codex_effort_value, is_supported};
-use super::{ApplyRequest, DryRunFile, DryRunReport};
+use super::{ApplyRequest, DryRunFile, DryRunReport, EffectiveOn};
 use anyhow::{anyhow, Result};
 use std::collections::BTreeMap;
 
@@ -19,6 +19,7 @@ pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
     let (_merged, changes) = merge_toml_owned_keys(&existing, &owned)?;
     Ok(DryRunReport {
         agent_type: "codex".into(),
+        effective_on: EffectiveOn::NewSession,
         unsupported_thinking: unsupported_thinking(request),
         files: vec![DryRunFile {
             path: path.display().to_string(),
@@ -42,6 +43,7 @@ pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
     atomic_write_private(&path, merged).await?;
     Ok(DryRunReport {
         agent_type: "codex".into(),
+        effective_on: EffectiveOn::NewSession,
         unsupported_thinking: unsupported_thinking(request),
         files: vec![DryRunFile {
             path: path.display().to_string(),

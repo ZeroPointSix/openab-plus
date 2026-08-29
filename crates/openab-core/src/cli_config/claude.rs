@@ -4,7 +4,7 @@ use super::atomic::{
 use super::home::claude_settings_path;
 use super::merge::{merge_json_owned_keys, redact_sensitive_field_changes};
 use super::thinking::{claude_effort_value, is_supported};
-use super::{ApplyRequest, DryRunFile, DryRunReport};
+use super::{ApplyRequest, DryRunFile, DryRunReport, EffectiveOn};
 use anyhow::{anyhow, Result};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -21,6 +21,7 @@ pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
     redact_sensitive_field_changes(&mut changes);
     Ok(DryRunReport {
         agent_type: "claude".into(),
+        effective_on: EffectiveOn::NewSession,
         unsupported_thinking: unsupported_thinking(request),
         files: vec![DryRunFile {
             path: path.display().to_string(),
@@ -44,6 +45,7 @@ pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
     atomic_write_private(&path, merged).await?;
     Ok(DryRunReport {
         agent_type: "claude".into(),
+        effective_on: EffectiveOn::NewSession,
         unsupported_thinking: unsupported_thinking(request),
         files: vec![DryRunFile {
             path: path.display().to_string(),

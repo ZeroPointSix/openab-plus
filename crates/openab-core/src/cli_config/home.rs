@@ -23,11 +23,18 @@ pub fn claude_settings_path() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+pub(crate) fn test_home_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_home_override() {
+        let _guard = test_home_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("OPENAB_TEST_HOME", dir.path());
         assert_eq!(cli_home_dir().unwrap(), dir.path());

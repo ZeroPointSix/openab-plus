@@ -312,6 +312,7 @@ impl SessionPool {
                         request.base_url = Some(base_url.to_string());
                     }
                 }
+                // Native CLI files only; already-running sessions are not hot-reloaded.
                 crate::cli_config::apply_unlocked(&request).await?;
                 // File renderer owns model/thinking for codex/claude.
                 resolved.config_options.remove("model");
@@ -353,7 +354,8 @@ impl SessionPool {
             .await;
 
         // Hold the per-agent apply lock through spawn so concurrent sessions cannot
-        // interleave CLI file writes with process start.
+        // interleave CLI file writes with process start. New sessions then read the
+        // files written above; live processes are not notified.
         let result = pool.get_or_create(thread_id, working_dir_override).await;
         match result {
             Ok(outcome) => {

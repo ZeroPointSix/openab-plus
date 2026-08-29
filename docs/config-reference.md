@@ -293,6 +293,16 @@ The AI agent subprocess that OpenAB spawns to handle messages via ACP.
 
 > **Default inherited vars:** After `env_clear()`, the agent always receives `HOME`, `PATH`, and `USER` (on Windows: `USERPROFILE`, `USERNAME`, `PATH`, `SystemRoot`, `SystemDrive`). Use `inherit_env` to pass additional vars beyond this baseline.
 
+### Native CLI config (profile → vendor files)
+
+When a session profile targets Claude or Codex, OpenAB may merge model /
+thinking / provider fields into that CLI's own config file **before** spawn,
+under a per-`agent_type` lock. Writes are **effective for newly created
+sessions only** — live ACP processes are not hot-reloaded, and OpenAB does not
+silently pull images. See [cli-native-config.md](cli-native-config.md).
+Concurrent profile overwrites of the shared vendor paths are addressed in
+ZER-888.
+
 ### Authentication
 
 Each image sets `OPENAB_AGENT_AUTH_COMMAND` with the correct auth command. To authenticate any agent:
