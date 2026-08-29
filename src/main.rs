@@ -76,6 +76,9 @@ enum Commands {
         /// Config file path or URL — local path, https://, http://, or s3://<bucket>/<key> (default: config.toml)
         #[arg(short = 'c', long = "config", value_name = "CONFIG")]
         config: Option<String>,
+        /// Override the default agent's command (highest priority; Factory-style explicit path)
+        #[arg(long = "agent-command", value_name = "COMMAND")]
+        agent_command: Option<String>,
     },
     /// Launch the interactive setup wizard
     Setup {
@@ -288,11 +291,12 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cmd = Cli::parse()
-        .command
-        .unwrap_or(Commands::Run { config: None });
+    let cmd = Cli::parse().command.unwrap_or(Commands::Run {
+        config: None,
+        agent_command: None,
+    });
 
-    let config_arg = match cmd {
+    let (config_arg, agent_command_override) = match cmd {
         Commands::Setup { output } => {
             setup::run_setup(output.map(PathBuf::from))?;
             return Ok(());
@@ -337,7 +341,10 @@ async fn main() -> anyhow::Result<()> {
             }
             return Ok(());
         }
-        Commands::Run { config } => config,
+        Commands::Run {
+            config,
+            agent_command,
+        } => (config, agent_command),
     };
 
     // -- Run path --
@@ -346,9 +353,15 @@ async fn main() -> anyhow::Result<()> {
     // First pass: load config (env vars expanded, secrets NOT resolved yet)
     let raw_expanded = config::load_config_raw_from_source(&config_source).await?;
 
-    let mut cfg = config::parse_config_str(&raw_expanded, &config_source)?;
+    let mut cfg = config::parse_config_str_with_agent_command(
+        &raw_expanded,
+        &config_source,
+        agent_command_override.as_deref(),
+    )?;
     info!(
         agent_cmd = %cfg.agent.command,
+        default_agent = ?cfg.resolved_default_agent,
+        named_agents = cfg.agents.len(),
         pool_max = cfg.pool.max_sessions,
         discord = cfg.discord.is_some(),
         slack = cfg.slack.is_some(),
@@ -391,7 +404,11 @@ async fn main() -> anyhow::Result<()> {
     if !cfg.secrets.refs.is_empty() {
         let resolved = secrets::resolve(&cfg.secrets).await?;
         let substituted = secrets::substitute(&raw_expanded, &resolved);
-        cfg = config::parse_config_str(&substituted, &config_source)?;
+        cfg = config::parse_config_str_with_agent_command(
+            &substituted,
+            &config_source,
+            agent_command_override.as_deref(),
+        )?;
     }
 
     // Resolve before adapter-specific config fields are moved into their

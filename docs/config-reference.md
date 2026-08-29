@@ -272,13 +272,60 @@ Full first-class Feishu/Lark section (config-first parity, #1377) — credential
 
 ---
 
+## `default_agent` / `[[agents]]` / `[discover]` (ZER-866a)
+
+Optional **named agent catalog**. When `[[agents]]` is absent or empty, OpenAB keeps the legacy singular `[agent]` behaviour below unchanged.
+
+When `[[agents]]` is non-empty:
+
+- each entry needs a non-empty unique `id`
+- at least one entry must have `enabled = true` (default `true`)
+- `default_agent` (top-level) must name an enabled entry; if omitted, the first enabled entry wins
+- the default named agent is **synthesized into `Config.agent`** (including `command_explicit = true`) so the existing session pool keeps working
+- `protocol = "acp"` (default) or `"exec"` (field reserved; selecting exec as the default agent fails load — first batch does not spawn droid/exec)
+- `profile` is accepted but not consumed in 866a
+- Discord / Slack / Gateway may set `default_agent` as a **reserved** field for 866b channel binding; 866a ignores it at runtime
+
+**Command resolution (once at load):** `openab run --agent-command` > config explicit `command` > basename lookup under `[discover].paths` > PATH (`which`-style) fallback. Absolute paths are used as-is and are never overwritten by discover. Missing binaries do **not** fail load (unresolved state is retained for doctor / ZER-867); load only fails on structural errors (empty/duplicate id, bad `default_agent`, empty command, exec-as-default).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `default_agent` | string | first enabled `[[agents]]` id | Top-level preferred default when the catalog is non-empty. |
+| `[[agents]].id` | string | required | Stable agent id (unique, non-empty). |
+| `[[agents]].enabled` | bool | `true` | Disabled entries cannot be selected as default. |
+| `[[agents]].protocol` | string | `"acp"` | `acp` or `exec` (exec not spawnable yet). |
+| `[[agents]].command` | string | from `$OPENAB_AGENT_COMMAND` / `"openab-agent"` | Binary or absolute path. |
+| `[[agents]].args` | string[] | same partial-override rule as `[agent]` | CLI args. |
+| `[[agents]].working_dir` / `env` / `inherit_env` / `images` | … | same as `[agent]` | Aligned with singular agent fields. |
+| `[[agents]].profile` | string | unset | Optional Agent Profile id (unused in 866a). |
+| `[discover].paths` | string[] | `[]` | Directories searched for basename commands before PATH. |
+
+```toml
+default_agent = "claude"
+
+[discover]
+paths = ["/usr/local/bin", "/opt/homebrew/bin"]
+
+[[agents]]
+id = "claude"
+enabled = true
+protocol = "acp"
+command = "/usr/local/bin/claude"
+args = ["acp"]
+profile = "claude-default"
+
+[[agents]]
+id = "codex"
+command = "codex-acp"
+```
+
 ## `[agent]`
 
 The AI agent subprocess that OpenAB spawns to handle messages via ACP.
 
-> **This entire section is optional.** If omitted, `command` and `args` default from `$OPENAB_AGENT_COMMAND` (e.g. `"opencode acp"` — first token is command, rest are args). Each Docker image sets this env var so you typically don't need an `[agent]` block unless you want to override `env` or `args`.
+> **This entire section is optional.** If omitted, `command` and `args` default from `$OPENAB_AGENT_COMMAND` (e.g. `"opencode acp"` — first token is command, rest are args). Each Docker image sets this env var so you typically don't need an `[agent]` block unless you want to override `env` or `args`. When `[[agents]]` is non-empty, this block is overwritten at load by the synthesized default named agent.
 
-**Resolution priority:** config `[agent].command`/`args` > `$OPENAB_AGENT_COMMAND` > `"openab-agent"`
+**Resolution priority (legacy singular path):** `openab run --agent-command` > config `[agent].command`/`args` > `$OPENAB_AGENT_COMMAND` > `"openab-agent"`
 
 > **Partial override rule:** Setting `command` without `args` resets args to `[]`. This prevents a custom command from inheriting the env var's args. To keep env-var args with a custom command, set both fields explicitly.
 

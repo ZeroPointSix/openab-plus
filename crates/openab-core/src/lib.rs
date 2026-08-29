@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod adapter;
+pub mod agent_catalog;
 pub mod agent_profile;
 pub mod bot_turns;
 pub mod channel_profile;
