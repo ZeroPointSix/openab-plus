@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod adapter;
 pub mod agent_profile;
+pub mod agents;
 pub mod bot_turns;
 pub mod channel_profile;
 pub mod cli_config;
