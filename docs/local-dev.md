@@ -31,6 +31,14 @@ This is useful for containerized or multi-node deployments where config is hoste
 
 > **Security best practice:** Never hardcode secrets in remote config files. Use environment variable references like `bot_token = "${DISCORD_BOT_TOKEN}"` and inject the actual values via local environment variables or Kubernetes Secrets. OpenAB expands `${VAR}` identically for both local and remote config.
 
+## Host systemd binary
+
+For a trimmed host install (Discord + Slack, no AWS extras), see **[docs/systemd.md](systemd.md)**:
+
+```bash
+cargo build --release --no-default-features --features daemon
+```
+
 ## Build & Push
 
 ```bash

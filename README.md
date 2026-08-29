@@ -248,6 +248,10 @@ enabled = true                        # enable emoji status reactions
 remove_after_reply = false            # remove reactions after reply
 ```
 
+## Linux systemd (host binary)
+
+For a clean Linux host without Docker/K8s, build the trimmed daemon binary and install the unit template under [`packaging/systemd/`](packaging/systemd/). See **[docs/systemd.md](docs/systemd.md)** — real `HOME`, externalized `OPENAB_*` dirs, Discord+Slack only (`--no-default-features --features daemon`), Agent CLI not preinstalled.
+
 ## Kubernetes Deployment
 
 The Docker image bundles both `openab` and `kiro-cli` in a single container.

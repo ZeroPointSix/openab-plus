@@ -1,0 +1,61 @@
+# OpenAB systemd unit template (P0: Linux + systemd).
+# Modeled on Factory sgp-001, with KillMode + explicit PATH filled in.
+#
+# Deploy notes:
+# - Replace User=/Group=/Environment=HOME= with the real service account home.
+#   D2: HOME is the real login home — do NOT invent a per-session HOME.
+# - OPENAB_* state dirs are externalized under /var/lib|/var/log (not under HOME).
+# - This unit does not open inbound ports (no ListenStream=/Accept=).
+# - Default artifact is openab only; Agent CLIs are not preinstalled.
+
+[Unit]
+Description=OpenAB Agent Broker
+Documentation=https://github.com/ZeroPointSix/openab-plus/blob/main/docs/systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Prefer a dedicated system user in production. Template uses root for a
+# first-boot clean box; change User=/Group=/HOME together.
+User=root
+Group=root
+
+# Real login HOME for the service account (replace /root when not root).
+Environment=HOME=/root
+
+# Explicit PATH (Factory sgp-001 only shipped EnvironmentFile).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Externalized state / work / logs / temp (not under HOME).
+Environment=OPENAB_HOME=/var/lib/openab/home
+Environment=OPENAB_WORK_DIR=/var/lib/openab/work
+Environment=OPENAB_LOG_DIR=/var/log/openab
+Environment=TMPDIR=/var/lib/openab/tmp
+Environment=TEMP=/var/lib/openab/tmp
+Environment=TMP=/var/lib/openab/tmp
+
+# Parity with Factory FACTORY_DROID_AUTO_UPDATE_ENABLED=false.
+# Placeholder only: this binary does not auto-upgrade Agent CLIs or pull images.
+Environment=OPENAB_AUTO_UPDATE=false
+
+# Optional secrets/overrides. Leading `-` means missing file is not a failure.
+EnvironmentFile=-/etc/openab/openab.env
+
+WorkingDirectory=/var/lib/openab/work
+ExecStart=/usr/local/bin/openab run -c /etc/openab/config.toml
+
+# Optional watchdog stamp — inline shell only, no required external script.
+ExecStartPost=/bin/sh -c 'mkdir -p "${OPENAB_LOG_DIR}" && date -u +"%%Y-%%m-%%dT%%H:%%M:%%SZ" > "${OPENAB_LOG_DIR}/watchdog.stamp"'
+
+# Agent children use independent process groups; control-group kill covers the
+# cgroup so a hard kill of the daemon does not leave orphan agent subtrees.
+KillMode=control-group
+TimeoutStopSec=90
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

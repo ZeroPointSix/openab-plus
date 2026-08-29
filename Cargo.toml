@@ -25,10 +25,18 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 
 [features]
 # Default: core only (Discord + Slack). Gateway ships as separate binary.
+# Intentionally unchanged for Docker/unified builds — do not fold `daemon` into default.
 default = ["discord", "slack", "secrets-aws", "agentcore", "config-s3", "pre-seed", "filestore"]
 
 # Opt-in: compile all gateway adapters into a single unified binary
 unified = ["telegram", "line", "feishu", "googlechat", "wecom", "teams", "acp"]
+
+# Opt-in host/systemd single binary (ZER-869 / D6). Not in default.
+# P0 channels only: Discord + Slack. Explicitly excludes agentcore, pre-seed,
+# config-s3, secrets-aws, filestore, unified, and all gateway adapters
+# (telegram/line/feishu/googlechat/wecom/teams/acp).
+# Build: cargo build --release --no-default-features --features daemon
+daemon = ["discord", "slack"]
 
 # Core adapters
 discord = ["dep:serenity", "openab-core/discord"]
