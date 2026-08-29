@@ -34,6 +34,7 @@ pub mod stt;
 pub mod timestamp;
 pub mod transcript;
 pub mod trust;
+pub mod worktree;
 
 #[cfg(feature = "discord")]
 pub mod ambient;

@@ -358,6 +358,20 @@ error_hold_ms = 2500
 # infra  = "~/projects/infra-cdk"
 # web    = "~/projects/frontend"
 
+# --- Per-session worktree isolation (ZER-865) ---
+# Opt-in: default is disabled so existing single-workdir deployments keep prior
+# behaviour. When enabled, each thread without a stored workdir or [[ws:]]
+# override gets a directory under `dir` (or $OPENAB_WORK_DIR):
+#   - base [agent].working_dir is a git repo → `git worktree add --detach … HEAD`
+#   - otherwise → plain mkdir (D4; do not require git)
+# Reuses an existing thread directory; does not delete dirty trees (D3 deferred).
+# Isolates the code workspace only — not HOME / credentials (see ZER-888).
+# Derived paths are NOT validated by directives::resolve_workspace (ZER-889).
+#
+# [worktree]
+# enabled = true
+# dir = "/var/lib/openab/worktrees"   # overridden by OPENAB_WORK_DIR when set
+
 # --- Pre-seed: download & extract S3 zip archives before pre_boot ---
 # Seeds the agent environment (configs, tools, memory) before any hook runs.
 # Archives are extracted in order — later layers overwrite earlier ones (like container layers).
