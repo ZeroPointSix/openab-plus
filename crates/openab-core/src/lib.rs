@@ -26,6 +26,7 @@ pub mod provider_store;
 pub mod reactions;
 #[cfg(feature = "discord")]
 pub mod remind;
+pub mod runtime;
 pub mod secrets;
 pub mod session_event;
 pub mod session_snapshot;

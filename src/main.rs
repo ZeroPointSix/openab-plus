@@ -1103,14 +1103,20 @@ async fn main() -> anyhow::Result<()> {
             // exposure is `true` whenever the adapter is configured.
             gw_state.warn_unenforceable_l1(true);
 
+            // Admin routers talk to ACP via RuntimeProvider so a future remote
+            // backend can plug in without rewiring every route. P0 still runs
+            // channels against the concrete SessionPool in-process.
+            let runtime: std::sync::Arc<dyn openab_core::runtime::RuntimeProvider> =
+                std::sync::Arc::new(openab_core::runtime::LocalRuntime::new(pool.clone()));
+
             // Build axum router with platform webhook routes
             let mut app = axum::Router::new()
                 .route("/health", axum::routing::get(|| async { "ok" }))
                 .merge(openab_gateway::web_admin::router())
-                .merge(openab_gateway::session_admin::router(pool.clone()))
+                .merge(openab_gateway::session_admin::router(runtime.clone()))
                 .merge(openab_gateway::agent_profile_admin::router_with_pool(
                     profile_service.clone(),
-                    pool.clone(),
+                    runtime,
                 ))
                 .merge(openab_gateway::provider_admin::router(
                     provider_store.clone(),

@@ -6,6 +6,7 @@ use openab_core::acp::SessionPool;
 use openab_core::agent_profile::AgentProfileService;
 use openab_core::config::AgentConfig;
 use openab_core::profile_store::ProfileStore;
+use openab_core::runtime::{LocalRuntime, RuntimeProvider};
 use openab_gateway::{agent_profile_admin, session_admin};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -96,10 +97,14 @@ pub fn unified_admin_router(
     pool: Arc<SessionPool>,
     profile_service: Arc<AgentProfileService>,
 ) -> Router {
+    let runtime: Arc<dyn RuntimeProvider> = Arc::new(LocalRuntime::new(pool));
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .merge(session_admin::router(pool.clone()))
-        .merge(agent_profile_admin::router_with_pool(profile_service, pool))
+        .merge(session_admin::router(runtime.clone()))
+        .merge(agent_profile_admin::router_with_pool(
+            profile_service,
+            runtime,
+        ))
 }
 
 pub async fn spawn_admin_server(env: &AdminTestEnv) -> TestServer {
