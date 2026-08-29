@@ -414,17 +414,20 @@ for line in sys.stdin:
         .as_str()
         .is_some_and(|id| id.starts_with("admin:")));
 
-    let codex_config = home_dir.path().join(".codex/config.toml");
+    // ZER-888: writers land under $OPENAB_HOME/cli/{agent}/{profile}/ (test home).
+    let codex_config = home_dir
+        .path()
+        .join("cli/codex/codex-overrides/config.toml");
     let codex_body = tokio::fs::read_to_string(&codex_config)
         .await
         .expect("codex config written before spawn");
     assert!(
         codex_body.contains("gpt-5"),
-        "expected profile model in ~/.codex/config.toml, got: {codex_body}"
+        "expected profile model in isolated CODEX_HOME config.toml, got: {codex_body}"
     );
     assert!(
         codex_body.contains("model_reasoning_effort") && codex_body.contains("high"),
-        "expected profile thinking in ~/.codex/config.toml, got: {codex_body}"
+        "expected profile thinking in isolated CODEX_HOME config.toml, got: {codex_body}"
     );
     let trace = std::fs::read_to_string(&log_path).expect("ACP trace log");
     let events: Vec<Value> = trace

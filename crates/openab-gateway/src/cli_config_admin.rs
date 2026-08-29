@@ -53,6 +53,7 @@ async fn dry_run(
     }
     let mut request = ApplyRequest {
         agent_type: agent,
+        profile_id: None,
         model: body.model,
         reasoning_effort: body.reasoning_effort,
         provider_id: body.provider_id.clone(),

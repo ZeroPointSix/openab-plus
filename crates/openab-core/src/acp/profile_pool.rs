@@ -246,7 +246,9 @@ impl SessionPool {
             .map(|profile| profile.agent_type.clone())
             .filter(|agent| crate::cli_config::supports_file_renderer(agent));
         let apply_lock = match renderer_agent.as_deref() {
-            Some(agent) => Some(crate::cli_config::lock_for(agent).await),
+            Some(agent) => Some(
+                crate::cli_config::lock_for_profile(agent, effective_profile_id.as_deref()).await,
+            ),
             None => None,
         };
         let _apply_guard = match apply_lock.as_ref() {
@@ -287,6 +289,7 @@ impl SessionPool {
                     configured_reasoning_effort(&resolved.config, &resolved.config_options);
                 let mut request = crate::cli_config::ApplyRequest {
                     agent_type: profile.agent_type.clone(),
+                    profile_id: Some(profile.id.clone()),
                     model,
                     reasoning_effort,
                     provider_id: profile.provider.clone(),
@@ -313,6 +316,13 @@ impl SessionPool {
                     }
                 }
                 crate::cli_config::apply_unlocked(&request).await?;
+                // Redirect the spawned CLI at the same isolated config root we
+                // just wrote. HOME stays real (set in AcpConnection::spawn).
+                for (key, value) in
+                    crate::cli_config::cli_isolation_env(&profile.agent_type, Some(&profile.id))?
+                {
+                    resolved.config.env.insert(key, value);
+                }
                 // File renderer owns model/thinking for codex/claude.
                 resolved.config_options.remove("model");
                 resolved.config_options.remove("reasoning_effort");

@@ -442,12 +442,13 @@ impl AcpConnection {
         // Clear inherited env to prevent credential leakage (e.g. DISCORD_BOT_TOKEN).
         // Only [agent].env values + essential baseline vars are passed through.
         cmd.env_clear();
-        // Preserve the real HOME so agents can find OAuth/auth files (~/.codex,
-        // ~/.claude, ~/.config/gh, etc.). working_dir is already set via
-        // current_dir() above and is not necessarily the user's home directory.
+        // D2 / ZER-888: keep process HOME as the real login home so OAuth/auth
+        // files under ~/.codex, ~/.claude, ~/.config/gh remain findable.
+        // Per-profile CLI settings are redirected via CLAUDE_CONFIG_DIR /
+        // CODEX_HOME injected into `env` by the profile pool — never by rewriting HOME.
         cmd.env(
             "HOME",
-            crate::cli_config::cli_home_dir()
+            crate::cli_config::real_home_dir()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_else(|_| working_dir.into())),
         );

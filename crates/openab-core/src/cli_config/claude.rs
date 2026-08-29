@@ -1,7 +1,7 @@
 use super::atomic::{
     atomic_write_private, ensure_openab_bak, openab_bak_path, restore_from_openab_bak,
 };
-use super::home::claude_settings_path;
+use super::home::{claude_settings_path_for, ensure_cli_config_dir};
 use super::merge::{merge_json_owned_keys, redact_sensitive_field_changes};
 use super::thinking::{claude_effort_value, is_supported};
 use super::{ApplyRequest, DryRunFile, DryRunReport};
@@ -10,7 +10,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 
 pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
-    let path = claude_settings_path()?;
+    let path = claude_settings_path_for(request.profile_id.as_deref())?;
     let existing = if path.exists() {
         std::fs::read_to_string(&path)?
     } else {
@@ -32,7 +32,9 @@ pub fn plan(request: &ApplyRequest) -> Result<DryRunReport> {
 }
 
 pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
-    let path = claude_settings_path()?;
+    // Ensure CLAUDE_CONFIG_DIR root exists before writing settings.json.
+    let _ = ensure_cli_config_dir("claude", request.profile_id.as_deref())?;
+    let path = claude_settings_path_for(request.profile_id.as_deref())?;
     let existing = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
         tokio::fs::read_to_string(&path).await?
     } else {
@@ -57,8 +59,8 @@ pub async fn apply(request: &ApplyRequest) -> Result<DryRunReport> {
     })
 }
 
-pub async fn restore() -> Result<bool> {
-    restore_from_openab_bak(&claude_settings_path()?).await
+pub async fn restore(profile_id: Option<&str>) -> Result<bool> {
+    restore_from_openab_bak(&claude_settings_path_for(profile_id)?).await
 }
 
 fn unsupported_thinking(request: &ApplyRequest) -> Option<String> {
