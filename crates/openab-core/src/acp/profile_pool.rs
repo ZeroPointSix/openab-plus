@@ -11,6 +11,7 @@ use crate::provider_store::ProviderStore;
 use crate::session_event::{SessionEventBus, SessionEventKind, SessionStreamBus};
 use crate::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
 use crate::transcript::SessionTranscriptStore;
+use crate::worktree::WorktreeConfig;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,6 +44,7 @@ pub struct SessionPool {
     max_sessions: usize,
     hung_threshold_secs: u64,
     default_config_options: HashMap<String, String>,
+    worktree: WorktreeConfig,
     profile_service: Arc<AgentProfileService>,
     provider_store: Arc<ProviderStore>,
     pools: RwLock<HashMap<String, PoolHandle>>,
@@ -67,11 +69,30 @@ impl SessionPool {
         hung_threshold_secs: u64,
         default_config_options: HashMap<String, String>,
     ) -> Self {
-        let system_pool = Arc::new(pool::SessionPool::new(
+        Self::new_with_worktree(
+            config,
+            max_sessions,
+            hung_threshold_secs,
+            default_config_options,
+            WorktreeConfig::default(),
+        )
+    }
+
+    pub fn new_with_worktree(
+        config: AgentConfig,
+        max_sessions: usize,
+        hung_threshold_secs: u64,
+        default_config_options: HashMap<String, String>,
+        worktree: WorktreeConfig,
+    ) -> Self {
+        let system_pool = Arc::new(pool::SessionPool::new_with_policy(
             clone_agent_config(&config),
             max_sessions,
             hung_threshold_secs,
             default_config_options.clone(),
+            None,
+            RecoveryStrategy::default(),
+            worktree.clone(),
         ));
         let mut pools = HashMap::new();
         pools.insert("system".to_string(), system_pool);
@@ -99,6 +120,7 @@ impl SessionPool {
             max_sessions,
             hung_threshold_secs,
             default_config_options,
+            worktree,
             profile_service: Arc::new(AgentProfileService::from_env()),
             provider_store: Arc::new(ProviderStore::from_env()),
             pools: RwLock::new(pools),
@@ -888,6 +910,7 @@ impl SessionPool {
                     config_options,
                     policy.timeout_secs,
                     policy.recovery_strategy.clone(),
+                    self.worktree.clone(),
                 ))
             })
             .clone()

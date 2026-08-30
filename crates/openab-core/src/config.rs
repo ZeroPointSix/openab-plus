@@ -217,6 +217,10 @@ pub struct Config {
     pub secrets: SecretsConfig,
     #[serde(default)]
     pub ambient: AmbientConfig,
+    /// Per-session git worktree / plain folder isolation (ZER-865).
+    /// Defaults to disabled so existing single-workdir deployments keep prior behaviour.
+    #[serde(default)]
+    pub worktree: crate::worktree::WorktreeConfig,
     /// Optional filestore configuration for uploading large text attachments.
     #[cfg(feature = "filestore")]
     pub filestore: Option<FilestoreConfig>,
@@ -3363,6 +3367,22 @@ command = "echo"
         write!(tmp, "{}", MINIMAL_TOML).unwrap();
         let cfg = load_config(tmp.path()).unwrap();
         assert_eq!(cfg.discord.unwrap().bot_token, "test-token");
+    }
+
+    #[test]
+    fn worktree_config_defaults_disabled() {
+        let cfg = parse_config(MINIMAL_TOML, "test").unwrap();
+        assert!(!cfg.worktree.enabled);
+        assert_eq!(cfg.worktree.dir, crate::worktree::DEFAULT_WORKTREE_DIR);
+    }
+
+    #[test]
+    fn worktree_config_parses_enabled_block() {
+        let toml =
+            format!("{MINIMAL_TOML}\n[worktree]\nenabled = true\ndir = \"/data/openab/work\"\n");
+        let cfg = parse_config(&toml, "test").unwrap();
+        assert!(cfg.worktree.enabled);
+        assert_eq!(cfg.worktree.dir, "/data/openab/work");
     }
 
     #[tokio::test]

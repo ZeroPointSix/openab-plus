@@ -725,6 +725,36 @@ web    = "~/projects/frontend"
 
 ---
 
+## `[worktree]`
+
+Per-session working-directory isolation (ZER-865). Opt-in; **default `enabled = false`** so existing single-workdir deployments keep previous behaviour.
+
+When `enabled = true`, and a thread has **no** stored workdir in `~/.openab/session_meta.json` and **no** user `[[ws:]]` override, OpenAB derives `dir / sanitize(thread_id)`:
+
+- If `[agent].working_dir` is a git repository → `git worktree add --detach <target> HEAD`
+- Otherwise → create a plain directory (D4; non-git bases are allowed)
+- If the target already exists → **reuse** it (D3: no dirty reclaim / delete in this release)
+
+`OPENAB_WORK_DIR` overrides `dir` when set and non-empty. The work root only holds session directories; do not mix pid/log files into it (use `OPENAB_LOG_DIR` for logs).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Master switch. |
+| `dir` | string | `"/var/lib/openab/worktrees"` | Root for per-thread directories; overridden by `$OPENAB_WORK_DIR`. |
+
+**Scope notes:**
+- Isolates the **code workspace**, not `HOME` or credentials (ZER-888).
+- Derived paths are **not** run through `directives::resolve_workspace` bot-home checks; that boundary work is ZER-889.
+- Dirty worktree garbage collection remains deferred (D3).
+
+```toml
+[worktree]
+enabled = true
+dir = "/var/lib/openab/worktrees"
+```
+
+---
+
 ## `[ambient]`
 
 Passive channel listening with batch flush. See [ambient.md](ambient.md) for full guide.
