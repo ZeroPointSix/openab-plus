@@ -431,14 +431,44 @@ async fn main() -> anyhow::Result<()> {
     let shutdown_hook = cfg.hooks.pre_shutdown.clone();
 
     let provider_store = Arc::new(openab_core::provider_store::ProviderStore::from_env());
+    let mut channel_bindings = std::collections::HashMap::new();
+    if let Some(id) = cfg
+        .discord
+        .as_ref()
+        .and_then(|c| c.default_agent.clone())
+        .filter(|s| !s.trim().is_empty())
+    {
+        channel_bindings.insert("discord".to_string(), id);
+    }
+    if let Some(id) = cfg
+        .slack
+        .as_ref()
+        .and_then(|c| c.default_agent.clone())
+        .filter(|s| !s.trim().is_empty())
+    {
+        channel_bindings.insert("slack".to_string(), id);
+    }
+    if let Some(id) = cfg
+        .gateway
+        .as_ref()
+        .and_then(|c| c.default_agent.clone())
+        .filter(|s| !s.trim().is_empty())
+    {
+        channel_bindings.insert("gateway".to_string(), id);
+    }
     let pool = Arc::new(
         acp::SessionPool::new(
-            cfg.agent,
+            cfg.agent.clone(),
             cfg.pool.max_sessions,
             cfg.pool
                 .prompt_hard_timeout_secs
                 .saturating_add(cfg.pool.hung_grace_secs),
-            cfg.pool.default_config_options,
+            cfg.pool.default_config_options.clone(),
+        )
+        .with_agent_catalog(
+            cfg.agents.clone(),
+            cfg.resolved_default_agent.clone(),
+            channel_bindings,
         )
         .with_provider_store(provider_store.clone()),
     );

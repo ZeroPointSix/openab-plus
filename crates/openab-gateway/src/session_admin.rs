@@ -168,7 +168,7 @@ async fn create_session(
     let session_id = format!("admin:{}", Uuid::new_v4());
     let overrides = request.overrides.into_profile_overrides();
     match pool
-        .get_or_create_with_profile(&session_id, None, Some(&profile_id), Some(&overrides))
+        .get_or_create_with_profile(&session_id, None, Some(&profile_id), Some(&overrides), None)
         .await
     {
         Ok(_) => match pool.session_snapshot(&session_id).await {

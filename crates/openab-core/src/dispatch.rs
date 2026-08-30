@@ -210,6 +210,8 @@ impl DispatchTarget for AdapterRouter {
         overrides: Option<&ProfileSessionOverrides>,
         source_permalink: Option<&str>,
     ) -> Result<bool> {
+        // session_key is `<platform>:<thread>`; peel platform for channel binding.
+        let platform = session_key.split_once(':').map(|(p, _)| p);
         self.pool()
             .get_or_create_with_profile_and_source(
                 session_key,
@@ -217,6 +219,7 @@ impl DispatchTarget for AdapterRouter {
                 profile_id,
                 overrides,
                 source_permalink,
+                platform,
             )
             .await
     }

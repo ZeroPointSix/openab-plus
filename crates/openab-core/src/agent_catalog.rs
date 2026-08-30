@@ -4,6 +4,10 @@
 //! behaviour. When non-empty, the catalog is validated and the default named
 //! agent is synthesized into `Config.agent` so `SessionPool::new(cfg.agent)`
 //! stays unchanged for ZER-866a.
+//!
+//! ZER-866b adds channel-level binding (`[discord|slack|gateway].default_agent`
+//! or `agent`) and `pool_key` helpers (`agent:ID` / `agent:ID+profile:…`) so
+//! runtime routing can pick a named agent without rewriting pool maps.
 
 use crate::config::{AgentConfig, ImageHandling};
 use serde::Deserialize;
@@ -232,6 +236,10 @@ pub fn validate_and_resolve_agents(
     for raw in raw_agents {
         let id = raw.id.trim().to_string();
         anyhow::ensure!(!id.is_empty(), "[[agents]] entry has empty id");
+        anyhow::ensure!(
+            !id.contains(':') && !id.contains('+'),
+            "[[agents]] id \"{id}\" must not contain ':' or '+' (reserved for pool keys)"
+        );
         anyhow::ensure!(seen.insert(id.clone()), "duplicate [[agents]] id \"{id}\"");
 
         let command_explicit = raw.command.is_some();
@@ -308,15 +316,96 @@ pub fn validate_and_resolve_agents(
     Ok(Some((agents, default_id)))
 }
 
-/// Error when the selected default agent uses an unimplemented protocol.
-pub fn ensure_default_protocol_supported(agent: &NamedAgent) -> anyhow::Result<()> {
+/// Error when a selected agent uses an unimplemented protocol.
+pub fn ensure_protocol_supported(agent: &NamedAgent) -> anyhow::Result<()> {
     match agent.protocol {
         AgentProtocol::Acp => Ok(()),
         AgentProtocol::Exec => anyhow::bail!(
-            "default agent \"{}\" uses protocol = \"exec\", which is not implemented yet \
-             (ZER-866a first batch does not spawn droid/exec); pick an acp agent or wait for a later PR",
+            "agent \"{}\" uses protocol = \"exec\", which is not implemented yet \
+             (ZER-866 does not spawn droid/exec); pick an acp agent or wait for a later PR",
             agent.id
         ),
+    }
+}
+
+/// Backward-compatible alias used by 866a call sites.
+pub fn ensure_default_protocol_supported(agent: &NamedAgent) -> anyhow::Result<()> {
+    ensure_protocol_supported(agent)
+}
+
+/// Look up an enabled named agent by id.
+pub fn find_enabled_agent<'a>(agents: &'a [NamedAgent], id: &str) -> Option<&'a NamedAgent> {
+    let id = id.trim();
+    agents.iter().find(|a| a.enabled && a.id == id)
+}
+
+/// Resolve which named agent handles traffic for a channel/platform.
+///
+/// Priority: non-empty channel binding → `default_agent` / first enabled id.
+/// Unknown or disabled ids are hard errors (no silent fallback).
+pub fn resolve_agent_for_channel<'a>(
+    agents: &'a [NamedAgent],
+    default_agent_id: Option<&str>,
+    channel_binding: Option<&str>,
+) -> anyhow::Result<&'a NamedAgent> {
+    anyhow::ensure!(
+        !agents.is_empty(),
+        "no named agents configured; cannot resolve channel binding"
+    );
+
+    let want = channel_binding
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| default_agent_id.map(str::trim).filter(|s| !s.is_empty()));
+
+    let Some(want) = want else {
+        // Catalog non-empty should always have a resolved default at load time.
+        let enabled = agents.iter().find(|a| a.enabled).ok_or_else(|| {
+            anyhow::anyhow!("[[agents]] is non-empty but no entry has enabled = true")
+        })?;
+        return Ok(enabled);
+    };
+
+    find_enabled_agent(agents, want).ok_or_else(|| {
+        anyhow::anyhow!("unknown or disabled agent id \"{want}\" (channel binding / default_agent)")
+    })
+}
+
+/// Validate channel→agent bindings against the catalog (enabled + protocol).
+pub fn validate_channel_bindings(
+    agents: &[NamedAgent],
+    bindings: &[(String, String)],
+) -> anyhow::Result<()> {
+    for (channel, agent_id) in bindings {
+        let agent_id = agent_id.trim();
+        anyhow::ensure!(
+            !agent_id.is_empty(),
+            "channel \"{channel}\" has an empty agent binding"
+        );
+        let agent = find_enabled_agent(agents, agent_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "channel \"{channel}\" default_agent \"{agent_id}\" does not match any enabled [[agents]] id"
+            )
+        })?;
+        ensure_protocol_supported(agent).map_err(|err| {
+            anyhow::anyhow!("channel \"{channel}\" binds to unsupported agent: {err}")
+        })?;
+    }
+    Ok(())
+}
+
+/// Build a pool key that reuses the existing string dimension.
+///
+/// - No profile / system default: `agent:<id>`
+/// - With a profile (or hashed) suffix: `agent:<id>+<suffix>`
+///
+/// `profile_pool_key` is the value produced by the Agent Profile layer
+/// (`system`, `system:<digest>`, `profile:<pid>:<digest>`, …). When it is
+/// empty/`system`, only the agent dimension is kept so maps stay sparse.
+pub fn agent_pool_key(agent_id: &str, profile_pool_key: Option<&str>) -> String {
+    match profile_pool_key.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("system") => format!("agent:{agent_id}"),
+        Some(suffix) => format!("agent:{agent_id}+{suffix}"),
     }
 }
 
@@ -471,5 +560,93 @@ mod tests {
         };
         let err = ensure_default_protocol_supported(&agent).unwrap_err();
         assert!(err.to_string().contains("not implemented"));
+
+        // Channel routing: unbound → default; discord binding overrides; unknown → error.
+        let abs_cmd = abs.to_string_lossy().into_owned();
+        let agents = vec![
+            NamedAgent {
+                id: "claude".into(),
+                enabled: true,
+                protocol: AgentProtocol::Acp,
+                command: abs_cmd.clone(),
+                resolved_command: abs_cmd.clone(),
+                command_resolved: true,
+                resolve_source: CommandResolveSource::ExplicitAbsolute,
+                command_explicit: true,
+                args: vec!["acp".into()],
+                working_dir: "/tmp".into(),
+                env: HashMap::new(),
+                inherit_env: vec![],
+                images: ImageHandling::default(),
+                profile: None,
+            },
+            NamedAgent {
+                id: "codex".into(),
+                enabled: true,
+                protocol: AgentProtocol::Acp,
+                command: abs_cmd.clone(),
+                resolved_command: abs_cmd,
+                command_resolved: true,
+                resolve_source: CommandResolveSource::ExplicitAbsolute,
+                command_explicit: true,
+                args: vec!["acp".into()],
+                working_dir: "/tmp".into(),
+                env: HashMap::new(),
+                inherit_env: vec![],
+                images: ImageHandling::default(),
+                profile: None,
+            },
+        ];
+        assert_eq!(
+            resolve_agent_for_channel(&agents, Some("claude"), None)
+                .unwrap()
+                .id,
+            "claude"
+        );
+        assert_eq!(
+            resolve_agent_for_channel(&agents, Some("claude"), Some("codex"))
+                .unwrap()
+                .id,
+            "codex"
+        );
+        let err = resolve_agent_for_channel(&agents, Some("claude"), Some("missing")).unwrap_err();
+        assert!(err.to_string().contains("unknown or disabled"));
+
+        validate_channel_bindings(&agents, &[("discord".into(), "codex".into())]).unwrap();
+        let err =
+            validate_channel_bindings(&agents, &[("discord".into(), "nope".into())]).unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+
+        let exec = NamedAgent {
+            id: "droid".into(),
+            enabled: true,
+            protocol: AgentProtocol::Exec,
+            command: "/bin/sh".into(),
+            resolved_command: "/bin/sh".into(),
+            command_resolved: true,
+            resolve_source: CommandResolveSource::ExplicitAbsolute,
+            command_explicit: true,
+            args: vec![],
+            working_dir: "/tmp".into(),
+            env: HashMap::new(),
+            inherit_env: vec![],
+            images: ImageHandling::default(),
+            profile: None,
+        };
+        let with_exec = {
+            let mut v = agents.clone();
+            v.push(exec);
+            v
+        };
+        let err = validate_channel_bindings(&with_exec, &[("discord".into(), "droid".into())])
+            .unwrap_err();
+        assert!(err.to_string().contains("exec"));
+
+        assert_eq!(agent_pool_key("claude", None), "agent:claude");
+        assert_eq!(agent_pool_key("claude", Some("system")), "agent:claude");
+        assert_eq!(
+            agent_pool_key("claude", Some("profile:p1:deadbeef")),
+            "agent:claude+profile:p1:deadbeef"
+        );
     }
 }

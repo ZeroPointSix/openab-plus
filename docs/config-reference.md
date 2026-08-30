@@ -272,32 +272,35 @@ Full first-class Feishu/Lark section (config-first parity, #1377) — credential
 
 ---
 
-## `default_agent` / `[[agents]]` / `[discover]` (ZER-866a)
+## `default_agent` / `[[agents]]` / `[discover]` (ZER-866)
 
 Optional **named agent catalog**. When `[[agents]]` is absent or empty, OpenAB keeps the legacy singular `[agent]` behaviour below unchanged.
 
 When `[[agents]]` is non-empty:
 
-- each entry needs a non-empty unique `id`
+- each entry needs a non-empty unique `id` (must not contain `:` or `+`; reserved for pool keys)
 - at least one entry must have `enabled = true` (default `true`)
 - `default_agent` (top-level) must name an enabled entry; if omitted, the first enabled entry wins
-- the default named agent is **synthesized into `Config.agent`** (including `command_explicit = true`) so the existing session pool keeps working
-- `protocol = "acp"` (default) or `"exec"` (field reserved; selecting exec as the default agent fails load — first batch does not spawn droid/exec)
-- `profile` is accepted but not consumed in 866a
-- Discord / Slack / Gateway may set `default_agent` as a **reserved** field for 866b channel binding; 866a ignores it at runtime
+- the default named agent is **synthesized into `Config.agent`** (including `command_explicit = true`) so `SessionPool::new(cfg.agent)` stays compatible
+- runtime routing (ZER-866b): inbound messages use the **channel binding** when set, otherwise the top-level default / first enabled
+- Discord / Slack / Gateway may set `default_agent` (alias `agent`) to bind that whole channel to a catalog id; unknown/disabled/exec bindings fail at load
+- pool keys gain an agent dimension: `agent:<id>` or `agent:<id>+profile:<…>` so existing `pool_for_key` / `thread_pools` maps stay untouched
+- `protocol = "acp"` (default) or `"exec"` (field reserved; selecting exec as default or channel binding fails — does not spawn)
+- `profile` is accepted but not consumed as a routing directive (no per-message `[[agent:ID]]`)
 
-**Command resolution (once at load):** `openab run --agent-command` > config explicit `command` > basename lookup under `[discover].paths` > PATH (`which`-style) fallback. Absolute paths are used as-is and are never overwritten by discover. Missing binaries do **not** fail load (unresolved state is retained for doctor / ZER-867); load only fails on structural errors (empty/duplicate id, bad `default_agent`, empty command, exec-as-default).
+**Command resolution (once at load):** `openab run --agent-command` > config explicit `command` > basename lookup under `[discover].paths` > PATH (`which`-style) fallback. Absolute paths are used as-is and are never overwritten by discover. Missing binaries do **not** fail load (unresolved state is retained for doctor / ZER-867); load only fails on structural errors (empty/duplicate id, bad `default_agent`, empty command, exec-as-default/binding).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `default_agent` | string | first enabled `[[agents]]` id | Top-level preferred default when the catalog is non-empty. |
-| `[[agents]].id` | string | required | Stable agent id (unique, non-empty). |
-| `[[agents]].enabled` | bool | `true` | Disabled entries cannot be selected as default. |
+| `[discord\|slack\|gateway].default_agent` / `agent` | string | unset (= use top-level default) | Channel→agent binding for 866b. |
+| `[[agents]].id` | string | required | Stable agent id (unique, non-empty; no `:`/`+`). |
+| `[[agents]].enabled` | bool | `true` | Disabled entries cannot be selected as default or channel binding. |
 | `[[agents]].protocol` | string | `"acp"` | `acp` or `exec` (exec not spawnable yet). |
 | `[[agents]].command` | string | from `$OPENAB_AGENT_COMMAND` / `"openab-agent"` | Binary or absolute path. |
 | `[[agents]].args` | string[] | same partial-override rule as `[agent]` | CLI args. |
 | `[[agents]].working_dir` / `env` / `inherit_env` / `images` | … | same as `[agent]` | Aligned with singular agent fields. |
-| `[[agents]].profile` | string | unset | Optional Agent Profile id (unused in 866a). |
+| `[[agents]].profile` | string | unset | Optional Agent Profile id (not a routing directive). |
 | `[discover].paths` | string[] | `[]` | Directories searched for basename commands before PATH. |
 
 ```toml
@@ -317,6 +320,9 @@ profile = "claude-default"
 [[agents]]
 id = "codex"
 command = "codex-acp"
+
+[discord]
+default_agent = "codex"   # or: agent = "codex"
 ```
 
 ## `[agent]`

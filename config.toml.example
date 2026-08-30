@@ -155,9 +155,12 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # runtime_arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"
 # cancel_strategy = "stop"       # "stop" (default) or "noop"
 
-# --- Named agents catalog (optional; ZER-866a) ---
+# --- Named agents catalog (optional; ZER-866) ---
 # When [[agents]] is empty/omitted, behaviour matches legacy singular [agent] below.
 # When non-empty, the default named agent is synthesized into [agent] for SessionPool.
+# Runtime routing (866b): channel default_agent/agent → top-level default_agent →
+# first enabled. Unknown/exec bindings fail at load. pool_key becomes agent:ID
+# (or agent:ID+profile:…). No per-message [[agent:ID]] directives.
 # Command resolution (load-time, once): --agent-command > explicit command >
 # [discover].paths basename lookup > PATH fallback. Missing binaries do not fail
 # load (doctor reports later); absolute paths are never overwritten by discover.
@@ -167,14 +170,14 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # [[agents]]
 # id = "claude"
 # enabled = true
-# protocol = "acp"          # acp | exec (exec reserved; cannot be default yet)
+# protocol = "acp"          # acp | exec (exec reserved; cannot be default/bound yet)
 # command = "/usr/local/bin/claude"
 # args = ["acp"]
-# profile = "claude-default"  # optional; not consumed in 866a
+# profile = "claude-default"  # optional; not a routing directive
 # [[agents]]
 # id = "codex"
 # command = "codex-acp"
-# # Channel sections may set default_agent = "..." as a reserved field for 866b.
+# # [discord] / [slack] / [gateway] may set default_agent = "codex" (alias: agent).
 
 [agent]
 command = "kiro-cli"

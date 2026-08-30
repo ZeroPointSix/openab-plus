@@ -877,6 +877,7 @@ impl AdapterRouter {
                 None,
                 profile_id.as_deref(),
                 profile_overrides.as_ref(),
+                Some(adapter.platform()),
             )
             .await
         {
