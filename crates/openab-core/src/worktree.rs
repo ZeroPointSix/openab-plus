@@ -4,6 +4,10 @@
 //! `[worktree].dir` (or `OPENAB_WORK_DIR`): a `git worktree` when the base
 //! workspace is a git repo, otherwise a plain folder (D4).
 //!
+//! Path sanitize and derived-root escape checks reuse [`crate::path_bounds`]
+//! (ZER-889) so daemon-derived worktrees and user `[[ws:]]` validation stay on
+//! one shared boundary implementation.
+//!
 //! Isolation is for the code workspace only — not HOME or credentials (ZER-888).
 //! Dirty worktree reclaim/delete is intentionally out of scope (D3).
 
@@ -11,6 +15,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use crate::path_bounds::{self, sanitize_thread_segment};
 
 /// Default root for per-session work directories when `[worktree].dir` is omitted.
 pub const DEFAULT_WORKTREE_DIR: &str = "/var/lib/openab/worktrees";
@@ -43,24 +49,12 @@ fn default_worktree_dir() -> String {
     DEFAULT_WORKTREE_DIR.to_string()
 }
 
-/// Keep only `[A-Za-z0-9._-]`; everything else becomes `_`.
-/// Empty results become `_` so the path segment is never blank.
+/// Sanitize a thread id into a single path segment.
+///
+/// Thin wrapper over [`path_bounds::sanitize_thread_segment`] so call sites and
+/// tests keep the ZER-865 name while sharing one implementation with ZER-889.
 pub fn sanitize_thread_id(thread_id: &str) -> String {
-    let sanitized: String = thread_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "_".to_string()
-    } else {
-        sanitized
-    }
+    sanitize_thread_segment(thread_id)
 }
 
 fn resolve_root(cfg: &WorktreeConfig) -> PathBuf {
@@ -86,42 +80,6 @@ pub fn is_git_repo(path: &Path) -> bool {
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
-}
-
-fn ensure_under_root(root: &Path, target: &Path) -> Result<()> {
-    let canonical_root = root
-        .canonicalize()
-        .with_context(|| format!("canonicalize worktree root {}", root.display()))?;
-    // Target may not exist yet; canonicalize parent + join leaf.
-    let canonical_target = if target.exists() {
-        target
-            .canonicalize()
-            .with_context(|| format!("canonicalize worktree path {}", target.display()))?
-    } else {
-        let parent = target
-            .parent()
-            .ok_or_else(|| anyhow!("worktree path has no parent: {}", target.display()))?;
-        let leaf = target
-            .file_name()
-            .ok_or_else(|| anyhow!("worktree path has no file name: {}", target.display()))?;
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create worktree parent {}", parent.display()))?;
-        }
-        parent
-            .canonicalize()
-            .with_context(|| format!("canonicalize worktree parent {}", parent.display()))?
-            .join(leaf)
-    };
-
-    if !canonical_target.starts_with(&canonical_root) {
-        bail!(
-            "derived worktree path {} escapes configured root {}",
-            canonical_target.display(),
-            canonical_root.display()
-        );
-    }
-    Ok(())
 }
 
 fn git_worktree_add(base: &Path, target: &Path) -> Result<()> {
@@ -165,18 +123,18 @@ fn git_worktree_add(base: &Path, target: &Path) -> Result<()> {
 /// Call only when worktree is enabled and there is no stored workdir and no
 /// user `working_dir_override`. On success the returned path is ready to use
 /// as the session cwd; the caller persists it via `session_workdirs`.
+///
+/// Path sanitize + root escape checks go through [`path_bounds::ensure_derived_dir`];
+/// non-git bases use [`path_bounds::ensure_plain_folder`] (D4). This never deletes
+/// existing trees (D3 out of scope) and never calls `AcpConnection::spawn`.
 pub fn ensure_session_workdir(
     cfg: &WorktreeConfig,
     base_working_dir: &str,
     thread_id: &str,
 ) -> Result<PathBuf> {
     let root = resolve_root(cfg);
-    std::fs::create_dir_all(&root)
-        .with_context(|| format!("create worktree root {}", root.display()))?;
-
-    let sanitized = sanitize_thread_id(thread_id);
-    let target = root.join(&sanitized);
-    ensure_under_root(&root, &target)?;
+    // Shared ZER-889 boundary: sanitize segment, create/writable root, refuse escape.
+    let target = path_bounds::ensure_derived_dir(&root, thread_id)?;
 
     if target.exists() {
         // D3: reuse existing directory; never delete or `git worktree remove`.
@@ -187,9 +145,8 @@ pub fn ensure_session_workdir(
     if is_git_repo(base) {
         git_worktree_add(base, &target)?;
     } else {
-        // D4: non-git base → plain folder, do not require git.
-        std::fs::create_dir_all(&target)
-            .with_context(|| format!("create session workdir {}", target.display()))?;
+        // D4: non-git base → plain folder via shared helper, do not require git.
+        path_bounds::ensure_plain_folder(&target)?;
     }
 
     Ok(target.canonicalize().unwrap_or(target))
@@ -246,6 +203,11 @@ mod tests {
         assert_eq!(sanitize_thread_id("thread:123"), "thread_123");
         assert_eq!(sanitize_thread_id("ok-._9"), "ok-._9");
         assert_eq!(sanitize_thread_id(""), "_");
+        // Same implementation as path_bounds.
+        assert_eq!(
+            sanitize_thread_id("../etc/passwd"),
+            path_bounds::sanitize_thread_segment("../etc/passwd")
+        );
     }
 
     #[test]
@@ -348,6 +310,32 @@ mod tests {
             path.file_name().and_then(|s| s.to_str()),
             Some(".._.._escape")
         );
+    }
+
+    #[test]
+    fn dotdot_thread_id_rejected_via_shared_path_bounds() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var(WORK_DIR_ENV);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("plain");
+        let work_root = tmp.path().join("work");
+        fs::create_dir_all(&base).unwrap();
+
+        let cfg = WorktreeConfig {
+            enabled: true,
+            dir: work_root.to_string_lossy().into_owned(),
+        };
+        // Sanitizer keeps literal `..`; shared ensure_derived_dir must refuse escape.
+        let err = ensure_session_workdir(&cfg, base.to_str().unwrap(), "..").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("escapes configured root"),
+            "expected shared path_bounds escape error, got: {msg}"
+        );
+        // Same failure mode as calling path_bounds directly.
+        let direct = path_bounds::ensure_derived_dir(&work_root, "..").unwrap_err();
+        assert!(format!("{direct:#}").contains("escapes configured root"));
     }
 
     #[test]
