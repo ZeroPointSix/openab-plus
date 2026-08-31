@@ -73,7 +73,9 @@ impl DoctorReport {
 /// Run all doctor checks against an already-parsed config.
 ///
 /// Does not load secrets content, spawn agents, or mutate the filesystem beyond
-/// optional write probes under CLI home dirs (`.claude` / `.codex`).
+/// optional write probes under CLI home dirs (`.claude` / `.codex`) and, when
+/// `[worktree] enabled=true`, under the resolved worktree root (`dir` /
+/// `OPENAB_WORK_DIR`).
 pub fn run_doctor(cfg: &Config) -> DoctorReport {
     let mut checks = Vec::new();
 
@@ -306,12 +308,35 @@ fn check_git(checks: &mut Vec<DoctorCheck>) {
 }
 
 fn check_worktree(cfg: &Config, checks: &mut Vec<DoctorCheck>) {
-    // ZER-865 worktree config is not on this branch yet — surface explicitly.
-    let _ = cfg;
-    checks.push(DoctorCheck::warn(
-        "worktree",
-        "worktree 配置未接入 — [worktree] checks will land with ZER-865; skipped for now",
-    ));
+    if !cfg.worktree.enabled {
+        checks.push(DoctorCheck::ok(
+            "worktree",
+            "[worktree] enabled=false — root writability check skipped",
+        ));
+        return;
+    }
+
+    let root = crate::worktree::resolve_worktree_root(&cfg.worktree);
+    let via_env = std::env::var(crate::worktree::WORK_DIR_ENV)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let source = if via_env {
+        format!("{}={}", crate::worktree::WORK_DIR_ENV, root.display())
+    } else {
+        format!("[worktree].dir={}", root.display())
+    };
+
+    let parent_hint = root.parent().unwrap_or(root.as_path());
+    match ensure_dir_writable(&root, parent_hint) {
+        Ok(()) => checks.push(DoctorCheck::ok(
+            "worktree",
+            format!("worktree root is writable ({source})"),
+        )),
+        Err(msg) => checks.push(DoctorCheck::fail(
+            "worktree",
+            format!("worktree root not writable ({source}): {msg}"),
+        )),
+    }
 }
 
 fn check_cli_homes(checks: &mut Vec<DoctorCheck>) {
@@ -527,9 +552,11 @@ mod tests {
         let saved_path = std::env::var_os("PATH");
         let saved_test_home = std::env::var_os("OPENAB_TEST_HOME");
         let saved_discord = std::env::var_os("DISCORD_BOT_TOKEN");
+        let saved_work_dir = std::env::var_os(crate::worktree::WORK_DIR_ENV);
 
         // Fake secret must never appear in doctor output/messages.
         std::env::set_var("DISCORD_BOT_TOKEN", "secret-token-should-never-leak");
+        std::env::remove_var(crate::worktree::WORK_DIR_ENV);
 
         let tmp = tempfile::tempdir().unwrap();
         let bin_dir = tmp.path().join("bin");
@@ -756,8 +783,12 @@ command = "{abs}"
             std::env::set_var("USERPROFILE", &test_home);
         }
 
-        // worktree not wired → WARN
+        // --- Scenario: [worktree] enabled=false / writable / OPENAB_WORK_DIR / unwritable ---
         {
+            let wt_root = tmp.path().join("wt-root");
+            fs::create_dir_all(&wt_root).unwrap();
+
+            // enabled=false → OK skip (no FAIL even if dir would be bad)
             let toml = format!(
                 r#"
 [discord]
@@ -765,19 +796,116 @@ bot_token = "t"
 [[agents]]
 id = "ok"
 command = "{abs}"
+[worktree]
+enabled = false
+dir = "/definitely/not/writable/openab-doctor"
 "#,
                 abs = good.display()
             );
             let cfg = parse_config_str(&toml, "test").unwrap();
             let report = run_doctor(&cfg);
             assert!(
-                report
-                    .checks
-                    .iter()
-                    .any(|c| c.name == "worktree" && c.warn && c.message.contains("未接入")),
-                "expected worktree WARN: {}",
+                report.checks.iter().any(|c| {
+                    c.name == "worktree" && c.ok && !c.warn && c.message.contains("enabled=false")
+                }),
+                "enabled=false must skip without FAIL: {}",
                 messages_joined(&report)
             );
+
+            // enabled=true + writable dir → OK
+            let toml = format!(
+                r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "ok"
+command = "{abs}"
+[worktree]
+enabled = true
+dir = "{dir}"
+"#,
+                abs = good.display(),
+                dir = wt_root.display()
+            );
+            let cfg = parse_config_str(&toml, "test").unwrap();
+            let report = run_doctor(&cfg);
+            assert!(
+                report.checks.iter().any(|c| {
+                    c.name == "worktree" && c.ok && !c.warn && c.message.contains("writable")
+                }),
+                "writable worktree root must OK: {}",
+                messages_joined(&report)
+            );
+
+            // OPENAB_WORK_DIR overrides [worktree].dir
+            let env_root = tmp.path().join("wt-from-env");
+            fs::create_dir_all(&env_root).unwrap();
+            std::env::set_var(crate::worktree::WORK_DIR_ENV, &env_root);
+            let toml = format!(
+                r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "ok"
+command = "{abs}"
+[worktree]
+enabled = true
+dir = "{dir}"
+"#,
+                abs = good.display(),
+                dir = wt_root.join("ignored-by-env").display()
+            );
+            let cfg = parse_config_str(&toml, "test").unwrap();
+            let report = run_doctor(&cfg);
+            assert!(
+                report.checks.iter().any(|c| {
+                    c.name == "worktree"
+                        && c.ok
+                        && c.message.contains(crate::worktree::WORK_DIR_ENV)
+                        && c.message.contains(&env_root.display().to_string())
+                }),
+                "OPENAB_WORK_DIR must win: {}",
+                messages_joined(&report)
+            );
+            std::env::remove_var(crate::worktree::WORK_DIR_ENV);
+
+            // enabled=true + unwritable root → FAIL
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let ro = tmp.path().join("wt-readonly");
+                fs::create_dir_all(&ro).unwrap();
+                let mut perms = fs::metadata(&ro).unwrap().permissions();
+                perms.set_mode(0o555);
+                fs::set_permissions(&ro, perms).unwrap();
+
+                let toml = format!(
+                    r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "ok"
+command = "{abs}"
+[worktree]
+enabled = true
+dir = "{dir}"
+"#,
+                    abs = good.display(),
+                    dir = ro.display()
+                );
+                let cfg = parse_config_str(&toml, "test").unwrap();
+                let report = run_doctor(&cfg);
+                assert!(
+                    report.checks.iter().any(|c| c.name == "worktree" && !c.ok),
+                    "unwritable worktree root must FAIL: {}",
+                    messages_joined(&report)
+                );
+
+                // restore perms so tempfile cleanup can remove the dir
+                let mut perms = fs::metadata(&ro).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&ro, perms).unwrap();
+            }
         }
 
         // Restore env
@@ -800,6 +928,10 @@ command = "{abs}"
         match saved_discord {
             Some(v) => std::env::set_var("DISCORD_BOT_TOKEN", v),
             None => std::env::remove_var("DISCORD_BOT_TOKEN"),
+        }
+        match saved_work_dir {
+            Some(v) => std::env::set_var(crate::worktree::WORK_DIR_ENV, v),
+            None => std::env::remove_var(crate::worktree::WORK_DIR_ENV),
         }
     }
 }

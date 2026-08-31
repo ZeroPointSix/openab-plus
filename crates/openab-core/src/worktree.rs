@@ -57,7 +57,8 @@ pub fn sanitize_thread_id(thread_id: &str) -> String {
     sanitize_thread_segment(thread_id)
 }
 
-fn resolve_root(cfg: &WorktreeConfig) -> PathBuf {
+/// Resolve the worktree root: non-empty `OPENAB_WORK_DIR` wins over `[worktree].dir`.
+pub fn resolve_worktree_root(cfg: &WorktreeConfig) -> PathBuf {
     if let Ok(env_dir) = std::env::var(WORK_DIR_ENV) {
         let trimmed = env_dir.trim();
         if !trimmed.is_empty() {
@@ -65,6 +66,10 @@ fn resolve_root(cfg: &WorktreeConfig) -> PathBuf {
         }
     }
     PathBuf::from(&cfg.dir)
+}
+
+fn resolve_root(cfg: &WorktreeConfig) -> PathBuf {
+    resolve_worktree_root(cfg)
 }
 
 /// True when `path` is inside a git work tree (file or directory `.git`, or
