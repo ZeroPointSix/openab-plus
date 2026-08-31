@@ -499,8 +499,9 @@ pub struct DiscordConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
-    /// Reserved for ZER-866b channel→agent binding. Ignored in 866a.
-    #[serde(default)]
+    /// Channel→agent binding (ZER-866b). Alias: `agent`.
+    /// When set, Discord traffic uses this catalog id instead of the top-level default.
+    #[serde(default, alias = "agent")]
     pub default_agent: Option<String>,
 }
 
@@ -596,8 +597,8 @@ pub struct SlackConfig {
     /// without a behavior-dependent migration.
     #[serde(default = "default_true")]
     pub streaming: bool,
-    /// Reserved for ZER-866b channel→agent binding. Ignored in 866a.
-    #[serde(default)]
+    /// Channel→agent binding (ZER-866b). Alias: `agent`.
+    #[serde(default, alias = "agent")]
     pub default_agent: Option<String>,
 }
 
@@ -659,8 +660,8 @@ pub struct GatewayConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
-    /// Reserved for ZER-866b channel→agent binding. Ignored in 866a.
-    #[serde(default)]
+    /// Channel→agent binding (ZER-866b). Alias: `agent`.
+    #[serde(default, alias = "agent")]
     pub default_agent: Option<String>,
 }
 
@@ -1496,7 +1497,7 @@ impl Default for AgentConfigRaw {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub command: String,
     pub args: Vec<String>,
@@ -2063,6 +2064,76 @@ async fn load_config_from_url(url: &str) -> anyhow::Result<Config> {
     parse_config(&raw, url)
 }
 
+/// Collect non-empty Discord/Slack/Gateway agent bindings for load-time validation.
+fn channel_agent_bindings(config: &Config) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let Some(id) = config
+        .discord
+        .as_ref()
+        .and_then(|c| c.default_agent.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push(("discord".into(), id.to_string()));
+    }
+    if let Some(id) = config
+        .slack
+        .as_ref()
+        .and_then(|c| c.default_agent.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push(("slack".into(), id.to_string()));
+    }
+    if let Some(id) = config
+        .gateway
+        .as_ref()
+        .and_then(|c| c.default_agent.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push(("gateway".into(), id.to_string()));
+    }
+    out
+}
+
+impl Config {
+    /// Binding configured for a platform adapter name (`discord` / `slack` / `gateway`).
+    pub fn channel_agent_binding(&self, platform: &str) -> Option<&str> {
+        match platform {
+            "discord" => self
+                .discord
+                .as_ref()
+                .and_then(|c| c.default_agent.as_deref()),
+            "slack" => self.slack.as_ref().and_then(|c| c.default_agent.as_deref()),
+            "gateway" => self
+                .gateway
+                .as_ref()
+                .and_then(|c| c.default_agent.as_deref()),
+            _ => None,
+        }
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    }
+
+    /// Resolve the named agent for a platform (channel binding → default).
+    ///
+    /// Returns `None` when the catalog is empty (legacy singular `[agent]`).
+    pub fn resolve_agent_for_platform(
+        &self,
+        platform: &str,
+    ) -> anyhow::Result<Option<&crate::agent_catalog::NamedAgent>> {
+        if self.agents.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(crate::agent_catalog::resolve_agent_for_channel(
+            &self.agents,
+            self.resolved_default_agent.as_deref(),
+            self.channel_agent_binding(platform),
+        )?))
+    }
+}
+
 fn parse_config_inner(
     expanded: &str,
     source: &str,
@@ -2107,6 +2178,8 @@ fn parse_config_inner(
         // Synthesize Config.agent so SessionPool::new(cfg.agent) needs no process-model change.
         config.agent = default_agent.to_agent_config();
         config.resolved_default_agent = Some(default_id);
+        // Channel bindings must name enabled, spawnable agents (ZER-866b).
+        crate::agent_catalog::validate_channel_bindings(&agents, &channel_agent_bindings(&config))?;
         config.agents = agents;
     } else if let Some(cli_cmd) = cli_agent_command.map(str::trim).filter(|s| !s.is_empty()) {
         // Legacy `[agent]` path: CLI overrides singular command only.
@@ -4022,15 +4095,23 @@ command = "{abs}"
         assert!(err.to_string().contains("exec"));
         assert!(err.to_string().contains("not implemented"));
 
-        // 9) Channel default_agent reserved field parses (ignored at runtime in 866a)
+        // 9) Channel default_agent / agent alias + load-time binding validation (866b)
         let cfg = parse_config(
             &format!(
                 r#"
+default_agent = "a"
 [discord]
 bot_token = "t"
-default_agent = "channel-a"
+default_agent = "b"
+[slack]
+bot_token = "t"
+app_token = "x"
+agent = "a"
 [[agents]]
 id = "a"
+command = "{abs}"
+[[agents]]
+id = "b"
 command = "{abs}"
 "#,
                 abs = abs.display()
@@ -4040,10 +4121,74 @@ command = "{abs}"
         .unwrap();
         assert_eq!(
             cfg.discord.as_ref().unwrap().default_agent.as_deref(),
-            Some("channel-a")
+            Some("b")
         );
-        // Top-level default unset → first enabled catalog agent.
+        assert_eq!(
+            cfg.slack.as_ref().unwrap().default_agent.as_deref(),
+            Some("a")
+        );
         assert_eq!(cfg.resolved_default_agent.as_deref(), Some("a"));
+        assert_eq!(
+            cfg.resolve_agent_for_platform("discord")
+                .unwrap()
+                .unwrap()
+                .id,
+            "b"
+        );
+        assert_eq!(
+            cfg.resolve_agent_for_platform("slack").unwrap().unwrap().id,
+            "a"
+        );
+        // Unbound platform → top-level default.
+        assert_eq!(
+            cfg.resolve_agent_for_platform("gateway")
+                .unwrap()
+                .unwrap()
+                .id,
+            "a"
+        );
+
+        // Unknown channel binding → parse error
+        let err = parse_config(
+            &format!(
+                r#"
+[discord]
+bot_token = "t"
+default_agent = "missing"
+[[agents]]
+id = "a"
+command = "{abs}"
+"#,
+                abs = abs.display()
+            ),
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("default_agent"));
+        assert!(err.to_string().contains("missing"));
+
+        // protocol=exec channel binding → parse error
+        let err = parse_config(
+            &format!(
+                r#"
+[discord]
+bot_token = "t"
+default_agent = "droid"
+[[agents]]
+id = "a"
+command = "{abs}"
+[[agents]]
+id = "droid"
+protocol = "exec"
+enabled = true
+command = "{abs}"
+"#,
+                abs = abs.display()
+            ),
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exec"));
 
         match old_path {
             Some(p) => std::env::set_var("PATH", p),

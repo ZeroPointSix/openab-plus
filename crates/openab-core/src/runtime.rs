@@ -96,7 +96,7 @@ impl RuntimeProvider for LocalRuntime {
         overrides: Option<&ProfileSessionOverrides>,
     ) -> Result<bool> {
         self.pool
-            .get_or_create_with_profile(thread_id, working_dir_override, profile_id, overrides)
+            .get_or_create_with_profile(thread_id, working_dir_override, profile_id, overrides, None)
             .await
     }
 

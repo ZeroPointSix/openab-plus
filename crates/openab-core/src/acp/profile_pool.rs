@@ -1,6 +1,9 @@
 use super::connection::{runtime_metadata_from_options, AcpConnection};
 use super::pool;
 use super::protocol::ConfigOption;
+use crate::agent_catalog::{
+    agent_pool_key, ensure_protocol_supported, resolve_agent_for_channel, NamedAgent,
+};
 use crate::agent_profile::{
     overrides_for_persistence, AgentProfileService, ProfileSessionOverrides, RecoveryStrategy,
 };
@@ -41,6 +44,12 @@ struct PersistedThreadSession {
 
 pub struct SessionPool {
     base_config: AgentConfig,
+    /// Named agent catalog from `[[agents]]` (empty = legacy singular `[agent]`).
+    agents: Vec<NamedAgent>,
+    /// Effective default agent id when `agents` is non-empty.
+    default_agent_id: Option<String>,
+    /// Platform → agent id bindings (`discord` / `slack` / `gateway`).
+    channel_bindings: HashMap<String, String>,
     max_sessions: usize,
     hung_threshold_secs: u64,
     default_config_options: HashMap<String, String>,
@@ -117,6 +126,9 @@ impl SessionPool {
         }
         Self {
             base_config: config,
+            agents: Vec::new(),
+            default_agent_id: None,
+            channel_bindings: HashMap::new(),
             max_sessions,
             hung_threshold_secs,
             default_config_options,
@@ -137,6 +149,23 @@ impl SessionPool {
             #[cfg(any(test, feature = "test-support"))]
             config_options_for_test: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Attach the named-agent catalog for ZER-866b channel routing.
+    ///
+    /// `SessionPool::new` still receives the synthesized default `Config.agent`;
+    /// `get_or_create*` then selects a named agent's command/args when the
+    /// catalog is non-empty.
+    pub fn with_agent_catalog(
+        mut self,
+        agents: Vec<NamedAgent>,
+        default_agent_id: Option<String>,
+        channel_bindings: HashMap<String, String>,
+    ) -> Self {
+        self.agents = agents;
+        self.default_agent_id = default_agent_id;
+        self.channel_bindings = channel_bindings;
+        self
     }
 
     pub fn with_agent_profile_service(mut self, profile_service: Arc<AgentProfileService>) -> Self {
@@ -196,7 +225,7 @@ impl SessionPool {
         thread_id: &str,
         working_dir_override: Option<&str>,
     ) -> Result<bool> {
-        self.get_or_create_with_profile(thread_id, working_dir_override, None, None)
+        self.get_or_create_with_profile(thread_id, working_dir_override, None, None, None)
             .await
     }
 
@@ -206,6 +235,7 @@ impl SessionPool {
         working_dir_override: Option<&str>,
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
+        platform: Option<&str>,
     ) -> Result<bool> {
         self.get_or_create_with_profile_and_source(
             thread_id,
@@ -213,6 +243,7 @@ impl SessionPool {
             profile_id,
             overrides,
             None,
+            platform,
         )
         .await
     }
@@ -224,6 +255,7 @@ impl SessionPool {
         profile_id: Option<&str>,
         overrides: Option<&ProfileSessionOverrides>,
         source_permalink: Option<&str>,
+        platform: Option<&str>,
     ) -> Result<bool> {
         let gate = self.thread_gate(thread_id).await;
         let _guard = gate.lock().await;
@@ -249,10 +281,12 @@ impl SessionPool {
             }
         }
 
+        let (selected_agent_id, base_config) = self.resolve_base_config(platform)?;
+
         let resolved = self
             .profile_service
             .resolve_for_session(
-                &self.base_config,
+                &base_config,
                 &self.default_config_options,
                 effective_profile_id.as_deref(),
                 effective_overrides.as_ref(),
@@ -356,10 +390,22 @@ impl SessionPool {
             .profile
             .as_ref()
             .and_then(|profile| profile.provider.clone());
-        let pool_key = if resolved.profile.is_none() && effective_overrides.is_none() {
-            "system".to_string()
-        } else {
-            resolved.pool_key.clone()
+        let pool_key = match selected_agent_id.as_deref() {
+            Some(agent_id) => {
+                // Named agent dimension first; reuse profile_pool_key as the suffix.
+                if resolved.profile.is_none() && effective_overrides.is_none() {
+                    agent_pool_key(agent_id, None)
+                } else {
+                    agent_pool_key(agent_id, Some(resolved.pool_key.as_str()))
+                }
+            }
+            None => {
+                if resolved.profile.is_none() && effective_overrides.is_none() {
+                    "system".to_string()
+                } else {
+                    resolved.pool_key.clone()
+                }
+            }
         };
         let profile_id = resolved.profile.as_ref().map(|profile| profile.id.clone());
         let profile_name = resolved
@@ -880,6 +926,21 @@ impl SessionPool {
                 }
             }
         }
+    }
+
+    /// Pick the base AgentConfig for a new session: channel binding → default agent
+    /// → legacy `base_config`. Rejects `protocol=exec` at selection time.
+    fn resolve_base_config(&self, platform: Option<&str>) -> Result<(Option<String>, AgentConfig)> {
+        if self.agents.is_empty() {
+            return Ok((None, clone_agent_config(&self.base_config)));
+        }
+
+        let platform_key = platform.map(str::trim).filter(|s| !s.is_empty());
+        let binding = platform_key.and_then(|p| self.channel_bindings.get(p).map(String::as_str));
+        let agent =
+            resolve_agent_for_channel(&self.agents, self.default_agent_id.as_deref(), binding)?;
+        ensure_protocol_supported(agent)?;
+        Ok((Some(agent.id.clone()), agent.to_agent_config()))
     }
 
     async fn existing_pool(&self, thread_id: &str) -> Option<PoolHandle> {
@@ -1829,5 +1890,78 @@ mod tests {
         let options = vec![config_option("model", "   ")];
 
         assert_eq!(runtime_metadata_from_options(None, &options).model, None);
+    }
+
+    fn named(id: &str, command: &str) -> NamedAgent {
+        NamedAgent {
+            id: id.into(),
+            enabled: true,
+            protocol: crate::agent_catalog::AgentProtocol::Acp,
+            command: command.into(),
+            resolved_command: command.into(),
+            command_resolved: true,
+            resolve_source: crate::agent_catalog::CommandResolveSource::ExplicitAbsolute,
+            command_explicit: true,
+            args: vec!["acp".into()],
+            working_dir: "/tmp".into(),
+            env: HashMap::new(),
+            inherit_env: vec![],
+            images: crate::config::ImageHandling::default(),
+            profile: None,
+        }
+    }
+
+    #[test]
+    fn resolve_base_config_uses_default_and_channel_override() {
+        let mut base = AgentConfig::default();
+        base.command = "/default-bin".into();
+        let agents = vec![named("claude", "/claude-bin"), named("codex", "/codex-bin")];
+        let mut bindings = HashMap::new();
+        bindings.insert("discord".into(), "codex".into());
+        let pool = SessionPool::new(base, 2, 120, HashMap::new()).with_agent_catalog(
+            agents,
+            Some("claude".into()),
+            bindings,
+        );
+
+        // No platform / unbound → default_agent.
+        let (id, cfg) = pool.resolve_base_config(None).unwrap();
+        assert_eq!(id.as_deref(), Some("claude"));
+        assert_eq!(cfg.command, "/claude-bin");
+
+        let (id, cfg) = pool.resolve_base_config(Some("slack")).unwrap();
+        assert_eq!(id.as_deref(), Some("claude"));
+        assert_eq!(cfg.command, "/claude-bin");
+
+        // discord.default_agent overrides global default.
+        let (id, cfg) = pool.resolve_base_config(Some("discord")).unwrap();
+        assert_eq!(id.as_deref(), Some("codex"));
+        assert_eq!(cfg.command, "/codex-bin");
+
+        // Unknown binding id → error (configured at load, but also guarded here).
+        let mut bad = HashMap::new();
+        bad.insert("discord".into(), "missing".into());
+        let pool = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new())
+            .with_agent_catalog(
+                vec![named("claude", "/claude-bin")],
+                Some("claude".into()),
+                bad,
+            );
+        let err = pool.resolve_base_config(Some("discord")).unwrap_err();
+        assert!(err.to_string().contains("unknown or disabled"));
+
+        // protocol=exec selected → error, do not spawn.
+        let mut exec = named("droid", "/droid");
+        exec.protocol = crate::agent_catalog::AgentProtocol::Exec;
+        let mut bindings = HashMap::new();
+        bindings.insert("discord".into(), "droid".into());
+        let pool = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new())
+            .with_agent_catalog(
+                vec![named("claude", "/claude-bin"), exec],
+                Some("claude".into()),
+                bindings,
+            );
+        let err = pool.resolve_base_config(Some("discord")).unwrap_err();
+        assert!(err.to_string().contains("exec"));
     }
 }
