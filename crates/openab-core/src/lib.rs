@@ -1,5 +1,6 @@
 pub mod acp;
 pub mod adapter;
+pub mod agent_catalog;
 pub mod agent_profile;
 pub mod bot_turns;
 pub mod channel_profile;
@@ -8,6 +9,7 @@ pub mod config;
 pub mod cron;
 pub mod directives;
 pub mod dispatch;
+pub mod doctor;
 pub mod error_display;
 #[cfg(feature = "filestore")]
 pub mod filestore;

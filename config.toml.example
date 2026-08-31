@@ -155,6 +155,29 @@ allowed_channels = ["1234567890"]       # ↑ omitted + non-empty list → auto-
 # runtime_arn = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-agent"
 # cancel_strategy = "stop"       # "stop" (default) or "noop"
 
+# --- Named agents catalog (optional; ZER-866a) ---
+# When [[agents]] is empty/omitted, behaviour matches legacy singular [agent] below.
+# When non-empty, the default named agent is synthesized into [agent] for SessionPool.
+# Command resolution (load-time, once): --agent-command > explicit command >
+# [discover].paths basename lookup > PATH fallback. Missing binaries do not fail
+# load; run `openab doctor` (ZER-867) to check that each command exists and is
+# executable — OpenAB never silently pulls images or installs CLIs.
+# Absolute paths are never overwritten by discover.
+# default_agent = "claude"
+# [discover]
+# paths = ["/usr/local/bin", "/opt/homebrew/bin"]
+# [[agents]]
+# id = "claude"
+# enabled = true
+# protocol = "acp"          # acp | exec (exec reserved; cannot be default yet)
+# command = "/usr/local/bin/claude"
+# args = ["acp"]
+# profile = "claude-default"  # optional; not consumed in 866a
+# [[agents]]
+# id = "codex"
+# command = "codex-acp"
+# # Channel sections may set default_agent = "..." as a reserved field for 866b.
+
 [agent]
 command = "kiro-cli"
 args = ["acp", "--trust-all-tools"]

@@ -180,6 +180,21 @@ pub struct Config {
     pub agentcore: Option<AgentCoreConfig>,
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Preferred default when `[[agents]]` is non-empty. Must name an enabled entry.
+    #[serde(default)]
+    pub default_agent: Option<String>,
+    /// Raw `[[agents]]` rows as deserialized from TOML (before load-time resolve).
+    #[serde(default, rename = "agents")]
+    agents_raw: Vec<crate::agent_catalog::NamedAgentRaw>,
+    /// Resolved named-agent catalog for doctor / 866b. Empty when only `[agent]` is used.
+    #[serde(skip)]
+    pub agents: Vec<crate::agent_catalog::NamedAgent>,
+    /// Effective default agent id after catalog validation (`None` = legacy singular `[agent]`).
+    #[serde(skip)]
+    pub resolved_default_agent: Option<String>,
+    /// Optional roots searched before PATH when resolving relative agent commands.
+    #[serde(default)]
+    pub discover: crate::agent_catalog::DiscoverConfig,
     #[serde(default)]
     pub pool: PoolConfig,
     #[serde(default)]
@@ -484,6 +499,9 @@ pub struct DiscordConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
+    /// Reserved for ZER-866b channel→agent binding. Ignored in 866a.
+    #[serde(default)]
+    pub default_agent: Option<String>,
 }
 
 fn default_max_bot_turns() -> u32 {
@@ -578,6 +596,9 @@ pub struct SlackConfig {
     /// without a behavior-dependent migration.
     #[serde(default = "default_true")]
     pub streaming: bool,
+    /// Reserved for ZER-866b channel→agent binding. Ignored in 866a.
+    #[serde(default)]
+    pub default_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -638,6 +659,9 @@ pub struct GatewayConfig {
     /// Batched mode only: soft token cap for greedy drain. Default: 24000.
     #[serde(default = "default_max_batch_tokens")]
     pub max_batch_tokens: usize,
+    /// Reserved for ZER-866b channel→agent binding. Ignored in 866a.
+    #[serde(default)]
+    pub default_agent: Option<String>,
 }
 
 fn default_gateway_platform() -> String {
@@ -1711,10 +1735,10 @@ pub struct ReactionTiming {
 
 // --- defaults ---
 
-fn default_working_dir() -> String {
+pub(crate) fn default_working_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
 }
-fn default_agent_command() -> String {
+pub(crate) fn default_agent_command() -> String {
     if let Ok(val) = std::env::var("OPENAB_AGENT_COMMAND") {
         if let Some(cmd) = val.split_whitespace().next() {
             return cmd.to_string();
@@ -1722,7 +1746,7 @@ fn default_agent_command() -> String {
     }
     "openab-agent".into()
 }
-fn default_agent_args() -> Vec<String> {
+pub(crate) fn default_agent_args() -> Vec<String> {
     if let Ok(val) = std::env::var("OPENAB_AGENT_COMMAND") {
         let parts: Vec<&str> = val.split_whitespace().collect();
         if parts.len() > 1 {
@@ -1990,13 +2014,23 @@ pub async fn load_config_raw_from_source(source: &str) -> anyhow::Result<String>
 
 /// Parse config from already-expanded text.
 pub fn parse_config_str(expanded: &str, source: &str) -> anyhow::Result<Config> {
-    parse_config_inner(expanded, source)
+    parse_config_inner(expanded, source, None)
+}
+
+/// Parse config and optionally override the default agent's command
+/// (`openab run --agent-command`).
+pub fn parse_config_str_with_agent_command(
+    expanded: &str,
+    source: &str,
+    agent_command: Option<&str>,
+) -> anyhow::Result<Config> {
+    parse_config_inner(expanded, source, agent_command)
 }
 
 #[cfg(test)]
 fn parse_config(raw: &str, source: &str) -> anyhow::Result<Config> {
     let expanded = expand_env_vars(raw);
-    parse_config_inner(&expanded, source)
+    parse_config_inner(&expanded, source, None)
 }
 
 #[cfg(test)]
@@ -2029,7 +2063,11 @@ async fn load_config_from_url(url: &str) -> anyhow::Result<Config> {
     parse_config(&raw, url)
 }
 
-fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
+fn parse_config_inner(
+    expanded: &str,
+    source: &str,
+    cli_agent_command: Option<&str>,
+) -> anyhow::Result<Config> {
     let mut config: Config = toml::from_str(expanded)
         .map_err(|e| anyhow::anyhow!("failed to parse config from {source}: {e}"))?;
 
@@ -2051,6 +2089,32 @@ fn parse_config_inner(expanded: &str, source: &str) -> anyhow::Result<Config> {
             (resolved, val)
         })
         .collect();
+
+    // Named agent catalog (`[[agents]]`). Empty → keep legacy singular `[agent]`.
+    let raw_agents = std::mem::take(&mut config.agents_raw);
+    if let Some((agents, default_id)) = crate::agent_catalog::validate_and_resolve_agents(
+        raw_agents,
+        config.default_agent.as_deref(),
+        &config.discover,
+        cli_agent_command,
+    )? {
+        let default_agent = agents.iter().find(|a| a.id == default_id).ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal error: default agent \"{default_id}\" missing after validation"
+            )
+        })?;
+        crate::agent_catalog::ensure_default_protocol_supported(default_agent)?;
+        // Synthesize Config.agent so SessionPool::new(cfg.agent) needs no process-model change.
+        config.agent = default_agent.to_agent_config();
+        config.resolved_default_agent = Some(default_id);
+        config.agents = agents;
+    } else if let Some(cli_cmd) = cli_agent_command.map(str::trim).filter(|s| !s.is_empty()) {
+        // Legacy `[agent]` path: CLI overrides singular command only.
+        let (resolved, _ok, _src) =
+            crate::agent_catalog::resolve_command(cli_cmd, &config.discover.paths);
+        config.agent.command = resolved;
+        config.agent.command_explicit = true;
+    }
 
     // If [agentcore] is set and [agent] command was not explicitly provided,
     // synthesize agent config to spawn the bundled agentcore-acp adapter.
@@ -3722,5 +3786,268 @@ cancel_strategy = "noop"
         let cfg = parse_config(toml, "test").unwrap();
         let ac = cfg.agentcore.unwrap();
         assert_eq!(ac.cancel_strategy, AgentCoreCancelStrategy::Noop);
+    }
+
+    #[test]
+    fn agents_catalog_parse_all_scenarios() {
+        // Consolidated env/PATH/tempfile scenarios for [[agents]] (ZER-866a).
+        fn mark_exec(path: &std::path::Path) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(path).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(path, perms).unwrap();
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let discover_dir = tmp.path().join("discover");
+        std::fs::create_dir_all(&discover_dir).unwrap();
+        let discovered = discover_dir.join("fake-claude");
+        std::fs::write(&discovered, b"#!/bin/sh\necho ok\n").unwrap();
+        mark_exec(&discovered);
+
+        let abs = tmp.path().join("explicit-bin");
+        std::fs::write(&abs, b"#!/bin/sh\necho ok\n").unwrap();
+        mark_exec(&abs);
+
+        let path_dir = tmp.path().join("on-path");
+        std::fs::create_dir_all(&path_dir).unwrap();
+        let path_bin = path_dir.join("path-only-bin");
+        std::fs::write(&path_bin, b"#!/bin/sh\necho ok\n").unwrap();
+        mark_exec(&path_bin);
+
+        let old_path = std::env::var_os("PATH");
+        let mut path_dirs =
+            std::env::split_paths(&old_path.clone().unwrap_or_default()).collect::<Vec<_>>();
+        path_dirs.insert(0, path_dir);
+        std::env::set_var("PATH", std::env::join_paths(&path_dirs).unwrap());
+
+        // 1) Legacy [agent] only — unchanged
+        let cfg = parse_config(
+            r#"
+[discord]
+bot_token = "t"
+[agent]
+command = "legacy-cmd"
+args = ["acp"]
+"#,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(cfg.agent.command, "legacy-cmd");
+        assert!(cfg.agents.is_empty());
+        assert!(cfg.resolved_default_agent.is_none());
+        assert!(cfg.agent.command_explicit);
+
+        // 2) [[agents]] + default_agent synthesizes Config.agent
+        let toml = format!(
+            r#"
+default_agent = "codex"
+[discord]
+bot_token = "t"
+[discover]
+paths = ["{discover}"]
+[[agents]]
+id = "claude"
+command = "{abs}"
+args = ["acp"]
+[[agents]]
+id = "codex"
+command = "fake-claude"
+"#,
+            discover = discover_dir.display(),
+            abs = abs.display()
+        );
+        let cfg = parse_config(&toml, "test").unwrap();
+        assert_eq!(cfg.resolved_default_agent.as_deref(), Some("codex"));
+        assert_eq!(cfg.agents.len(), 2);
+        assert_eq!(cfg.agent.command, discovered.to_string_lossy());
+        assert!(cfg.agent.command_explicit);
+        assert_eq!(
+            cfg.agents[1].resolve_source,
+            crate::agent_catalog::CommandResolveSource::DiscoverPaths
+        );
+
+        // 3) Missing default_agent → first enabled
+        let toml = format!(
+            r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "disabled"
+enabled = false
+command = "{abs}"
+[[agents]]
+id = "first-enabled"
+command = "{abs}"
+"#,
+            abs = abs.display()
+        );
+        let cfg = parse_config(&toml, "test").unwrap();
+        assert_eq!(cfg.resolved_default_agent.as_deref(), Some("first-enabled"));
+        assert_eq!(cfg.agent.command, abs.to_string_lossy());
+
+        // 4) Duplicate id / empty id / bad default → parse errors
+        let err = parse_config(
+            r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "x"
+command = "/bin/sh"
+[[agents]]
+id = "x"
+command = "/bin/sh"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+
+        let err = parse_config(
+            r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = ""
+command = "/bin/sh"
+"#,
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("empty id"));
+
+        let err = parse_config(
+            &format!(
+                r#"
+default_agent = "missing"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "only"
+command = "{abs}"
+"#,
+                abs = abs.display()
+            ),
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("default_agent"));
+
+        // 5) Explicit absolute not overwritten by discover
+        let toml = format!(
+            r#"
+[discord]
+bot_token = "t"
+[discover]
+paths = ["{discover}"]
+[[agents]]
+id = "a"
+command = "{abs}"
+"#,
+            discover = discover_dir.display(),
+            abs = abs.display()
+        );
+        let cfg = parse_config(&toml, "test").unwrap();
+        assert_eq!(cfg.agent.command, abs.to_string_lossy());
+        assert_eq!(
+            cfg.agents[0].resolve_source,
+            crate::agent_catalog::CommandResolveSource::ExplicitAbsolute
+        );
+
+        // 6) Relative command found under discover.paths → absolute
+        let toml = format!(
+            r#"
+[discord]
+bot_token = "t"
+[discover]
+paths = ["{discover}"]
+[[agents]]
+id = "a"
+command = "fake-claude"
+"#,
+            discover = discover_dir.display()
+        );
+        let cfg = parse_config(&toml, "test").unwrap();
+        assert_eq!(cfg.agent.command, discovered.to_string_lossy());
+
+        // 7) PATH is fallback only (source recorded); missing stays unresolved without failing load
+        let toml = r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "a"
+command = "path-only-bin"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert_eq!(
+            cfg.agents[0].resolve_source,
+            crate::agent_catalog::CommandResolveSource::PathFallback
+        );
+        assert!(cfg.agents[0].command_resolved);
+
+        let toml = r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "a"
+command = "definitely-missing-openab-xyz-866"
+"#;
+        let cfg = parse_config(toml, "test").unwrap();
+        assert!(!cfg.agents[0].command_resolved);
+        assert_eq!(
+            cfg.agents[0].resolve_source,
+            crate::agent_catalog::CommandResolveSource::Unresolved
+        );
+        assert_eq!(cfg.agent.command, "definitely-missing-openab-xyz-866");
+
+        // 8) protocol=exec as default → hard error
+        let err = parse_config(
+            &format!(
+                r#"
+[discord]
+bot_token = "t"
+[[agents]]
+id = "droid"
+protocol = "exec"
+command = "{abs}"
+"#,
+                abs = abs.display()
+            ),
+            "test",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exec"));
+        assert!(err.to_string().contains("not implemented"));
+
+        // 9) Channel default_agent reserved field parses (ignored at runtime in 866a)
+        let cfg = parse_config(
+            &format!(
+                r#"
+[discord]
+bot_token = "t"
+default_agent = "channel-a"
+[[agents]]
+id = "a"
+command = "{abs}"
+"#,
+                abs = abs.display()
+            ),
+            "test",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.discord.as_ref().unwrap().default_agent.as_deref(),
+            Some("channel-a")
+        );
+        // Top-level default unset → first enabled catalog agent.
+        assert_eq!(cfg.resolved_default_agent.as_deref(), Some("a"));
+
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
     }
 }
