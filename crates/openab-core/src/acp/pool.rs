@@ -3,6 +3,7 @@ use crate::acp::protocol::ConfigOption;
 use crate::agent_profile::RecoveryStrategy;
 use crate::config::AgentConfig;
 use crate::session_snapshot::{ProfileConfigError, SessionRuntimeMetadata};
+use crate::worktree::{self, WorktreeConfig};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,6 +61,8 @@ pub struct SessionPool {
     default_config_options: HashMap<String, String>,
     timeout_secs: Option<u64>,
     recovery_strategy: RecoveryStrategy,
+    /// Per-session worktree / plain-folder isolation (ZER-865). Default disabled.
+    worktree: WorktreeConfig,
 }
 
 type CancelHandle = (Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>, String);
@@ -236,6 +239,46 @@ fn apply_hung_eviction(
     true
 }
 
+struct ResolvedWorkdir {
+    path: String,
+    /// True when this path was freshly derived via `[worktree]` (needs persistence).
+    derived: bool,
+}
+
+/// Pure-ish workdir resolution for get_or_create (and unit tests).
+/// When `worktree.enabled` and no stored/override path, may create directories.
+fn resolve_session_workdir(
+    worktree_cfg: &WorktreeConfig,
+    base_working_dir: &str,
+    thread_id: &str,
+    stored_workdir: Option<&str>,
+    working_dir_override: Option<&str>,
+) -> Result<ResolvedWorkdir> {
+    if let Some(stored) = stored_workdir {
+        return Ok(ResolvedWorkdir {
+            path: stored.to_string(),
+            derived: false,
+        });
+    }
+    if let Some(wd) = working_dir_override {
+        return Ok(ResolvedWorkdir {
+            path: wd.to_string(),
+            derived: false,
+        });
+    }
+    if worktree_cfg.enabled {
+        let path = worktree::ensure_session_workdir(worktree_cfg, base_working_dir, thread_id)?;
+        return Ok(ResolvedWorkdir {
+            path: path.to_string_lossy().into_owned(),
+            derived: true,
+        });
+    }
+    Ok(ResolvedWorkdir {
+        path: base_working_dir.to_string(),
+        derived: false,
+    })
+}
+
 impl SessionPool {
     pub fn new(
         config: AgentConfig,
@@ -250,6 +293,7 @@ impl SessionPool {
             default_config_options,
             None,
             RecoveryStrategy::default(),
+            WorktreeConfig::default(),
         )
     }
 
@@ -260,6 +304,7 @@ impl SessionPool {
         default_config_options: HashMap<String, String>,
         timeout_secs: Option<u64>,
         recovery_strategy: RecoveryStrategy,
+        worktree: WorktreeConfig,
     ) -> Self {
         let openab_dir = std::env::var("HOME")
             .map(PathBuf::from)
@@ -290,6 +335,7 @@ impl SessionPool {
             default_config_options,
             timeout_secs,
             recovery_strategy,
+            worktree,
         }
     }
 
@@ -484,20 +530,25 @@ impl SessionPool {
             }
         }
 
-        // Resolve effective working directory: stored per-session > explicit override > global config.
+        // Resolve effective working directory:
+        // stored per-session > explicit override > derived worktree (if enabled) > global config.
         // Stored value has highest priority to enforce immutability (ADR §4.5).
+        // Derived worktree paths are NOT passed through directives::resolve_workspace
+        // (ZER-889 / N2 owns that boundary); they live under [worktree].dir.
         let stored_workdir = {
             let state = self.state.read().await;
             state.session_workdirs.get(thread_id).cloned()
         };
 
-        let effective_workdir = if let Some(stored) = stored_workdir {
-            stored
-        } else if let Some(wd) = working_dir_override {
-            wd.to_string()
-        } else {
-            self.config.working_dir.clone()
-        };
+        let resolved = resolve_session_workdir(
+            &self.worktree,
+            &self.config.working_dir,
+            thread_id,
+            stored_workdir.as_deref(),
+            working_dir_override,
+        )?;
+        let derived_worktree = resolved.derived;
+        let effective_workdir = resolved.path;
 
         // Build the replacement connection outside the state lock so one stuck
         // initialization does not block all unrelated sessions.
@@ -662,8 +713,9 @@ impl SessionPool {
         }
         self.save_mapping(&state.persisted);
 
-        // Persist workspace override only after session spawn succeeded (口渡 F2).
-        if working_dir_override.is_some() {
+        // Persist workspace override / derived worktree only after session spawn
+        // succeeded (口渡 F2). Derived paths use the same session_workdirs map.
+        if working_dir_override.is_some() || derived_worktree {
             state
                 .session_workdirs
                 .entry(thread_id.to_string())
@@ -1120,10 +1172,11 @@ impl SessionPool {
 mod tests {
     use super::{
         better_candidate, classify_hung, classify_idle, get_or_insert_gate, profile_timeout_error,
-        purge_session_entries, recovery_attempt_exceeded, remove_if_same_handle, PoolState,
-        SessionEntryStatus, SessionPool, MAX_RECOVERY_ATTEMPTS,
+        purge_session_entries, recovery_attempt_exceeded, remove_if_same_handle,
+        resolve_session_workdir, PoolState, SessionEntryStatus, SessionPool, MAX_RECOVERY_ATTEMPTS,
     };
     use crate::acp::connection::SessionActivity;
+    use crate::worktree::WorktreeConfig;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -1346,5 +1399,51 @@ mod tests {
             roundtrip.get("suspended-thread"),
             Some(&"session-suspended".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_workdir_disabled_uses_base() {
+        let cfg = WorktreeConfig {
+            enabled: false,
+            dir: "/tmp/unused".into(),
+        };
+        let resolved =
+            resolve_session_workdir(&cfg, "/base/ws", "t1", None, None).expect("resolve");
+        assert_eq!(resolved.path, "/base/ws");
+        assert!(!resolved.derived);
+    }
+
+    #[test]
+    fn resolve_workdir_override_skips_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = WorktreeConfig {
+            enabled: true,
+            dir: tmp.path().join("work").to_string_lossy().into_owned(),
+        };
+        let resolved =
+            resolve_session_workdir(&cfg, "/base/ws", "t1", None, Some("/user/override"))
+                .expect("resolve");
+        assert_eq!(resolved.path, "/user/override");
+        assert!(!resolved.derived);
+        assert!(!tmp.path().join("work").exists());
+    }
+
+    #[test]
+    fn resolve_workdir_stored_wins_over_enabled_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = WorktreeConfig {
+            enabled: true,
+            dir: tmp.path().join("work").to_string_lossy().into_owned(),
+        };
+        let resolved = resolve_session_workdir(
+            &cfg,
+            "/base/ws",
+            "t1",
+            Some("/stored/path"),
+            Some("/user/override"),
+        )
+        .expect("resolve");
+        assert_eq!(resolved.path, "/stored/path");
+        assert!(!resolved.derived);
     }
 }

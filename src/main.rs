@@ -415,13 +415,14 @@ async fn main() -> anyhow::Result<()> {
 
     let provider_store = Arc::new(openab_core::provider_store::ProviderStore::from_env());
     let pool = Arc::new(
-        acp::SessionPool::new(
+        acp::SessionPool::new_with_worktree(
             cfg.agent,
             cfg.pool.max_sessions,
             cfg.pool
                 .prompt_hard_timeout_secs
                 .saturating_add(cfg.pool.hung_grace_secs),
             cfg.pool.default_config_options,
+            cfg.worktree,
         )
         .with_provider_store(provider_store.clone()),
     );
