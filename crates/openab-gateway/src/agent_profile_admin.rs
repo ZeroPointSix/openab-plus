@@ -4,13 +4,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use openab_core::agent_profile::{AgentConfigSchema, AgentProfile, AgentProfileService};
+use openab_core::runtime::RuntimeProvider;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-type CoreSessionPool = Arc<openab_core::acp::SessionPool>;
+type AdminRuntime = Arc<dyn RuntimeProvider>;
 type LiveConfigSchemaResolver = Arc<
     dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<AgentConfigSchema>> + Send>> + Send + Sync,
 >;
@@ -22,22 +23,22 @@ where
     router_with_live_schema_resolver(service, None, None)
 }
 
-pub fn router_with_pool<S>(service: Arc<AgentProfileService>, pool: CoreSessionPool) -> Router<S>
+pub fn router_with_pool<S>(service: Arc<AgentProfileService>, runtime: AdminRuntime) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    let profile_status_pool = Some(pool.clone());
+    let profile_status_runtime = Some(runtime.clone());
     let resolver: LiveConfigSchemaResolver = Arc::new(move |agent: String| {
-        let pool = pool.clone();
-        Box::pin(async move { pool.config_schema_for_agent(&agent).await })
+        let runtime = runtime.clone();
+        Box::pin(async move { runtime.config_schema_for_agent(&agent).await })
     });
-    router_with_live_schema_resolver(service, Some(resolver), profile_status_pool)
+    router_with_live_schema_resolver(service, Some(resolver), profile_status_runtime)
 }
 
 pub fn router_with_live_schema_resolver<S>(
     service: Arc<AgentProfileService>,
     live_schema: Option<LiveConfigSchemaResolver>,
-    profile_status_pool: Option<CoreSessionPool>,
+    profile_status_runtime: Option<AdminRuntime>,
 ) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
@@ -47,7 +48,7 @@ where
     let get_service = service.clone();
     let update_service = service.clone();
     let delete_service = service.clone();
-    let delete_profile_status_pool = profile_status_pool;
+    let delete_profile_status_runtime = profile_status_runtime;
     let validate_service = service.clone();
     let get_default_service = service.clone();
     let set_default_service = service.clone();
@@ -90,7 +91,7 @@ where
                         headers,
                         path,
                         delete_service.clone(),
-                        delete_profile_status_pool.clone(),
+                        delete_profile_status_runtime.clone(),
                     )
                 }),
         )
@@ -189,15 +190,15 @@ async fn delete_profile(
     headers: HeaderMap,
     Path(profile_id): Path<String>,
     service: Arc<AgentProfileService>,
-    pool: Option<CoreSessionPool>,
+    runtime: Option<AdminRuntime>,
 ) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
     match service.delete(&profile_id).await {
         Ok(true) => {
-            if let Some(pool) = pool {
-                pool.mark_profile_deleted(&profile_id).await;
+            if let Some(runtime) = runtime {
+                runtime.mark_profile_deleted(&profile_id).await;
             }
             Json(Deleted { deleted: true }).into_response()
         }

@@ -8,6 +8,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
 use openab_core::agent_profile::ProfileSessionOverrides;
+use openab_core::runtime::RuntimeProvider;
 use openab_core::session_event::{SessionStreamBus, SessionStreamEvent, SessionStreamReplay};
 use openab_core::session_snapshot::SessionSnapshot;
 use serde::{Deserialize, Serialize};
@@ -18,9 +19,9 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-type CoreSessionPool = Arc<openab_core::acp::SessionPool>;
+type AdminRuntime = Arc<dyn RuntimeProvider>;
 
-pub fn router<S>(pool: CoreSessionPool) -> Router<S>
+pub fn router<S>(runtime: AdminRuntime) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
@@ -28,49 +29,49 @@ where
         .route(
             "/api/v1/sessions",
             get({
-                let pool = pool.clone();
+                let runtime = runtime.clone();
                 move |headers: HeaderMap| {
-                    let pool = pool.clone();
-                    async move { list_sessions(headers, pool).await }
+                    let runtime = runtime.clone();
+                    async move { list_sessions(headers, runtime).await }
                 }
             })
             .post({
-                let pool = pool.clone();
+                let runtime = runtime.clone();
                 move |headers: HeaderMap, body: Json<CreateSessionRequest>| {
-                    let pool = pool.clone();
-                    async move { create_session(headers, body, pool).await }
+                    let runtime = runtime.clone();
+                    async move { create_session(headers, body, runtime).await }
                 }
             }),
         )
         .route(
             "/api/v1/sessions/events",
             get({
-                let pool = pool.clone();
+                let runtime = runtime.clone();
                 move |headers: HeaderMap| {
-                    let pool = pool.clone();
-                    async move { stream_session_events(headers, pool).await }
+                    let runtime = runtime.clone();
+                    async move { stream_session_events(headers, runtime).await }
                 }
             }),
         )
         .route(
             "/api/v1/sessions/{session_id}/transcript",
             get({
-                let pool = pool.clone();
+                let runtime = runtime.clone();
                 move |headers: HeaderMap,
                       Path(session_id): Path<String>,
                       Query(query): Query<TranscriptQuery>| {
-                    let pool = pool.clone();
-                    async move { get_transcript(headers, session_id, query, pool).await }
+                    let runtime = runtime.clone();
+                    async move { get_transcript(headers, session_id, query, runtime).await }
                 }
             }),
         )
         .route(
             "/api/v1/sessions/{session_id}",
             get({
-                let pool = pool.clone();
+                let runtime = runtime.clone();
                 move |headers: HeaderMap, Path(session_id): Path<String>| {
-                    let pool = pool.clone();
-                    async move { get_session(headers, session_id, pool).await }
+                    let runtime = runtime.clone();
+                    async move { get_session(headers, session_id, runtime).await }
                 }
             }),
         )
@@ -84,12 +85,12 @@ struct SessionListItem {
     title: Option<String>,
 }
 
-async fn list_sessions(headers: HeaderMap, pool: CoreSessionPool) -> Response {
+async fn list_sessions(headers: HeaderMap, runtime: AdminRuntime) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
-    let transcripts = pool.transcript_store();
-    let sessions = pool
+    let transcripts = runtime.transcript_store();
+    let sessions = runtime
         .list_session_snapshots()
         .await
         .into_iter()
@@ -101,11 +102,11 @@ async fn list_sessions(headers: HeaderMap, pool: CoreSessionPool) -> Response {
     Json(sessions).into_response()
 }
 
-async fn get_session(headers: HeaderMap, session_id: String, pool: CoreSessionPool) -> Response {
+async fn get_session(headers: HeaderMap, session_id: String, runtime: AdminRuntime) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
-    match pool.session_snapshot(&session_id).await {
+    match runtime.session_snapshot(&session_id).await {
         Some(snapshot) => Json(snapshot).into_response(),
         None => (
             StatusCode::NOT_FOUND,
@@ -124,12 +125,12 @@ async fn get_transcript(
     headers: HeaderMap,
     session_id: String,
     query: TranscriptQuery,
-    pool: CoreSessionPool,
+    runtime: AdminRuntime,
 ) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
-    if pool.session_snapshot(&session_id).await.is_none() {
+    if runtime.session_snapshot(&session_id).await.is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "session not found" })),
@@ -137,7 +138,12 @@ async fn get_transcript(
             .into_response();
     }
 
-    Json(pool.transcript_store().snapshot(&session_id, query.after)).into_response()
+    Json(
+        runtime
+            .transcript_store()
+            .snapshot(&session_id, query.after),
+    )
+    .into_response()
 }
 
 /// Creates a new ACP session in the admin-owned source namespace.
@@ -149,7 +155,7 @@ async fn get_transcript(
 async fn create_session(
     headers: HeaderMap,
     Json(request): Json<CreateSessionRequest>,
-    pool: CoreSessionPool,
+    runtime: AdminRuntime,
 ) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
@@ -167,11 +173,11 @@ async fn create_session(
     // control plane without pretending to be a Discord/Slack ChatAdapter.
     let session_id = format!("admin:{}", Uuid::new_v4());
     let overrides = request.overrides.into_profile_overrides();
-    match pool
+    match runtime
         .get_or_create_with_profile(&session_id, None, Some(&profile_id), Some(&overrides))
         .await
     {
-        Ok(_) => match pool.session_snapshot(&session_id).await {
+        Ok(_) => match runtime.session_snapshot(&session_id).await {
             Some(snapshot) => (StatusCode::CREATED, Json(snapshot)).into_response(),
             None => internal_error("created session has no observable snapshot"),
         },
@@ -240,12 +246,12 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     })
 }
 
-async fn stream_session_events(headers: HeaderMap, pool: CoreSessionPool) -> Response {
+async fn stream_session_events(headers: HeaderMap, runtime: AdminRuntime) -> Response {
     if let Err(err) = authorize(&headers) {
         return auth_error_response(err);
     }
 
-    let stream_bus = pool.session_stream_bus();
+    let stream_bus = runtime.session_stream_bus();
     let cursor = last_event_cursor(&headers);
     let last_sequence = replay_cursor_sequence(cursor.as_ref(), &stream_bus);
     let subscription = stream_bus.subscribe_after(last_sequence);
