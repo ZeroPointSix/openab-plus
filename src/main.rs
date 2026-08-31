@@ -1594,7 +1594,7 @@ mod tests {
     fn cli_run_no_args_defaults_config() {
         let cli = Cli::try_parse_from(["openab", "run"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert!(config.is_none()),
+            Commands::Run { config, .. } => assert!(config.is_none()),
             _ => panic!("expected Run"),
         }
     }
@@ -1603,7 +1603,7 @@ mod tests {
     fn cli_run_with_short_flag_local() {
         let cli = Cli::try_parse_from(["openab", "run", "-c", "my-config.toml"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            Commands::Run { config, .. } => assert_eq!(config.unwrap(), "my-config.toml"),
             _ => panic!("expected Run"),
         }
     }
@@ -1612,7 +1612,7 @@ mod tests {
     fn cli_run_with_long_flag_local() {
         let cli = Cli::try_parse_from(["openab", "run", "--config", "my-config.toml"]).unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert_eq!(config.unwrap(), "my-config.toml"),
+            Commands::Run { config, .. } => assert_eq!(config.unwrap(), "my-config.toml"),
             _ => panic!("expected Run"),
         }
     }
@@ -1622,7 +1622,7 @@ mod tests {
         let cli = Cli::try_parse_from(["openab", "run", "-c", "https://example.com/config.toml"])
             .unwrap();
         match cli.command.unwrap() {
-            Commands::Run { config } => assert!(config.unwrap().starts_with("https://")),
+            Commands::Run { config, .. } => assert!(config.unwrap().starts_with("https://")),
             _ => panic!("expected Run"),
         }
     }
