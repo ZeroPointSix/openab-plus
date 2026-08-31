@@ -65,7 +65,22 @@ All workspace paths are validated before use:
 | Not a directory | `Workspace path is not a directory: /home/bot/Cargo.toml` |
 | Does not exist | `Workspace path does not exist: ~/nope (expanded to /home/bot/nope)` |
 
+## User workspace vs derived worktree
+
+OpenAB keeps two path classes separate (ZER-889 / ZER-865):
+
+| Kind | Source | Validator | Must exist? | Allowed outside bot home? |
+|------|--------|-----------|-------------|---------------------------|
+| **User workspace** | `[[ws:...]]` / aliases | `directives::resolve_workspace` | Yes (directory) | No — must stay under bot home after canonicalize |
+| **Derived worktree** | daemon per-thread dir under `[worktree].dir` / `OPENAB_WORK_DIR` | `path_bounds::ensure_derived_dir` (+ ZER-865 session allocation) | No at check time; created by daemon | Yes — root is typically `/var/lib/openab/worktrees`, not under bot home |
+
+Do **not** pass derived worktree paths through `resolve_workspace`. That API rejects non-existent paths and requires the bot-home subtree, which would block legitimate worktree creation.
+
+For non-git bases, use `path_bounds::ensure_plain_folder` (D4): `create_dir_all` only — never require a git repository.
+
 ## See Also
 
 - [Control Directives](control-directives.md) — full directive syntax and rules
 - [Config Reference](config-reference.md#workspace) — `[workspace.aliases]` configuration
+- Linear [ZER-889](https://linear.app/zerodotsix/issue/ZER-889) — path boundary split
+- Linear [ZER-865](https://linear.app/zerodotsix/issue/ZER-865) — per-session git worktree / plain folder allocation
