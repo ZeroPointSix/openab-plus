@@ -198,10 +198,17 @@ mod tests {
 
     #[test]
     fn root_must_be_writable() {
+        // Root bypasses DAC: chmod / set_readonly cannot make a directory
+        // unwritable to euid 0 (Colab CPU and similar images). Skip the
+        // negative assertion there; non-root (Daytona/CI) still exercises it.
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("locked");
         fs::create_dir_all(&root).unwrap();
-        // Best-effort: if we cannot drop write bits (e.g. running as root), skip.
         let mut perms = fs::metadata(&root).unwrap().permissions();
         let original_readonly = perms.readonly();
         perms.set_readonly(true);
