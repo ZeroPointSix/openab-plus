@@ -124,23 +124,17 @@ POST /api/v1/sessions/admin%3Afixture-session/cancel
 Authorization: Bearer <token>
 ```
 
-只要 session 存在，运行中、空闲或已经取消的请求都返回相同的幂等确认：
+只要 session 存在，运行中、空闲或已经取消的请求都返回相同的幂等确认，
+且成功响应没有正文：
 
 ```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-```
-
-```json
-{
-  "accepted": true,
-  "session_id": "admin:fixture-session"
-}
+HTTP/1.1 204 No Content
 ```
 
 运行中的请求复用现有 `SessionPool::cancel_session`，向当前 ACP session 发送
-best-effort `session/cancel`。`accepted` 只代表取消请求被控制面接受，不代表
-Agent 已经同步完成；真实 cancelled/idle 状态仍由 transcript/SSE 观察。
+best-effort `session/cancel`。`204` 只代表取消请求已处理或当前无需取消，
+不代表 Agent 已经同步完成；没有 Codeg 专用 cancel 事件，真实 cancelled/idle
+状态仍由 transcript/SSE 观察。
 
 ### 2.5 新接口错误语义
 
@@ -151,11 +145,13 @@ Agent 已经同步完成；真实 cancelled/idle 状态仍由 transcript/SSE 观
 | `text` 缺失、不是文本或去空白后为空 | `400 Bad Request` | `{ "error": "text is required" }` |
 | `session_id` 不存在 | `404 Not Found` | `{ "error": "session not found" }` |
 | 同一 session 已有运行中回合，再次发送文本 | `409 Conflict` | `{ "error": "session is busy" }` |
+| 发送文本在返回 `202` 前无法启动回合 | `500 Internal Server Error` | `{ "error": "failed to start session turn" }` |
+| cancel 无法下发到当前 ACP session | `500 Internal Server Error` | `{ "error": "failed to cancel session" }` |
 
 一个 session 同时最多只有一个运行中回合。busy 检查必须在启动 ACP prompt
-之前完成，失败的重复请求不得向 transcript 写入第二个 user entry。Agent 在
-`202 Accepted` 之后发生的错误属于异步运行结果，进入现有状态和 SSE，不改写
-已经返回的 HTTP 确认。
+之前完成，失败的重复请求不得向 transcript 写入第二个 user entry。发送文本在
+返回 `202` 前失败时同步返回 `500`；在 `202 Accepted` 之后发生的 Agent
+错误属于异步运行结果，必须进入现有状态和 SSE，不改写已经返回的 HTTP 确认。
 
 ### 2.6 SSE 唯一实时来源
 
