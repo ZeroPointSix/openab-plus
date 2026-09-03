@@ -32,8 +32,8 @@ RUN mkdir -p src crates/codeg-facade/src crates/openab-core/src crates/openab-ga
 COPY crates/ crates/
 COPY src/ src/
 COPY web/ web/
-RUN touch crates/codeg-facade/src/lib.rs crates/openab-gateway/src/main.rs \
-          crates/openab-gateway/src/lib.rs \
+RUN touch crates/codeg-facade/src/lib.rs crates/openab-core/src/lib.rs \
+          crates/openab-gateway/src/main.rs crates/openab-gateway/src/lib.rs \
     && if [ -n "$FEATURES" ]; then \
       cargo build --release -p openab-gateway --no-default-features --features "$FEATURES"; \
     else \
