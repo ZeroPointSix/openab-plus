@@ -1,11 +1,18 @@
-//! Executable shape checks for the Codeg/OpenAB session contract fixture.
+//! Executable production-contract checks for the Codeg/OpenAB session fixture.
 //!
 //! The two new write routes are intentionally not implemented by this issue.
-//! This test makes the frozen fixture fail loudly if its endpoint, error, or
-//! event shape drifts before the implementation PR consumes it.
+//! Existing payloads are decoded through public production types, while the
+//! transcript/SSE trace is reproduced through the real session stores.
 
-use serde_json::Value;
-use std::collections::HashSet;
+use openab_core::acp::SessionPool;
+use openab_core::config::AgentConfig;
+use openab_core::session_event::SessionStreamEvent;
+use openab_core::session_snapshot::{SessionSnapshot, SessionStatus};
+use openab_core::transcript::{ToolTranscriptUpdate, TranscriptSnapshot};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 
 const FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -33,6 +40,41 @@ fn response<'a>(endpoint: &'a Value, name: &str) -> &'a Value {
     endpoint["responses"]
         .get(name)
         .unwrap_or_else(|| panic!("missing response fixture: {name}"))
+}
+
+fn assert_production_round_trip<T>(value: &Value, label: &str)
+where
+    T: DeserializeOwned + Serialize,
+{
+    let parsed: T = serde_json::from_value(value.clone())
+        .unwrap_or_else(|error| panic!("{label} must decode as a production type: {error}"));
+    let serialized = serde_json::to_value(parsed)
+        .unwrap_or_else(|error| panic!("{label} must serialize as a production type: {error}"));
+    assert_eq!(serialized, *value, "{label} contains non-production fields");
+}
+
+fn without_dynamic_timestamps(mut value: Value) -> Value {
+    fn visit(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                fields.remove("timestamp");
+                fields.remove("created_at");
+                fields.remove("updated_at");
+                for value in fields.values_mut() {
+                    visit(value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    visit(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    visit(&mut value);
+    value
 }
 
 #[test]
@@ -95,36 +137,29 @@ fn freezes_bearer_auth_and_opaque_session_id_rules() {
 fn existing_session_shapes_are_represented_without_a_new_model() {
     let fixture = fixture();
     let snapshot = &fixture["snapshot"];
-    for field in [
-        "session_id",
-        "agent",
-        "source",
-        "workdir",
-        "status",
-        "created_at",
-        "updated_at",
-    ] {
-        assert!(snapshot.get(field).is_some(), "snapshot missing {field}");
-    }
+    assert_production_round_trip::<SessionSnapshot>(snapshot, "shared snapshot");
 
     let list = &endpoint(&fixture, "list_sessions")["response"]["body"];
     assert_eq!(list.as_array().map(Vec::len), Some(1));
     assert_eq!(list[0]["session_id"], snapshot["session_id"]);
     assert_eq!(list[0]["title"], "请检查当前变更并运行测试");
+    let mut list_snapshot = list[0].clone();
+    list_snapshot
+        .as_object_mut()
+        .expect("list item must be an object")
+        .remove("title");
+    assert_production_round_trip::<SessionSnapshot>(&list_snapshot, "list snapshot");
+
+    let created = &endpoint(&fixture, "create_session")["response"]["body"];
+    assert_production_round_trip::<SessionSnapshot>(created, "created snapshot");
 
     let detail = &response(endpoint(&fixture, "get_session"), "success")["body"];
     assert_eq!(detail["session_id"], snapshot["session_id"]);
     assert_eq!(detail["status"], "idle");
+    assert_production_round_trip::<SessionSnapshot>(detail, "detail snapshot");
 
     let transcript = &endpoint(&fixture, "get_transcript")["response"]["body"];
-    assert_eq!(transcript["session_id"], snapshot["session_id"]);
-    assert_eq!(transcript["overflowed"], false);
-    assert_eq!(transcript["stream_generation"], "fixture-generation");
-    assert_eq!(transcript["stream_next_sequence"], 7);
-    assert!(transcript["entries"].as_array().is_some_and(|entries| {
-        entries.iter().any(|entry| entry["role"] == "assistant")
-            && entries.iter().any(|entry| entry["role"] == "tool")
-    }));
+    assert_production_round_trip::<TranscriptSnapshot>(transcript, "transcript snapshot");
 }
 
 #[test]
@@ -156,11 +191,7 @@ fn freezes_message_request_ack_and_business_errors() {
         ("empty_text", 400, "text is required"),
         ("missing_session", 404, "session not found"),
         ("busy", 409, "session is busy"),
-        (
-            "pre_accept_failure",
-            500,
-            "failed to start session turn",
-        ),
+        ("pre_accept_failure", 500, "failed to start session turn"),
     ] {
         let response = response(endpoint, name);
         assert_eq!(response["status"], status, "status for {name}");
@@ -170,6 +201,10 @@ fn freezes_message_request_ack_and_business_errors() {
     let agent_error = response(endpoint, "agent_error_after_accept");
     assert_eq!(agent_error["status"], 202);
     assert_eq!(agent_error["sse_result"]["event"], "error");
+    assert_production_round_trip::<SessionStreamEvent>(
+        &agent_error["sse_result"]["data"],
+        "post-accept agent error",
+    );
     assert_eq!(
         agent_error["sse_result"]["data"]["snapshot"]["status"],
         "error"
@@ -194,8 +229,7 @@ fn freezes_idempotent_cancel_and_best_effort_semantics() {
         assert_eq!(response["status"], 204, "status for {name}");
         assert!(response["body"].is_null(), "body for {name}");
         assert_eq!(
-            response["sse_result"]["dedicated_cancel_event"],
-            false,
+            response["sse_result"]["dedicated_cancel_event"], false,
             "dedicated cancel event for {name}"
         );
         assert_eq!(
@@ -211,9 +245,12 @@ fn freezes_idempotent_cancel_and_best_effort_semantics() {
         &response(endpoint, "accepted_running")["sse_result"]["possible_follow_up"];
     assert_eq!(running_follow_up.as_array().map(Vec::len), Some(1));
     assert_eq!(running_follow_up[0]["event"], "status_changed");
+    assert_production_round_trip::<SessionStreamEvent>(
+        &running_follow_up[0]["data"],
+        "cancel follow-up status",
+    );
 
-    let idle_follow_up =
-        &response(endpoint, "accepted_idle")["sse_result"]["possible_follow_up"];
+    let idle_follow_up = &response(endpoint, "accepted_idle")["sse_result"]["possible_follow_up"];
     assert_eq!(idle_follow_up.as_array().map(Vec::len), Some(0));
 
     for (name, status, error) in [
@@ -260,6 +297,7 @@ fn freezes_sse_cursor_event_and_transcript_shapes() {
         let event_name = event["event"].as_str().expect("SSE event name");
         let data = &event["data"];
         assert_eq!(data["sequence"], sequence);
+        assert_production_round_trip::<SessionStreamEvent>(data, "SSE event data");
         if event_name == "transcript" {
             assert_eq!(data["session_id"], fixture["session_id"]);
             let entry = &data["entry"];
@@ -278,12 +316,111 @@ fn freezes_sse_cursor_event_and_transcript_shapes() {
         }
     }
 
-    assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(sequences, (3..=11).collect::<Vec<_>>());
     assert!(saw_user && saw_assistant && saw_thinking && saw_tool);
     assert!(entry_ids.contains("entry-1"));
     assert!(entry_ids.contains("entry-2"));
     assert!(entry_ids.contains("entry-3"));
     assert!(entry_ids.contains("entry-4"));
+    assert!(entry_ids.contains("entry-5"));
+}
+
+#[tokio::test]
+async fn transcript_and_sse_trace_are_emitted_by_current_production_stores() {
+    let fixture = fixture();
+    let session_id = fixture["session_id"].as_str().expect("fixture session id");
+    let snapshot: SessionSnapshot = serde_json::from_value(fixture["snapshot"].clone())
+        .expect("fixture snapshot must use the production type");
+    let pool = SessionPool::new(AgentConfig::default(), 2, 120, HashMap::new());
+
+    // The Last-Event-ID in the fixture starts after these two lifecycle events.
+    pool.seed_session_snapshot_for_test(snapshot).await;
+    pool.mark_session_status(session_id, SessionStatus::Running)
+        .await;
+
+    let transcripts = pool.transcript_store();
+    transcripts.record_user_text(session_id, "请检查当前变更并运行测试");
+    transcripts.append_assistant_text(session_id, "我会先检查变更，然后运行测试。");
+    transcripts.append_thinking(session_id, "正在检查测试配置。");
+
+    // This is the ordering used by record_acp_event_transcript for ToolStart.
+    transcripts
+        .finish_assistant_turn(session_id)
+        .expect("active assistant entry");
+    transcripts.upsert_tool_call(
+        session_id,
+        ToolTranscriptUpdate {
+            tool_call_id: "tool-1".into(),
+            title: "运行测试".into(),
+            status: Some("running".into()),
+            completed: false,
+            payload: json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-1",
+                "title": "运行测试",
+                "rawInput": {"command": "cargo test"}
+            }),
+        },
+    );
+    transcripts.upsert_tool_call(
+        session_id,
+        ToolTranscriptUpdate {
+            tool_call_id: "tool-1".into(),
+            title: String::new(),
+            status: Some("completed".into()),
+            completed: true,
+            payload: json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-1",
+                "content": [{"type": "text", "text": "测试通过"}]
+            }),
+        },
+    );
+    transcripts.append_assistant_text(session_id, "检查完成，测试通过。");
+    transcripts
+        .finish_assistant_turn(session_id)
+        .expect("post-tool assistant entry");
+    pool.mark_session_status(session_id, SessionStatus::Idle)
+        .await;
+
+    assert_eq!(
+        transcripts.session_title(session_id).as_deref(),
+        Some("请检查当前变更并运行测试")
+    );
+
+    let mut actual_snapshot =
+        serde_json::to_value(transcripts.snapshot(session_id, Some(1))).unwrap();
+    actual_snapshot["stream_generation"] = json!("fixture-generation");
+    let expected_snapshot = endpoint(&fixture, "get_transcript")["response"]["body"].clone();
+    assert_eq!(
+        without_dynamic_timestamps(actual_snapshot),
+        without_dynamic_timestamps(expected_snapshot),
+        "incremental transcript fixture must include every retained mutation"
+    );
+
+    let replay = pool.session_stream_bus().replay_after(2);
+    assert!(!replay.overflowed);
+    assert_eq!(replay.oldest_sequence, Some(1));
+    assert_eq!(replay.next_sequence, 12);
+    let actual_events = replay
+        .events
+        .into_iter()
+        .map(|event| {
+            let sequence = event.sequence();
+            let event_name = event.as_sse_event();
+            json!({
+                "id": format!("fixture-generation:{sequence}"),
+                "event": event_name,
+                "data": event
+            })
+        })
+        .collect::<Vec<_>>();
+    let expected_events = endpoint(&fixture, "stream_session_events")["response"]["events"].clone();
+    assert_eq!(
+        without_dynamic_timestamps(Value::Array(actual_events)),
+        without_dynamic_timestamps(expected_events),
+        "SSE fixture must be an exact normalized production replay"
+    );
 }
 
 #[test]

@@ -58,8 +58,10 @@ Codeg 只通过当前 `/api/v1` 会话控制面通信。当前已有的五个读
 - Codeg 不把 token 放入 URL、query string、SSE cursor 或错误正文。
 - `/api/v1/sessions/events` 由 fetch-based SSE 客户端建立，以便发送
   `Authorization` header；不依赖原生 `EventSource` 的 query token 方案。
-- 默认部署为同源。独立 UI origin 是后续 transport 的配置能力，不改变本阶段
-  的后端鉴权协议。
+- 默认部署为同源。Codeg 必须由挂载了 `session_admin::router` 的 unified
+  `openab run` listener 提供，或由同源反向代理把 `/api/v1/sessions*` 转发到该
+  listener；standalone `openab-gateway` 不挂载会话控制面，不能单独承载本契约。
+  独立 UI origin 是后续 transport 的配置能力，不改变本阶段的后端鉴权协议。
 - 当前服务仍兼容历史 `x-openab-admin-token` header，但 Codeg fixture 和新
   transport 只使用 Bearer header。
 - 成功和业务失败均使用 JSON；现有错误响应保持最小形状
@@ -78,10 +80,12 @@ Codeg 只通过当前 `/api/v1` 会话控制面通信。当前已有的五个读
 - transcript 全量请求返回 `TranscriptSnapshot`。带 `?after=<entry_sequence>`
   时返回当前 session 的有界 mutation history；`after` 使用每会话 entry 序号，
   不是 SSE 全局序号。
-- transcript entry 的 `entry_id` 是稳定可 upsert 的身份；assistant 文本和 tool
-  生命周期更新会复用同一个 `entry_id`。`role` 使用 `user`、`assistant`、
-  `system`、`tool`，thinking 通过 `role: assistant` 与 `status: thinking`
-  表示。
+- transcript entry 的 `entry_id` 是稳定可 upsert 的身份；同一段流式 assistant
+  文本的 revision，以及同一个 tool 的生命周期更新，分别复用各自的
+  `entry_id`。tool 开始前，当前流式 assistant entry 会先更新为 `completed`；
+  tool 之后的新 assistant 文本会创建新的 entry。`role` 使用 `user`、
+  `assistant`、`system`、`tool`，thinking 通过 `role: assistant` 与
+  `status: thinking` 表示。
 
 ### 2.4 新增写接口
 
@@ -124,8 +128,8 @@ POST /api/v1/sessions/admin%3Afixture-session/cancel
 Authorization: Bearer <token>
 ```
 
-只要 session 存在，运行中、空闲或已经取消的请求都返回相同的幂等确认，
-且成功响应没有正文：
+只要 session 存在，运行中、空闲或同一 session 已经收到过 cancel 的请求都返回
+相同的幂等确认，且成功响应没有正文：
 
 ```http
 HTTP/1.1 204 No Content
@@ -133,8 +137,10 @@ HTTP/1.1 204 No Content
 
 运行中的请求复用现有 `SessionPool::cancel_session`，向当前 ACP session 发送
 best-effort `session/cancel`。`204` 只代表取消请求已处理或当前无需取消，
-不代表 Agent 已经同步完成；没有 Codeg 专用 cancel 事件，真实 cancelled/idle
-状态仍由 transcript/SSE 观察。
+不代表 Agent 已经同步完成，也不会产生 Codeg 专用 cancel 事件。当前
+`SessionStatus` 没有独立的 `cancelled` 状态；客户端只能继续通过
+transcript/SSE 观察回合最终进入 `idle` 或 `error`，不能仅凭 `idle` 区分取消
+完成与自然完成。
 
 ### 2.5 新接口错误语义
 
@@ -169,13 +175,30 @@ best-effort `session/cancel`。`204` 只代表取消请求已处理或当前无�
 `event history unavailable` 与 `event stream lagged` 诊断不带 `id`，客户端不得
 因此把诊断误当作可继续确认的业务事件。
 
-生命周期事件的 `data` 形状是：
+生命周期事件的 `data` 包含完整 `SessionSnapshot`，形状是：
 
 ```json
 {
-  "sequence": 1,
-  "event": "session.created",
-  "snapshot": { "session_id": "admin:fixture-session", "status": "idle" }
+  "sequence": 11,
+  "event": "status_changed",
+  "snapshot": {
+    "session_id": "admin:fixture-session",
+    "agent": "fixture-acp",
+    "source": {
+      "platform": "admin",
+      "thread_id": "fixture-session"
+    },
+    "workdir": "/workspace/project",
+    "profile_id": "codex-default",
+    "profile_name": "Codex Default",
+    "profile_status": "active",
+    "model": "gpt-5",
+    "reasoning_effort": "high",
+    "metadata_source": "acp",
+    "status": "idle",
+    "created_at": "2026-09-03T00:00:00Z",
+    "updated_at": "2026-09-03T00:00:08Z"
+  }
 }
 ```
 
@@ -249,5 +272,8 @@ fixture [`codeg-session-contract-v1.json`](../fixtures/codeg-session-contract-v1
 cargo test -p openab-gateway --test codeg_session_contract_fixture
 ```
 
-该测试只验证 fixture 与当前公开类型/形状一致，不宣称两个新增 endpoint 已在
-当前分支实现。后续 ZER-952 的实现 PR 必须用同一 fixture 增加真实 HTTP 集成测试。
+该测试会把 snapshot、transcript 和 SSE data 反序列化为当前公开类型，并通过
+真实 `SessionPool`、`SessionTranscriptStore` 和统一 stream replay 生成同一条
+会话轨迹，验证 fixture 的 entry revision、局部/全局 sequence 与生命周期事件
+均可由当前实现产生。它不宣称两个新增 endpoint 已在当前分支实现；后续 ZER-952
+的实现 PR 必须用同一 fixture 增加真实 HTTP 集成测试。
