@@ -1,0 +1,525 @@
+{
+  "contract": "codeg-openab-session",
+  "version": 1,
+  "session_id": "admin:fixture-session",
+  "encoded_session_id": "admin%3Afixture-session",
+  "auth": {
+    "header": "Authorization",
+    "scheme": "Bearer",
+    "token_placeholder": "<admin-token>",
+    "query_token": false,
+    "legacy_header_accepted_by_server": "x-openab-admin-token"
+  },
+  "snapshot": {
+    "session_id": "admin:fixture-session",
+    "agent": "fixture-acp",
+    "source": {
+      "platform": "admin",
+      "thread_id": "fixture-session"
+    },
+    "workdir": "/workspace/project",
+    "profile_id": "codex-default",
+    "profile_name": "Codex Default",
+    "profile_status": "active",
+    "model": "gpt-5",
+    "reasoning_effort": "high",
+    "metadata_source": "acp",
+    "status": "idle",
+    "created_at": "2026-09-03T00:00:00Z",
+    "updated_at": "2026-09-03T00:00:00Z"
+  },
+  "endpoints": [
+    {
+      "name": "list_sessions",
+      "method": "GET",
+      "path": "/api/v1/sessions",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>"
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": [
+          {
+            "session_id": "admin:fixture-session",
+            "agent": "fixture-acp",
+            "source": {
+              "platform": "admin",
+              "thread_id": "fixture-session"
+            },
+            "workdir": "/workspace/project",
+            "profile_id": "codex-default",
+            "profile_name": "Codex Default",
+            "profile_status": "active",
+            "model": "gpt-5",
+            "reasoning_effort": "high",
+            "metadata_source": "acp",
+            "status": "idle",
+            "created_at": "2026-09-03T00:00:00Z",
+            "updated_at": "2026-09-03T00:00:00Z",
+            "title": "请检查当前变更并运行测试"
+          }
+        ]
+      }
+    },
+    {
+      "name": "create_session",
+      "method": "POST",
+      "path": "/api/v1/sessions",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "profile_id": "codex-default"
+        }
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "session_id": "admin:fixture-session",
+          "agent": "fixture-acp",
+          "source": {
+            "platform": "admin",
+            "thread_id": "fixture-session"
+          },
+          "workdir": "/workspace/project",
+          "profile_id": "codex-default",
+          "profile_name": "Codex Default",
+          "profile_status": "active",
+          "model": "gpt-5",
+          "reasoning_effort": "high",
+          "metadata_source": "acp",
+          "status": "idle",
+          "created_at": "2026-09-03T00:00:00Z",
+          "updated_at": "2026-09-03T00:00:00Z"
+        }
+      }
+    },
+    {
+      "name": "get_session",
+      "method": "GET",
+      "path": "/api/v1/sessions/{session_id}",
+      "example_path": "/api/v1/sessions/admin%3Afixture-session",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>"
+        }
+      },
+      "responses": {
+        "success": {
+          "status": 200,
+          "body": {
+            "session_id": "admin:fixture-session",
+            "agent": "fixture-acp",
+            "source": {
+              "platform": "admin",
+              "thread_id": "fixture-session"
+            },
+            "workdir": "/workspace/project",
+            "profile_id": "codex-default",
+            "profile_name": "Codex Default",
+            "profile_status": "active",
+            "model": "gpt-5",
+            "reasoning_effort": "high",
+            "metadata_source": "acp",
+            "status": "idle",
+            "created_at": "2026-09-03T00:00:00Z",
+            "updated_at": "2026-09-03T00:00:00Z"
+          }
+        },
+        "missing": {
+          "status": 404,
+          "body": {
+            "error": "session not found"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_transcript",
+      "method": "GET",
+      "path": "/api/v1/sessions/{session_id}/transcript",
+      "example_path": "/api/v1/sessions/admin%3Afixture-session/transcript",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>"
+        },
+        "query": {
+          "after": 1
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "session_id": "admin:fixture-session",
+          "entries": [
+            {
+              "entry_id": "entry-2",
+              "sequence": 2,
+              "timestamp": "2026-09-03T00:00:02Z",
+              "role": "assistant",
+              "content": "我会先检查变更，然后运行测试。",
+              "status": "completed"
+            },
+            {
+              "entry_id": "entry-4",
+              "sequence": 4,
+              "timestamp": "2026-09-03T00:00:04Z",
+              "role": "tool",
+              "content": "运行测试",
+              "tool_call": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-1",
+                "title": "运行测试",
+                "rawInput": {
+                  "command": "cargo test"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "测试通过"
+                  }
+                ]
+              },
+              "tool_result": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-1",
+                "title": "运行测试",
+                "rawInput": {
+                  "command": "cargo test"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "测试通过"
+                  }
+                ]
+              },
+              "tool_call_id": "tool-1",
+              "status": "completed"
+            }
+          ],
+          "overflowed": false,
+          "oldest_sequence": 1,
+          "next_sequence": 5,
+          "stream_generation": "fixture-generation",
+          "stream_next_sequence": 7
+        }
+      }
+    },
+    {
+      "name": "stream_session_events",
+      "method": "GET",
+      "path": "/api/v1/sessions/events",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>",
+          "Last-Event-ID": "fixture-generation:2"
+        }
+      },
+      "response": {
+        "status": 200,
+        "content_type": "text/event-stream",
+        "events": [
+          {
+            "id": "fixture-generation:3",
+            "event": "transcript",
+            "data": {
+              "sequence": 3,
+              "session_id": "admin:fixture-session",
+              "entry": {
+                "entry_id": "entry-1",
+                "sequence": 1,
+                "timestamp": "2026-09-03T00:00:01Z",
+                "role": "user",
+                "content": "请检查当前变更并运行测试",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "fixture-generation:4",
+            "event": "transcript",
+            "data": {
+              "sequence": 4,
+              "session_id": "admin:fixture-session",
+              "entry": {
+                "entry_id": "entry-2",
+                "sequence": 2,
+                "timestamp": "2026-09-03T00:00:02Z",
+                "role": "assistant",
+                "content": "我会先检查变更，然后运行测试。",
+                "status": "streaming"
+              }
+            }
+          },
+          {
+            "id": "fixture-generation:5",
+            "event": "transcript",
+            "data": {
+              "sequence": 5,
+              "session_id": "admin:fixture-session",
+              "entry": {
+                "entry_id": "entry-3",
+                "sequence": 3,
+                "timestamp": "2026-09-03T00:00:03Z",
+                "role": "assistant",
+                "content": "正在检查测试配置。",
+                "status": "thinking"
+              }
+            }
+          },
+          {
+            "id": "fixture-generation:6",
+            "event": "transcript",
+            "data": {
+              "sequence": 6,
+              "session_id": "admin:fixture-session",
+              "entry": {
+                "entry_id": "entry-4",
+                "sequence": 4,
+                "timestamp": "2026-09-03T00:00:04Z",
+                "role": "tool",
+                "content": "运行测试",
+                "tool_call": {
+                  "sessionUpdate": "tool_call",
+                  "toolCallId": "tool-1",
+                  "title": "运行测试",
+                  "rawInput": {
+                    "command": "cargo test"
+                  }
+                },
+                "tool_call_id": "tool-1",
+                "status": "running"
+              }
+            }
+          },
+          {
+            "id": "fixture-generation:7",
+            "event": "transcript",
+            "data": {
+              "sequence": 7,
+              "session_id": "admin:fixture-session",
+              "entry": {
+                "entry_id": "entry-4",
+                "sequence": 5,
+                "timestamp": "2026-09-03T00:00:05Z",
+                "role": "tool",
+                "content": "运行测试",
+                "tool_call": {
+                  "sessionUpdate": "tool_call_update",
+                  "toolCallId": "tool-1",
+                  "title": "运行测试",
+                  "rawInput": {
+                    "command": "cargo test"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "测试通过"
+                    }
+                  ]
+                },
+                "tool_result": {
+                  "sessionUpdate": "tool_call_update",
+                  "toolCallId": "tool-1",
+                  "title": "运行测试",
+                  "rawInput": {
+                    "command": "cargo test"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "测试通过"
+                    }
+                  ]
+                },
+                "tool_call_id": "tool-1",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "fixture-generation:8",
+            "event": "transcript",
+            "data": {
+              "sequence": 8,
+              "session_id": "admin:fixture-session",
+              "entry": {
+                "entry_id": "entry-2",
+                "sequence": 6,
+                "timestamp": "2026-09-03T00:00:06Z",
+                "role": "assistant",
+                "content": "检查完成，测试通过。",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "fixture-generation:9",
+            "event": "status_changed",
+            "data": {
+              "sequence": 9,
+              "event": "status_changed",
+              "snapshot": {
+                "session_id": "admin:fixture-session",
+                "agent": "fixture-acp",
+                "source": {
+                  "platform": "admin",
+                  "thread_id": "fixture-session"
+                },
+                "workdir": "/workspace/project",
+                "profile_id": "codex-default",
+                "profile_name": "Codex Default",
+                "profile_status": "active",
+                "model": "gpt-5",
+                "reasoning_effort": "high",
+                "metadata_source": "acp",
+                "status": "idle",
+                "created_at": "2026-09-03T00:00:00Z",
+                "updated_at": "2026-09-03T00:00:06Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "send_message",
+      "method": "POST",
+      "path": "/api/v1/sessions/{session_id}/messages",
+      "example_path": "/api/v1/sessions/admin%3Afixture-session/messages",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "text": "请检查当前变更并运行测试"
+        }
+      },
+      "responses": {
+        "accepted": {
+          "status": 202,
+          "body": {
+            "accepted": true,
+            "session_id": "admin:fixture-session"
+          }
+        },
+        "unauthorized": {
+          "status": 401,
+          "body": {
+            "error": "invalid or missing admin token"
+          }
+        },
+        "auth_not_configured": {
+          "status": 503,
+          "body": {
+            "error": "admin token is not configured"
+          }
+        },
+        "empty_text": {
+          "status": 400,
+          "body": {
+            "error": "text is required"
+          }
+        },
+        "missing_session": {
+          "status": 404,
+          "body": {
+            "error": "session not found"
+          }
+        },
+        "busy": {
+          "status": 409,
+          "body": {
+            "error": "session is busy"
+          }
+        }
+      },
+      "http_response_contains_final_text": false
+    },
+    {
+      "name": "cancel_session",
+      "method": "POST",
+      "path": "/api/v1/sessions/{session_id}/cancel",
+      "example_path": "/api/v1/sessions/admin%3Afixture-session/cancel",
+      "request": {
+        "headers": {
+          "Authorization": "Bearer <admin-token>"
+        },
+        "body": null
+      },
+      "responses": {
+        "accepted_running": {
+          "status": 200,
+          "body": {
+            "accepted": true,
+            "session_id": "admin:fixture-session"
+          }
+        },
+        "accepted_idle": {
+          "status": 200,
+          "body": {
+            "accepted": true,
+            "session_id": "admin:fixture-session"
+          }
+        },
+        "unauthorized": {
+          "status": 401,
+          "body": {
+            "error": "invalid or missing admin token"
+          }
+        },
+        "auth_not_configured": {
+          "status": 503,
+          "body": {
+            "error": "admin token is not configured"
+          }
+        },
+        "missing_session": {
+          "status": 404,
+          "body": {
+            "error": "session not found"
+          }
+        }
+      },
+      "idempotent_for_idle_session": true,
+      "uses_acp_method": "session/cancel",
+      "process_kill_guaranteed": false
+    }
+  ],
+  "recovery_events": [
+    {
+      "id": "fixture-generation:0",
+      "event": "cursor_reset",
+      "data": {
+        "error": "event cursor generation changed",
+        "last_event_generation": "previous-generation",
+        "last_sequence": 42,
+        "current_generation": "fixture-generation",
+        "action": "refetch /api/v1/sessions before continuing the stream"
+      }
+    },
+    {
+      "event": "error",
+      "data": {
+        "error": "event history unavailable",
+        "last_event_id": 1,
+        "oldest_sequence": 5,
+        "next_sequence": 9,
+        "action": "refetch /api/v1/sessions before continuing the stream"
+      }
+    },
+    {
+      "event": "error",
+      "data": {
+        "error": "event stream lagged",
+        "skipped": 2
+      }
+    }
+  ]
+}
