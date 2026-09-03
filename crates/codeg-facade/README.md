@@ -7,7 +7,10 @@ It provides:
 
 - static file lookup in the order `rel`, `rel.html`, `rel/index.html`,
   then `index.html`;
-- the 22 cold-start `POST /api/{command}` compatibility endpoints;
+- the 23 observed cold-start `POST /api/{command}` compatibility
+  endpoints, plus `save_opened_tabs` so a later tab persist does not 404;
+- object-shaped DTOs for `app_update_status`, `app_update_state`,
+  `check_app_update`, and `get_feedback_settings`;
 - Bearer authentication using the existing gateway admin token; and
 - the `/ws/events` Codeg subprotocol handshake and immediate
   `{"channel":"__ready__"}` event.

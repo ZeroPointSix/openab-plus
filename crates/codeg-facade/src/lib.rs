@@ -1,5 +1,5 @@
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         OriginalUri, Path as AxumPath, State,
@@ -12,7 +12,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     ffi::OsString,
     fmt,
@@ -30,7 +30,7 @@ const CODEG_TOKEN_PROTOCOL_PREFIX: &str = "codeg-token.";
 const READY_MESSAGE: &str = r#"{"channel":"__ready__"}"#;
 static CHAT_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub const COLD_START_COMMANDS: [&str; 23] = [
+pub const COLD_START_COMMANDS: [&str; 24] = [
     "automation_list",
     "work_task_list",
     "science_list",
@@ -50,6 +50,7 @@ pub const COLD_START_COMMANDS: [&str; 23] = [
     "list_open_folder_details",
     "list_workspace_files",
     "list_opened_tabs",
+    "save_opened_tabs",
     "list_all_conversations",
     "create_chat_dir",
     "acp_list_agents",
@@ -188,90 +189,112 @@ async fn rpc(
     State(config): State<Config>,
     AxumPath(command): AxumPath<String>,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
     if !authorized(&headers, &config) {
         return unauthorized();
     }
 
-    let response = if matches!(
-        command.as_str(),
-        "automation_list"
-            | "work_task_list"
-            | "science_list"
-            | "science_list_all_install_statuses"
-            | "experts_list"
-            | "experts_list_all_install_statuses"
-            | "officecli_skill_list_all_install_statuses"
-            | "list_folder_groups"
-            | "list_all_folder_details"
-            | "list_open_folder_details"
-            | "list_workspace_files"
-            | "list_all_conversations"
-            | "acp_list_agents"
-    ) {
-        json!([])
-    } else {
-        match command.as_str() {
-            "app_update_status" => json!({
-                "currentVersion": env!("CARGO_PKG_VERSION"),
-                "selfUpdateSupported": false,
-                "capability": "reexec",
-                "runtime": "standalone",
-                "restartDelayMs": 0,
-                "rollbackAvailable": false,
-                "liveProgress": false
-            }),
-            "app_update_state" => json!({
-                "seq": 0,
-                "status": "idle"
-            }),
-            "check_app_update" => json!({
-                "currentVersion": env!("CARGO_PKG_VERSION"),
-                "update": null,
-                "selfUpdateSupported": false,
-                "capability": "reexec",
-                "runtime": "standalone",
-                "restartDelayMs": 0,
-                "rollbackAvailable": false,
-                "liveProgress": false
-            }),
-            "get_feedback_settings" => json!({
-                "enabled": false
-            }),
-            "health" => json!({ "status": "ok" }),
-            "get_system_language_settings" => {
-                json!({ "mode": "system", "language": "en" })
-            }
-            "get_system_terminal_settings" => json!({ "default_shell": null }),
-            "list_opened_tabs" => json!({ "items": [], "version": 0 }),
-            "create_chat_dir" => match create_chat_dir(&config).await {
-                Ok(path) => json!({ "path": path }),
-                Err(error) => {
-                    tracing::error!(%error, "failed to create Codeg chat directory");
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": "failed to create chat directory" })),
-                    )
-                        .into_response();
-                }
-            },
-            "acp_list_agent_skills" => json!({
-                "supported": false,
-                "message": "Agent skills are not available in phase one",
-                "locations": [],
-                "skills": []
-            }),
-            _ => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "error": "unknown Codeg command" })),
+    if command == "create_chat_dir" {
+        return match create_chat_dir(&config).await {
+            Ok(path) => Json(json!({ "path": path })).into_response(),
+            Err(error) => {
+                tracing::error!(%error, "failed to create Codeg chat directory");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "failed to create chat directory" })),
                 )
-                    .into_response();
+                    .into_response()
             }
-        }
-    };
+        };
+    }
 
-    Json(response).into_response()
+    match stub_payload(&command, &json_request_body(&body)) {
+        Some(response) => Json(response).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown Codeg command" })),
+        )
+            .into_response(),
+    }
+}
+
+fn json_request_body(bytes: &[u8]) -> Value {
+    if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(bytes).unwrap_or_else(|_| json!({}))
+    }
+}
+
+fn server_update_status() -> Value {
+    json!({
+        "currentVersion": env!("CARGO_PKG_VERSION"),
+        "selfUpdateSupported": false,
+        "capability": "reexec",
+        "runtime": "standalone",
+        "restartDelayMs": 0,
+        "rollbackAvailable": false,
+        "liveProgress": false
+    })
+}
+
+fn stub_payload(command: &str, payload: &Value) -> Option<Value> {
+    Some(match command {
+        "automation_list"
+        | "work_task_list"
+        | "science_list"
+        | "science_list_all_install_statuses"
+        | "experts_list"
+        | "experts_list_all_install_statuses"
+        | "officecli_skill_list_all_install_statuses"
+        | "list_folder_groups"
+        | "list_all_folder_details"
+        | "list_open_folder_details"
+        | "list_workspace_files"
+        | "list_all_conversations"
+        | "acp_list_agents" => json!([]),
+        "app_update_status" => server_update_status(),
+        "app_update_state" => json!({
+            "seq": 0,
+            "status": "idle"
+        }),
+        "check_app_update" => {
+            let mut status = server_update_status();
+            if let Some(object) = status.as_object_mut() {
+                object.insert("update".to_owned(), Value::Null);
+            }
+            status
+        }
+        "get_feedback_settings" => json!({
+            "enabled": false
+        }),
+        "health" => json!({ "status": "ok" }),
+        "get_system_language_settings" => {
+            json!({ "mode": "system", "language": "en" })
+        }
+        "get_system_terminal_settings" => json!({ "default_shell": null }),
+        "list_opened_tabs" => json!({ "items": [], "version": 0 }),
+        "save_opened_tabs" => {
+            let items = payload.get("items").cloned().unwrap_or_else(|| json!([]));
+            let expected = payload
+                .get("expectedVersion")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            json!({
+                "accepted": true,
+                "version": expected.saturating_add(1),
+                "tabs": items
+            })
+        }
+        "acp_list_agent_skills" => json!({
+            "supported": false,
+            "message": "Agent skills are not available in phase one",
+            "locations": [],
+            "skills": []
+        }),
+        _ => return None,
+    })
 }
 
 async fn create_chat_dir(config: &Config) -> Result<String, std::io::Error> {
@@ -509,6 +532,10 @@ mod tests {
     }
 
     fn post(command: &str, token: Option<&str>) -> Request<Body> {
+        post_json(command, token, "{}")
+    }
+
+    fn post_json(command: &str, token: Option<&str>, body: &str) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
             .uri(format!("/api/{command}"))
@@ -516,7 +543,7 @@ mod tests {
         if let Some(token) = token {
             builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
-        builder.body(Body::from("{}")).unwrap()
+        builder.body(Body::from(body.to_owned())).unwrap()
     }
 
     async fn json_body(response: Response) -> Value {
@@ -538,6 +565,32 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "{command}");
             let body = json_body(response).await;
             assert!(!body.is_null(), "{command}");
+            match command {
+                "app_update_status"
+                | "app_update_state"
+                | "check_app_update"
+                | "get_feedback_settings"
+                | "list_opened_tabs"
+                | "save_opened_tabs" => {
+                    assert!(body.is_object(), "{command} must return an object: {body}");
+                }
+                "automation_list"
+                | "work_task_list"
+                | "science_list"
+                | "science_list_all_install_statuses"
+                | "experts_list"
+                | "experts_list_all_install_statuses"
+                | "officecli_skill_list_all_install_statuses"
+                | "list_folder_groups"
+                | "list_all_folder_details"
+                | "list_open_folder_details"
+                | "list_workspace_files"
+                | "list_all_conversations"
+                | "acp_list_agents" => {
+                    assert!(body.is_array(), "{command} must return an array: {body}");
+                }
+                _ => {}
+            }
         }
 
         assert!(fs::read_dir(chat_root.path()).unwrap().next().is_some());
@@ -550,49 +603,45 @@ mod tests {
         let expected = [
             (
                 "app_update_status",
-                json!({
-                    "currentVersion": env!("CARGO_PKG_VERSION"),
-                    "selfUpdateSupported": false,
-                    "capability": "reexec",
-                    "runtime": "standalone",
-                    "restartDelayMs": 0,
-                    "rollbackAvailable": false,
-                    "liveProgress": false
-                }),
+                "{}",
+                stub_payload("app_update_status", &json!({})).unwrap(),
             ),
             (
                 "app_update_state",
-                json!({
-                    "seq": 0,
-                    "status": "idle"
-                }),
+                "{}",
+                stub_payload("app_update_state", &json!({})).unwrap(),
             ),
             (
                 "check_app_update",
-                json!({
-                    "currentVersion": env!("CARGO_PKG_VERSION"),
-                    "update": null,
-                    "selfUpdateSupported": false,
-                    "capability": "reexec",
-                    "runtime": "standalone",
-                    "restartDelayMs": 0,
-                    "rollbackAvailable": false,
-                    "liveProgress": false
-                }),
+                "{}",
+                stub_payload("check_app_update", &json!({})).unwrap(),
             ),
             (
                 "get_feedback_settings",
+                "{}",
+                stub_payload("get_feedback_settings", &json!({})).unwrap(),
+            ),
+            ("list_workspace_files", "{}", json!([])),
+            (
+                "list_opened_tabs",
+                "{}",
+                json!({ "items": [], "version": 0 }),
+            ),
+            (
+                "save_opened_tabs",
+                r#"{"items":[{"conversation_id":7}],"expectedVersion":3,"origin":"hydrate"}"#,
                 json!({
-                    "enabled": false
+                    "accepted": true,
+                    "version": 4,
+                    "tabs": [{ "conversation_id": 7 }]
                 }),
             ),
-            ("list_workspace_files", json!([])),
         ];
 
-        for (command, expected_body) in expected {
+        for (command, request_body, expected_body) in expected {
             let response = app
                 .clone()
-                .oneshot(post(command, Some("secret")))
+                .oneshot(post_json(command, Some("secret"), request_body))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{command}");

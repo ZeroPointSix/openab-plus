@@ -5,6 +5,20 @@ const token = process.env.CODEG_TEST_TOKEN ?? "ci-codeg-token";
 const screenshotPath =
   process.env.CODEG_SCREENSHOT_PATH ?? "/tmp/codeg-browser-smoke.png";
 
+function isIgnorableUrl(url) {
+  try {
+    const { pathname } = new URL(url);
+    return (
+      pathname === "/favicon.ico" ||
+      pathname === "/apple-touch-icon.png" ||
+      pathname === "/apple-touch-icon-precomposed.png" ||
+      pathname.startsWith("/.well-known/")
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   const browser = await chromium.launch({ headless: true });
   try {
@@ -21,26 +35,41 @@ async function main() {
       fatalErrors.push(`page error: ${error.message}`),
     );
     page.on("response", (httpResponse) => {
-      if (httpResponse.status() >= 400) {
-        const request = httpResponse.request();
-        fatalErrors.push(
-          `HTTP ${httpResponse.status()} ${request.resourceType()} ${httpResponse.url()}`,
-        );
+      if (httpResponse.status() < 400 || isIgnorableUrl(httpResponse.url())) {
+        return;
       }
+      const request = httpResponse.request();
+      fatalErrors.push(
+        `HTTP ${httpResponse.status()} ${request.method()} ${request.resourceType()} ${httpResponse.url()}`,
+      );
     });
     page.on("requestfailed", (request) => {
+      if (isIgnorableUrl(request.url())) {
+        return;
+      }
       fatalErrors.push(
-        `request failed ${request.resourceType()} ${request.url()}: ${request.failure()?.errorText ?? "unknown error"}`,
+        `request failed ${request.method()} ${request.resourceType()} ${request.url()}: ${request.failure()?.errorText ?? "unknown error"}`,
       );
     });
     page.on("console", (message) => {
-      if (message.type() === "error") {
-        const location = message.location();
-        const source = location.url
-          ? ` at ${location.url}:${location.lineNumber}:${location.columnNumber}`
-          : "";
-        fatalErrors.push(`console: ${message.text()}${source}`);
+      if (message.type() !== "error") {
+        return;
       }
+      const text = message.text();
+      // Chromium logs 4xx fetches without a URL; the response listener already
+      // records method + URL for the real request.
+      if (
+        /Failed to load resource: the server responded with a status of \d{3}/.test(
+          text,
+        )
+      ) {
+        return;
+      }
+      const location = message.location();
+      const source = location.url
+        ? ` at ${location.url}:${location.lineNumber}:${location.columnNumber}`
+        : "";
+      fatalErrors.push(`console: ${text}${source}`);
     });
 
     const response = await page.goto(baseUrl, {
@@ -51,14 +80,16 @@ async function main() {
       throw new Error(`workbench navigation returned HTTP ${response?.status()}`);
     }
 
-    await page.waitForURL(
-      (url) => url.pathname.startsWith("/workspace"),
-      { timeout: 30000 },
-    );
+    await page.waitForURL((url) => url.pathname.startsWith("/workspace"), {
+      timeout: 30000,
+    });
     await page.waitForFunction(
       () => document.body.innerText.trim().length >= 20,
       { timeout: 30000 },
     );
+    // Tab persist is debounced 500ms after hydrate; wait long enough to catch
+    // a missing `save_opened_tabs` (or similar deferred RPC) as an HTTP 404.
+    await page.waitForTimeout(1500);
     const pathname = new URL(page.url()).pathname;
     if (pathname.startsWith("/login")) {
       throw new Error("existing admin token did not pass the Codeg login gate");
