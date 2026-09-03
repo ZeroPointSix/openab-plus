@@ -212,7 +212,8 @@ fn freezes_idempotent_cancel_and_best_effort_semantics() {
     assert_eq!(running_follow_up.as_array().map(Vec::len), Some(1));
     assert_eq!(running_follow_up[0]["event"], "status_changed");
 
-    let idle_follow_up = &response(endpoint, "accepted_idle")["sse_result"]["possible_follow_up"];
+    let idle_follow_up =
+        &response(endpoint, "accepted_idle")["sse_result"]["possible_follow_up"];
     assert_eq!(idle_follow_up.as_array().map(Vec::len), Some(0));
 
     for (name, status, error) in [
