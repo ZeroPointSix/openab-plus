@@ -3,9 +3,12 @@
 # Default (backward-compatible):
 #   docker build -f Dockerfile.gateway -t openab-gateway .
 #
-# Codeg facade (requires a Codeg checkout at ./codeg with a built ./codeg/out):
+# Codeg facade (requires a Codeg checkout at ./codeg with a built ./codeg/out).
+# Pass default gateway adapters plus `codeg`; `--no-default-features` below
+# replaces the Cargo default set, so omitting adapters would drop them.
 #   docker build -f Dockerfile.gateway --target codeg \
-#     --build-arg FEATURES=codeg -t openab-gateway:codeg .
+#     --build-arg FEATURES=telegram,line,feishu,googlechat,wecom,teams,codeg \
+#     -t openab-gateway:codeg .
 #
 # Adapter-specific:
 #   docker build -f Dockerfile.gateway \
@@ -32,8 +35,8 @@ RUN mkdir -p src crates/codeg-facade/src crates/openab-core/src crates/openab-ga
 COPY crates/ crates/
 COPY src/ src/
 COPY web/ web/
-RUN touch crates/codeg-facade/src/lib.rs crates/openab-gateway/src/main.rs \
-          crates/openab-gateway/src/lib.rs \
+RUN touch crates/codeg-facade/src/lib.rs crates/openab-core/src/lib.rs \
+          crates/openab-gateway/src/main.rs crates/openab-gateway/src/lib.rs \
     && if [ -n "$FEATURES" ]; then \
       cargo build --release -p openab-gateway --no-default-features --features "$FEATURES"; \
     else \

@@ -121,7 +121,7 @@ jobs:
           docker build \
             --file Dockerfile.gateway \
             --target codeg \
-            --build-arg FEATURES=codeg \
+            --build-arg FEATURES=telegram,line,feishu,googlechat,wecom,teams,codeg \
             --tag openab-gateway:codeg-ci \
             .
 
