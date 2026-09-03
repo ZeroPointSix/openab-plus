@@ -1,0 +1,560 @@
+{
+  "contract": "openab.codeg.session.v1",
+  "fixture_version": 1,
+  "session": {
+    "id": "admin:contract-demo",
+    "encoded_path_segment": "admin%3Acontract-demo"
+  },
+  "auth": {
+    "required": true,
+    "header": "Authorization",
+    "scheme": "Bearer",
+    "fetch_sse": true,
+    "query_token": false,
+    "token": "fixture-admin-token"
+  },
+  "endpoints": [
+    {
+      "id": "sessions.list",
+      "method": "GET",
+      "path": "/api/v1/sessions",
+      "success_status": 200,
+      "implementation": "existing",
+      "follow_up": "ZER-951"
+    },
+    {
+      "id": "sessions.create",
+      "method": "POST",
+      "path": "/api/v1/sessions",
+      "success_status": 201,
+      "implementation": "existing",
+      "follow_up": "ZER-951"
+    },
+    {
+      "id": "sessions.detail",
+      "method": "GET",
+      "path": "/api/v1/sessions/{session_id}",
+      "success_status": 200,
+      "implementation": "existing",
+      "follow_up": "ZER-951"
+    },
+    {
+      "id": "sessions.transcript",
+      "method": "GET",
+      "path": "/api/v1/sessions/{session_id}/transcript",
+      "success_status": 200,
+      "implementation": "existing",
+      "follow_up": "ZER-951"
+    },
+    {
+      "id": "sessions.events",
+      "method": "GET",
+      "path": "/api/v1/sessions/events",
+      "success_status": 200,
+      "media_type": "text/event-stream",
+      "implementation": "existing",
+      "follow_up": "ZER-951"
+    },
+    {
+      "id": "sessions.messages",
+      "method": "POST",
+      "path": "/api/v1/sessions/{session_id}/messages",
+      "success_status": 202,
+      "implementation": "planned",
+      "follow_up": "ZER-952"
+    },
+    {
+      "id": "sessions.cancel",
+      "method": "POST",
+      "path": "/api/v1/sessions/{session_id}/cancel",
+      "success_status": 204,
+      "implementation": "planned",
+      "follow_up": "ZER-952"
+    }
+  ],
+  "common_errors": {
+    "token_not_configured": {
+      "status": 503,
+      "body": {
+        "error": "admin token is not configured"
+      }
+    },
+    "unauthorized": {
+      "status": 401,
+      "body": {
+        "error": "invalid or missing admin token"
+      }
+    }
+  },
+  "write_cases": {
+    "messages": {
+      "accepted": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/messages",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "Run the contract check"
+          }
+        },
+        "response": {
+          "status": 202,
+          "body": null
+        },
+        "sse_result": [
+          {
+            "id": "0123456789abcdef0123456789abcdef:101",
+            "event": "status_changed",
+            "data": {
+              "sequence": 101,
+              "event": "status_changed",
+              "snapshot": {
+                "session_id": "admin:contract-demo",
+                "agent": "claude",
+                "source": {
+                  "platform": "admin",
+                  "thread_id": "contract-demo"
+                },
+                "workdir": "/workspace/demo",
+                "status": "running",
+                "created_at": "2026-09-03T14:00:00Z",
+                "updated_at": "2026-09-03T14:00:01Z"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:102",
+            "event": "transcript",
+            "data": {
+              "sequence": 102,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-1",
+                "sequence": 1,
+                "timestamp": "2026-09-03T14:00:01Z",
+                "role": "user",
+                "content": "Run the contract check",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:103",
+            "event": "transcript",
+            "data": {
+              "sequence": 103,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-2",
+                "sequence": 2,
+                "timestamp": "2026-09-03T14:00:02Z",
+                "role": "assistant",
+                "content": "Inspecting the contract fixture.",
+                "status": "thinking"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:104",
+            "event": "transcript",
+            "data": {
+              "sequence": 104,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-3",
+                "sequence": 3,
+                "timestamp": "2026-09-03T14:00:03Z",
+                "role": "tool",
+                "content": "Read contract fixture",
+                "tool_call": {
+                  "toolCallId": "tool-1",
+                  "title": "Read contract fixture"
+                },
+                "tool_call_id": "tool-1",
+                "status": "in_progress"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:105",
+            "event": "transcript",
+            "data": {
+              "sequence": 105,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-3",
+                "sequence": 4,
+                "timestamp": "2026-09-03T14:00:04Z",
+                "role": "tool",
+                "content": "Read contract fixture",
+                "tool_call": {
+                  "toolCallId": "tool-1",
+                  "title": "Read contract fixture",
+                  "output": "fixture valid"
+                },
+                "tool_result": {
+                  "toolCallId": "tool-1",
+                  "title": "Read contract fixture",
+                  "output": "fixture valid"
+                },
+                "tool_call_id": "tool-1",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:106",
+            "event": "transcript",
+            "data": {
+              "sequence": 106,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-4",
+                "sequence": 5,
+                "timestamp": "2026-09-03T14:00:05Z",
+                "role": "assistant",
+                "content": "The contract is valid.",
+                "status": "streaming"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:107",
+            "event": "transcript",
+            "data": {
+              "sequence": 107,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-4",
+                "sequence": 6,
+                "timestamp": "2026-09-03T14:00:06Z",
+                "role": "assistant",
+                "content": "The contract is valid.",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:108",
+            "event": "status_changed",
+            "data": {
+              "sequence": 108,
+              "event": "status_changed",
+              "snapshot": {
+                "session_id": "admin:contract-demo",
+                "agent": "claude",
+                "source": {
+                  "platform": "admin",
+                  "thread_id": "contract-demo"
+                },
+                "workdir": "/workspace/demo",
+                "status": "idle",
+                "created_at": "2026-09-03T14:00:00Z",
+                "updated_at": "2026-09-03T14:00:06Z"
+              }
+            }
+          }
+        ]
+      },
+      "empty_text": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/messages",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "   "
+          }
+        },
+        "response": {
+          "status": 400,
+          "body": {
+            "error": "message text is required"
+          }
+        }
+      },
+      "missing_session": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/missing/messages",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "Run the contract check"
+          }
+        },
+        "response": {
+          "status": 404,
+          "body": {
+            "error": "session not found"
+          }
+        }
+      },
+      "busy": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/messages",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "Start a second turn"
+          }
+        },
+        "response": {
+          "status": 409,
+          "body": {
+            "error": "session is busy"
+          }
+        }
+      },
+      "pre_accept_failure": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/messages",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "Run the contract check"
+          }
+        },
+        "response": {
+          "status": 500,
+          "body": {
+            "error": "failed to start session turn"
+          }
+        }
+      },
+      "agent_error_after_accept": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/messages",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token",
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "text": "Trigger the fixture error"
+          }
+        },
+        "response": {
+          "status": 202,
+          "body": null
+        },
+        "sse_result": [
+          {
+            "id": "0123456789abcdef0123456789abcdef:201",
+            "event": "status_changed",
+            "data": {
+              "sequence": 201,
+              "event": "status_changed",
+              "snapshot": {
+                "session_id": "admin:contract-demo",
+                "agent": "claude",
+                "source": {
+                  "platform": "admin",
+                  "thread_id": "contract-demo"
+                },
+                "workdir": "/workspace/demo",
+                "status": "running",
+                "created_at": "2026-09-03T14:00:00Z",
+                "updated_at": "2026-09-03T14:01:00Z"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:202",
+            "event": "transcript",
+            "data": {
+              "sequence": 202,
+              "session_id": "admin:contract-demo",
+              "entry": {
+                "entry_id": "entry-5",
+                "sequence": 7,
+                "timestamp": "2026-09-03T14:01:00Z",
+                "role": "user",
+                "content": "Trigger the fixture error",
+                "status": "completed"
+              }
+            }
+          },
+          {
+            "id": "0123456789abcdef0123456789abcdef:203",
+            "event": "error",
+            "data": {
+              "sequence": 203,
+              "event": "error",
+              "snapshot": {
+                "session_id": "admin:contract-demo",
+                "agent": "claude",
+                "source": {
+                  "platform": "admin",
+                  "thread_id": "contract-demo"
+                },
+                "workdir": "/workspace/demo",
+                "status": "error",
+                "last_error": "agent turn failed",
+                "created_at": "2026-09-03T14:00:00Z",
+                "updated_at": "2026-09-03T14:01:01Z"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "cancel": {
+      "running": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/cancel",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token"
+          },
+          "body": null
+        },
+        "response": {
+          "status": 204,
+          "body": null
+        },
+        "sse_result": {
+          "dedicated_cancel_event": false,
+          "guaranteed_events": [],
+          "possible_follow_up": [
+            {
+              "id": "0123456789abcdef0123456789abcdef:301",
+              "event": "status_changed",
+              "data": {
+                "sequence": 301,
+                "event": "status_changed",
+                "snapshot": {
+                  "session_id": "admin:contract-demo",
+                  "agent": "claude",
+                  "source": {
+                    "platform": "admin",
+                    "thread_id": "contract-demo"
+                  },
+                  "workdir": "/workspace/demo",
+                  "status": "idle",
+                  "created_at": "2026-09-03T14:00:00Z",
+                  "updated_at": "2026-09-03T14:02:00Z"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "idle": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/cancel",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token"
+          },
+          "body": null
+        },
+        "response": {
+          "status": 204,
+          "body": null
+        },
+        "sse_result": {
+          "dedicated_cancel_event": false,
+          "guaranteed_events": [],
+          "possible_follow_up": []
+        }
+      },
+      "missing_session": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/missing/cancel",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token"
+          },
+          "body": null
+        },
+        "response": {
+          "status": 404,
+          "body": {
+            "error": "session not found"
+          }
+        }
+      },
+      "send_failure": {
+        "request": {
+          "method": "POST",
+          "path": "/api/v1/sessions/admin%3Acontract-demo/cancel",
+          "headers": {
+            "Authorization": "Bearer fixture-admin-token"
+          },
+          "body": null
+        },
+        "response": {
+          "status": 500,
+          "body": {
+            "error": "failed to cancel session"
+          }
+        }
+      }
+    }
+  },
+  "recovery": {
+    "request": {
+      "method": "GET",
+      "path": "/api/v1/sessions/events",
+      "headers": {
+        "Authorization": "Bearer fixture-admin-token",
+        "Last-Event-ID": "fedcba9876543210fedcba9876543210:99"
+      }
+    },
+    "cursor_reset": {
+      "id": "0123456789abcdef0123456789abcdef:0",
+      "event": "cursor_reset",
+      "data": {
+        "error": "event cursor generation changed",
+        "last_event_generation": "fedcba9876543210fedcba9876543210",
+        "last_sequence": 99,
+        "current_generation": "0123456789abcdef0123456789abcdef",
+        "action": "refetch /api/v1/sessions before continuing the stream"
+      }
+    },
+    "history_unavailable": {
+      "id": null,
+      "event": "error",
+      "data": {
+        "error": "event history unavailable",
+        "last_event_id": 10,
+        "oldest_sequence": 20,
+        "next_sequence": 30,
+        "action": "refetch /api/v1/sessions before continuing the stream"
+      }
+    },
+    "receiver_lagged": {
+      "id": null,
+      "event": "error",
+      "data": {
+        "error": "event stream lagged",
+        "skipped": 4
+      }
+    }
+  },
+  "unsupported": [
+    "attachments",
+    "images",
+    "terminal",
+    "fs",
+    "permission",
+    "git",
+    "persistent_transcript",
+    "cross_machine_migration",
+    "remote_runtime"
+  ]
+}
