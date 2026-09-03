@@ -17,10 +17,29 @@ async function main() {
 
     const page = await context.newPage();
     const fatalErrors = [];
-    page.on("pageerror", (error) => fatalErrors.push(error.message));
+    page.on("pageerror", (error) =>
+      fatalErrors.push(`page error: ${error.message}`),
+    );
+    page.on("response", (httpResponse) => {
+      if (httpResponse.status() >= 400) {
+        const request = httpResponse.request();
+        fatalErrors.push(
+          `HTTP ${httpResponse.status()} ${request.resourceType()} ${httpResponse.url()}`,
+        );
+      }
+    });
+    page.on("requestfailed", (request) => {
+      fatalErrors.push(
+        `request failed ${request.resourceType()} ${request.url()}: ${request.failure()?.errorText ?? "unknown error"}`,
+      );
+    });
     page.on("console", (message) => {
       if (message.type() === "error") {
-        fatalErrors.push(message.text());
+        const location = message.location();
+        const source = location.url
+          ? ` at ${location.url}:${location.lineNumber}:${location.columnNumber}`
+          : "";
+        fatalErrors.push(`console: ${message.text()}${source}`);
       }
     });
 
@@ -32,7 +51,14 @@ async function main() {
       throw new Error(`workbench navigation returned HTTP ${response?.status()}`);
     }
 
-    await page.waitForTimeout(2000);
+    await page.waitForURL(
+      (url) => url.pathname.startsWith("/workspace"),
+      { timeout: 30000 },
+    );
+    await page.waitForFunction(
+      () => document.body.innerText.trim().length >= 20,
+      { timeout: 30000 },
+    );
     const pathname = new URL(page.url()).pathname;
     if (pathname.startsWith("/login")) {
       throw new Error("existing admin token did not pass the Codeg login gate");

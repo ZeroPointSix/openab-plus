@@ -30,7 +30,7 @@ const CODEG_TOKEN_PROTOCOL_PREFIX: &str = "codeg-token.";
 const READY_MESSAGE: &str = r#"{"channel":"__ready__"}"#;
 static CHAT_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub const COLD_START_COMMANDS: [&str; 22] = [
+pub const COLD_START_COMMANDS: [&str; 23] = [
     "automation_list",
     "work_task_list",
     "science_list",
@@ -48,6 +48,7 @@ pub const COLD_START_COMMANDS: [&str; 22] = [
     "list_folder_groups",
     "list_all_folder_details",
     "list_open_folder_details",
+    "list_workspace_files",
     "list_opened_tabs",
     "list_all_conversations",
     "create_chat_dir",
@@ -201,19 +202,42 @@ async fn rpc(
             | "experts_list"
             | "experts_list_all_install_statuses"
             | "officecli_skill_list_all_install_statuses"
-            | "app_update_status"
-            | "app_update_state"
-            | "check_app_update"
-            | "get_feedback_settings"
             | "list_folder_groups"
             | "list_all_folder_details"
             | "list_open_folder_details"
+            | "list_workspace_files"
             | "list_all_conversations"
             | "acp_list_agents"
     ) {
         json!([])
     } else {
         match command.as_str() {
+            "app_update_status" => json!({
+                "currentVersion": env!("CARGO_PKG_VERSION"),
+                "selfUpdateSupported": false,
+                "capability": "reexec",
+                "runtime": "standalone",
+                "restartDelayMs": 0,
+                "rollbackAvailable": false,
+                "liveProgress": false
+            }),
+            "app_update_state" => json!({
+                "seq": 0,
+                "status": "idle"
+            }),
+            "check_app_update" => json!({
+                "currentVersion": env!("CARGO_PKG_VERSION"),
+                "update": null,
+                "selfUpdateSupported": false,
+                "capability": "reexec",
+                "runtime": "standalone",
+                "restartDelayMs": 0,
+                "rollbackAvailable": false,
+                "liveProgress": false
+            }),
+            "get_feedback_settings" => json!({
+                "enabled": false
+            }),
             "health" => json!({ "status": "ok" }),
             "get_system_language_settings" => {
                 json!({ "mode": "system", "language": "en" })
@@ -517,6 +541,63 @@ mod tests {
         }
 
         assert!(fs::read_dir(chat_root.path()).unwrap().next().is_some());
+    }
+
+    #[tokio::test]
+    async fn phase_one_rpc_shapes_match_pinned_codeg_contracts() {
+        let (_static_root, _chat_root, config) = fixture();
+        let app = router::<()>(config);
+        let expected = [
+            (
+                "app_update_status",
+                json!({
+                    "currentVersion": env!("CARGO_PKG_VERSION"),
+                    "selfUpdateSupported": false,
+                    "capability": "reexec",
+                    "runtime": "standalone",
+                    "restartDelayMs": 0,
+                    "rollbackAvailable": false,
+                    "liveProgress": false
+                }),
+            ),
+            (
+                "app_update_state",
+                json!({
+                    "seq": 0,
+                    "status": "idle"
+                }),
+            ),
+            (
+                "check_app_update",
+                json!({
+                    "currentVersion": env!("CARGO_PKG_VERSION"),
+                    "update": null,
+                    "selfUpdateSupported": false,
+                    "capability": "reexec",
+                    "runtime": "standalone",
+                    "restartDelayMs": 0,
+                    "rollbackAvailable": false,
+                    "liveProgress": false
+                }),
+            ),
+            (
+                "get_feedback_settings",
+                json!({
+                    "enabled": false
+                }),
+            ),
+            ("list_workspace_files", json!([])),
+        ];
+
+        for (command, expected_body) in expected {
+            let response = app
+                .clone()
+                .oneshot(post(command, Some("secret")))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{command}");
+            assert_eq!(json_body(response).await, expected_body, "{command}");
+        }
     }
 
     #[tokio::test]

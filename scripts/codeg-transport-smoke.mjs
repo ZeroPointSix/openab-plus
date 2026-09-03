@@ -19,6 +19,7 @@ const commands = [
   "list_folder_groups",
   "list_all_folder_details",
   "list_open_folder_details",
+  "list_workspace_files",
   "list_opened_tabs",
   "list_all_conversations",
   "create_chat_dir",
