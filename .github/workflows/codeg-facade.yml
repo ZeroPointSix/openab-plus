@@ -1,0 +1,137 @@
+name: Codeg Facade
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/codeg-facade.yml"
+      - ".dockerignore"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile.gateway"
+      - "Dockerfile.unified"
+      - "crates/codeg-facade/**"
+      - "crates/openab-gateway/**"
+      - "scripts/codeg-*-smoke.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeg-facade-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODEG_REF: 7601c8dca7963a39dd9feb9a1a016c7ff3eb6215
+  CODEG_TEST_TOKEN: ci-codeg-token
+  CODEG_BASE_URL: http://127.0.0.1:18080
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out openab-plus
+        uses: actions/checkout@v6
+
+      - name: Check out pinned Codeg fork
+        uses: actions/checkout@v6
+        with:
+          repository: ZeroPointSix/codeg
+          ref: ${{ env.CODEG_REF }}
+          path: codeg
+          persist-credentials: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install pinned pnpm
+        run: npm install --global pnpm@11.9.0
+
+      - name: Install Codeg dependencies
+        working-directory: codeg
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Codeg static export
+        working-directory: codeg
+        run: pnpm build
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: codeg-facade
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint facade
+        run: cargo clippy -p codeg-facade --all-targets -- -D warnings
+
+      - name: Lint gateway integration
+        run: cargo clippy -p openab-gateway --features codeg -- -D warnings
+
+      - name: Test facade
+        run: cargo test -p codeg-facade
+
+      - name: Test gateway integration
+        run: cargo test -p openab-gateway --no-default-features --features codeg
+
+      - name: Build gateway integration
+        run: cargo build -p openab-gateway --release --no-default-features --features codeg
+
+      - name: Install browser smoke dependency
+        run: |
+          npm install --global playwright@1.51.1
+          playwright install --with-deps chromium
+
+      - name: Smoke transport and browser workbench
+        env:
+          CODEG_WEB_ROOT: ${{ github.workspace }}/codeg/out
+          GATEWAY_ADMIN_TOKEN: ${{ env.CODEG_TEST_TOKEN }}
+          GATEWAY_LISTEN: 127.0.0.1:18080
+          CODEG_SCREENSHOT_PATH: /tmp/codeg-browser-smoke.png
+        run: |
+          set -euo pipefail
+          target/release/openab-gateway >/tmp/codeg-gateway.log 2>&1 &
+          gateway_pid=$!
+          trap 'kill "$gateway_pid"; wait "$gateway_pid" || true' EXIT
+
+          for attempt in {1..30}; do
+            if curl --fail --silent "$CODEG_BASE_URL/" >/dev/null; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              cat /tmp/codeg-gateway.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          node scripts/codeg-transport-smoke.mjs
+          NODE_PATH="$(npm root --global)" node scripts/codeg-browser-smoke.cjs
+
+      - name: Build opt-in Codeg image
+        run: |
+          docker build \
+            --file Dockerfile.gateway \
+            --target codeg \
+            --build-arg FEATURES=codeg \
+            --tag openab-gateway:codeg-ci \
+            .
+
+      - name: Upload Codeg bundle and browser evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-facade-${{ github.sha }}
+          path: |
+            codeg/out
+            codeg/LICENSE
+            /tmp/codeg-browser-smoke.png
+          if-no-files-found: error
+          retention-days: 7

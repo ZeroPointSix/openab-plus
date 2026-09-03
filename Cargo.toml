@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/openab-core", "crates/openab-gateway"]
+members = ["crates/codeg-facade", "crates/openab-core", "crates/openab-gateway"]
 exclude = ["openab-agent", "crates/platform-schema"]
 
 [package]

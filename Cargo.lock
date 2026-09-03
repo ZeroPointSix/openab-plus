@@ -959,6 +959,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
+name = "codeg-facade"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "futures-util",
+ "http-body-util",
+ "percent-encoding",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2326,6 +2344,7 @@ dependencies = [
  "base64",
  "cbc",
  "chrono",
+ "codeg-facade",
  "futures-util",
  "hmac 0.12.1",
  "image",

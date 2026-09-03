@@ -1,5 +1,7 @@
 use axum::http::{header, HeaderMap, HeaderValue};
-use axum::response::{IntoResponse, Redirect, Response};
+#[cfg(not(feature = "codeg"))]
+use axum::response::Redirect;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
@@ -11,14 +13,19 @@ pub fn router<S>() -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    Router::new()
-        .route("/", get(admin_redirect))
+    let router = Router::new()
         .route("/admin", get(admin_index))
         .route("/admin/", get(admin_index))
         .route("/admin/app.js", get(admin_script))
-        .route("/admin/styles.css", get(admin_styles))
+        .route("/admin/styles.css", get(admin_styles));
+
+    #[cfg(not(feature = "codeg"))]
+    let router = router.route("/", get(admin_redirect));
+
+    router
 }
 
+#[cfg(not(feature = "codeg"))]
 async fn admin_redirect() -> Redirect {
     Redirect::temporary("/admin")
 }

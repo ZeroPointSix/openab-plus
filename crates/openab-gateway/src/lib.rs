@@ -905,8 +905,12 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
         .merge(config_admin::router(config_manager.clone()))
         .merge(workspace_admin::router(
             workspace_admin::WorkspaceManager::from_env(),
-        ))
-        .with_state(state.clone());
+        ));
+
+    #[cfg(feature = "codeg")]
+    let app = app.merge(codeg_facade::router(codeg_facade::Config::from_env()?));
+
+    let app = app.with_state(state.clone());
 
     // Background: evict expired media files
     tokio::spawn(store::eviction_loop());
