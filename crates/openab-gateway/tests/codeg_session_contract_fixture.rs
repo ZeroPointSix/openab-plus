@@ -156,11 +156,28 @@ fn freezes_message_request_ack_and_business_errors() {
         ("empty_text", 400, "text is required"),
         ("missing_session", 404, "session not found"),
         ("busy", 409, "session is busy"),
+        (
+            "pre_accept_failure",
+            500,
+            "failed to start session turn",
+        ),
     ] {
         let response = response(endpoint, name);
         assert_eq!(response["status"], status, "status for {name}");
         assert_eq!(response["body"]["error"], error, "error for {name}");
     }
+
+    let agent_error = response(endpoint, "agent_error_after_accept");
+    assert_eq!(agent_error["status"], 202);
+    assert_eq!(agent_error["sse_result"]["event"], "error");
+    assert_eq!(
+        agent_error["sse_result"]["data"]["snapshot"]["status"],
+        "error"
+    );
+    assert_eq!(
+        agent_error["sse_result"]["data"]["snapshot"]["last_error"],
+        "agent turn failed"
+    );
 }
 
 #[test]
@@ -174,14 +191,38 @@ fn freezes_idempotent_cancel_and_best_effort_semantics() {
 
     for name in ["accepted_running", "accepted_idle"] {
         let response = response(endpoint, name);
-        assert_eq!(response["status"], 200, "status for {name}");
-        assert_eq!(response["body"]["accepted"], true);
-        assert_eq!(response["body"]["session_id"], fixture["session_id"]);
+        assert_eq!(response["status"], 204, "status for {name}");
+        assert!(response["body"].is_null(), "body for {name}");
+        assert_eq!(
+            response["sse_result"]["dedicated_cancel_event"],
+            false,
+            "dedicated cancel event for {name}"
+        );
+        assert_eq!(
+            response["sse_result"]["guaranteed_events"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "guaranteed events for {name}"
+        );
     }
 
-    let missing = response(endpoint, "missing_session");
-    assert_eq!(missing["status"], 404);
-    assert_eq!(missing["body"]["error"], "session not found");
+    let running_follow_up =
+        &response(endpoint, "accepted_running")["sse_result"]["possible_follow_up"];
+    assert_eq!(running_follow_up.as_array().map(Vec::len), Some(1));
+    assert_eq!(running_follow_up[0]["event"], "status_changed");
+
+    let idle_follow_up = &response(endpoint, "accepted_idle")["sse_result"]["possible_follow_up"];
+    assert_eq!(idle_follow_up.as_array().map(Vec::len), Some(0));
+
+    for (name, status, error) in [
+        ("missing_session", 404, "session not found"),
+        ("send_failure", 500, "failed to cancel session"),
+    ] {
+        let response = response(endpoint, name);
+        assert_eq!(response["status"], status, "status for {name}");
+        assert_eq!(response["body"]["error"], error, "error for {name}");
+    }
 }
 
 #[test]
