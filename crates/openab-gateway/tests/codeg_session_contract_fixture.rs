@@ -1,6 +1,7 @@
 //! Executable production-contract checks for the Codeg/OpenAB session fixture.
 //!
-//! The two new write routes are intentionally not implemented by this issue.
+//! The session control-plane routes are covered by the admin API integration
+//! tests, while this test keeps the frozen fixture aligned with production.
 //! Existing payloads are decoded through public production types, while the
 //! transcript/SSE trace is reproduced through the real session stores.
 

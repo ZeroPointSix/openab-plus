@@ -2247,7 +2247,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openab"
-version = "0.9.14"
+version = "0.9.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2267,7 +2267,7 @@ dependencies = [
 
 [[package]]
 name = "openab-core"
-version = "0.8.15"
+version = "0.8.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2318,10 +2318,11 @@ dependencies = [
 
 [[package]]
 name = "openab-gateway"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "aes",
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "cbc",

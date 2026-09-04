@@ -1,6 +1,6 @@
 [package]
 name = "openab-gateway"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2021"
 license = "MIT"
 
@@ -39,6 +39,7 @@ tempfile = "3.27.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 futures-util = "0.3"
 openab-core = { path = "../openab-core", default-features = false, features = ["test-support"] }
+async-trait = "0.1"
 
 [features]
 default = ["telegram", "line", "feishu", "googlechat", "wecom", "teams"]

@@ -27,6 +27,7 @@ pub struct AdminTestEnv {
     _profile_dir: TempDir,
     _env_lock: MutexGuard<'static, ()>,
     previous_admin_token: Option<String>,
+    previous_openab_admin_token: Option<String>,
     previous_profiles_path: Option<String>,
     pool: Arc<SessionPool>,
     profile_service: Arc<AgentProfileService>,
@@ -36,6 +37,10 @@ pub struct AdminTestEnv {
 impl Drop for AdminTestEnv {
     fn drop(&mut self) {
         restore_env("GATEWAY_ADMIN_TOKEN", self.previous_admin_token.take());
+        restore_env(
+            "OPENAB_ADMIN_TOKEN",
+            self.previous_openab_admin_token.take(),
+        );
         restore_env(
             "OPENAB_AGENT_PROFILES_PATH",
             self.previous_profiles_path.take(),
@@ -54,6 +59,7 @@ impl AdminTestEnv {
     pub async fn new() -> Self {
         let env_lock = env_lock().lock().await;
         let previous_admin_token = std::env::var("GATEWAY_ADMIN_TOKEN").ok();
+        let previous_openab_admin_token = std::env::var("OPENAB_ADMIN_TOKEN").ok();
         let previous_profiles_path = std::env::var("OPENAB_AGENT_PROFILES_PATH").ok();
 
         let profile_dir = tempfile::tempdir().expect("profile tempdir");
@@ -72,6 +78,7 @@ impl AdminTestEnv {
             _profile_dir: profile_dir,
             _env_lock: env_lock,
             previous_admin_token,
+            previous_openab_admin_token,
             previous_profiles_path,
             pool,
             profile_service,
@@ -85,6 +92,11 @@ impl AdminTestEnv {
 
     pub fn profile_service(&self) -> Arc<AgentProfileService> {
         self.profile_service.clone()
+    }
+
+    pub fn clear_admin_tokens(&self) {
+        std::env::remove_var("GATEWAY_ADMIN_TOKEN");
+        std::env::remove_var("OPENAB_ADMIN_TOKEN");
     }
 }
 
@@ -115,7 +127,17 @@ pub async fn spawn_admin_server_with(
     pool: Arc<SessionPool>,
     profile_service: Arc<AgentProfileService>,
 ) -> TestServer {
-    let app = unified_admin_router(pool, profile_service);
+    spawn_router(unified_admin_router(pool, profile_service)).await
+}
+
+pub async fn spawn_session_admin_server(runtime: Arc<dyn RuntimeProvider>) -> TestServer {
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .merge(session_admin::router(runtime));
+    spawn_router(app).await
+}
+
+async fn spawn_router(app: Router) -> TestServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");

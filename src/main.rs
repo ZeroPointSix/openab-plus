@@ -1168,7 +1168,11 @@ async fn main() -> anyhow::Result<()> {
             // backend can plug in without rewiring every route. P0 still runs
             // channels against the concrete SessionPool in-process.
             let runtime: std::sync::Arc<dyn openab_core::runtime::RuntimeProvider> =
-                std::sync::Arc::new(openab_core::runtime::LocalRuntime::new(pool.clone()));
+                std::sync::Arc::new(openab_core::runtime::LocalRuntime::new_with_turn_config(
+                    pool.clone(),
+                    cfg.pool.prompt_hard_timeout_secs,
+                    cfg.pool.liveness_check_secs,
+                ));
 
             // Build axum router with platform webhook routes
             let mut app = axum::Router::new()

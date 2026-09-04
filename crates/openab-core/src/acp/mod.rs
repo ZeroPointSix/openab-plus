@@ -4,6 +4,7 @@ pub mod connection;
 pub mod pool;
 pub mod profile_pool;
 pub mod protocol;
+pub mod turn;
 
 pub use connection::{ConfigOptionApplyPolicy, ContentBlock};
 pub use profile_pool::SessionPool;

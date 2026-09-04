@@ -2,9 +2,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+use crate::acp::turn::{
+    drive_acp_turn, record_acp_event_transcript, AcpTurnEventHandler, HeadlessTurnConfig,
+};
 use crate::acp::{
     classify_notification, parse_turn_result, AcpEvent, ContentBlock, SessionPool, TurnResult,
 };
@@ -15,8 +20,6 @@ use crate::format;
 use crate::markdown::{self, TableMode};
 use crate::reactions::StatusReactionController;
 use crate::session_snapshot::{SessionMetadataSource, SessionSnapshot, SessionStatus};
-use crate::transcript::{SessionTranscriptStore, ToolTranscriptUpdate};
-
 // --- Output directive parsing ---
 
 /// Parsed directives from agent output header block.
@@ -25,83 +28,6 @@ use crate::transcript::{SessionTranscriptStore, ToolTranscriptUpdate};
 pub struct OutputDirectives {
     /// Message ID to reply to (Discord: message_reference)
     pub reply_to: Option<String>,
-}
-
-/// Keep the visible user text in the transcript while deliberately excluding
-/// OpenAB's internal `<sender_context>` envelope from the read-only UI.
-fn record_prompt_transcript(pool: &SessionPool, session_id: &str, blocks: &[ContentBlock]) {
-    let content = blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } if !text.starts_with("<sender_context>\n") => {
-                (!text.trim().is_empty()).then_some(text.as_str())
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    if !content.is_empty() {
-        pool.transcript_store()
-            .record_user_text(session_id, content);
-    }
-}
-
-/// Persist the complete ACP event before its presentation-specific handling.
-/// The transcript is a read-only observability feed, so it retains raw tool
-/// updates while the channel UI continues to use the existing title/status view.
-fn record_acp_event_transcript(store: &SessionTranscriptStore, session_id: &str, event: &AcpEvent) {
-    match event {
-        AcpEvent::Text(content) => {
-            store.append_assistant_text(session_id, content);
-        }
-        AcpEvent::Thinking { content } => {
-            store.append_thinking(session_id, content);
-        }
-        AcpEvent::ToolStart { id, title, payload } => {
-            store.finish_assistant_turn(session_id);
-            store.upsert_tool_call(
-                session_id,
-                ToolTranscriptUpdate {
-                    tool_call_id: id.clone(),
-                    title: title.clone(),
-                    status: payload
-                        .get("status")
-                        .and_then(|value| value.as_str())
-                        .map(String::from)
-                        .or_else(|| {
-                            (payload
-                                .get("sessionUpdate")
-                                .and_then(|value| value.as_str())
-                                == Some("tool_call"))
-                            .then(|| "running".to_string())
-                        }),
-                    completed: false,
-                    payload: payload.clone(),
-                },
-            );
-        }
-        AcpEvent::ToolDone {
-            id,
-            title,
-            status,
-            payload,
-        } => {
-            store.upsert_tool_call(
-                session_id,
-                ToolTranscriptUpdate {
-                    tool_call_id: id.clone(),
-                    title: title.clone(),
-                    status: Some(status.clone()),
-                    completed: true,
-                    payload: payload.clone(),
-                },
-            );
-        }
-        AcpEvent::Plan { content } => {
-            store.record_system_text(session_id, content, "plan");
-        }
-        AcpEvent::ConfigUpdate { .. } => {}
-    }
 }
 
 /// Parse `[[key:value]]` directives from the beginning of agent output.
@@ -1081,6 +1007,7 @@ impl AdapterRouter {
         let liveness_check_interval = self.liveness_check_interval;
         let session_pool = self.pool.clone();
         let session_key = thread_key.to_string();
+        let turn_guard = self.pool.try_acquire_turn(thread_key).await?;
 
         self.pool
             .with_connection(thread_key, |conn| {
@@ -1088,28 +1015,11 @@ impl AdapterRouter {
                 let session_pool = session_pool.clone();
                 let session_key = session_key.clone();
                 let external_url = external_url.clone();
+                let turn_guard = turn_guard;
                 Box::pin(async move {
+                    let _turn_guard = turn_guard;
                     let reset = conn.session_reset;
                     conn.session_reset = false;
-
-                    session_pool
-                        .mark_session_status(&session_key, SessionStatus::Running)
-                        .await;
-                    record_prompt_transcript(&session_pool, &session_key, &content_blocks);
-                    let (mut rx, request_id) = match conn.session_prompt(content_blocks).await {
-                        Ok(value) => value,
-                        Err(err) => {
-                            session_pool
-                                .mark_session_error(&session_key, err.to_string())
-                                .await;
-                            return Err(err);
-                        }
-                    };
-                    if assistant_status {
-                        let _ = adapter.set_status(&thread_channel, "Thinking…").await;
-                    } else {
-                        reactions.set_thinking().await;
-                    }
 
                     let mut text_buf = String::new();
                     let mut last_assistant_text: Option<String> = None;
@@ -1146,7 +1056,6 @@ impl AdapterRouter {
                     // Native delta coalescing state (used only when `native`).
                     let mut native_pending = String::new();
                     let mut native_last_flush = tokio::time::Instant::now();
-                    const NATIVE_FLUSH_MS: u128 = 400;
 
                     // Streaming edit: send placeholder, spawn edit loop
                     let (buf_tx, placeholder_msg, edit_handle) = if streaming && !native {
@@ -1234,278 +1143,51 @@ impl AdapterRouter {
                         (None, None, None)
                     };
 
-                    // (#732) Liveness-aware recv loop. Filters stale id-bearing
-                    // messages and abandons cleanly on dead agent / hard ceiling
-                    // so late responses cannot leak into the next prompt.
-                    let mut response_error: Option<String> = None;
-                    let mut status_failure_recorded = false;
-                    let mut turn_result = TurnResult::default();
-                    let prompt_start = tokio::time::Instant::now();
-                    loop {
-                        let notification = tokio::select! {
-                            msg = rx.recv() => match msg {
-                                Some(n) => n,
-                                // Reader saw EOF: the agent's stdout closed. A *successful*
-                                // turn is always signalled by the id-bearing JSON-RPC response to
-                                // `session/prompt`, which breaks the loop at the id branch below
-                                // *before* any EOF — so reaching this arm means the turn ended
-                                // without a final response, i.e. the agent terminated abnormally
-                                // (bridged agents that crash on a backend error such as HTTP 500 /
-                                // quota exhausted exit without ever emitting an ACP error
-                                // notification). Surface that as an explicit error instead of
-                                // falling through to "_(no response)_" or, worse, presenting a
-                                // partially-streamed buffer as a complete answer.
-                                //
-                                // Do NOT gate on `text_buf.is_empty()`: the buffer is pre-seeded
-                                // on session reset (the expiry notice) and, in send-once mode,
-                                // carries inter-tool narration that is sliced off before delivery —
-                                // so a non-empty buffer is not evidence the turn completed. When
-                                // partial text *was* streamed, `final_content` prepends the warning
-                                // to it (⚠️ … \n\n <partial>), preserving the output while flagging
-                                // the truncation.
-                                None => {
-                                    if response_error.is_none() {
-                                        let err = "Agent process exited unexpectedly".to_string();
-                                        response_error = Some(err.clone());
-                                        session_pool
-                                            .mark_session_exited(&session_key, Some(err))
-                                            .await;
-                                        status_failure_recorded = true;
-                                    }
-                                    break;
-                                }
-                            },
-                            _ = tokio::time::sleep(liveness_check_interval) => {
-                                if !conn.alive() {
-                                    let err = "Agent process died".to_string();
-                                    response_error = Some(err.clone());
-                                    session_pool
-                                        .mark_session_exited(&session_key, Some(err))
-                                        .await;
-                                    status_failure_recorded = true;
-                                    conn.abandon_request(request_id).await;
-                                    break;
-                                }
-                                if prompt_start.elapsed() > prompt_hard_timeout {
-                                    let err = format!(
-                                        "Agent exceeded hard timeout ({}s)",
-                                        prompt_hard_timeout.as_secs(),
-                                    );
-                                    response_error = Some(err.clone());
-                                    session_pool.mark_session_error(&session_key, err).await;
-                                    status_failure_recorded = true;
-                                    conn.abandon_request(request_id).await;
-                                    break;
-                                }
-                                continue;
-                            }
-                        };
-                        if let Some(notification_id) = notification.id {
-                            if notification_id != request_id {
-                                // Stale response from a previously-abandoned prompt.
-                                // No automated test seam: this path only triggers when a
-                                // real subprocess emits a late response after the broker
-                                // already called abandon_request — covered by manual
-                                // repro against a live agent (see #732 PR description).
-                                continue;
-                            }
-                            if let Some(ref err) = notification.error {
-                                let formatted =
-                                    format_coded_error(err.code, &err.message, err.data_message());
-                                response_error = Some(formatted.clone());
-                                session_pool
-                                    .mark_session_error(&session_key, formatted)
-                                    .await;
-                                status_failure_recorded = true;
-                            }
-                            if let Some(ref result) = notification.result {
-                                turn_result = parse_turn_result(result);
-                            }
-                            break;
-                        }
-
-                        if let Some(event) = classify_notification(&notification) {
-                            let transcript_store = session_pool.transcript_store();
-                            record_acp_event_transcript(&transcript_store, &session_key, &event);
-                            match event {
-                                AcpEvent::Text(t) => {
-                                    text_buf.push_str(&t);
-                                    if !t.trim().is_empty() {
-                                        last_assistant_text = Some(t.clone());
-                                    }
-                                    // Tool-progress adapters seed the session receipt on the
-                                    // first text. A turn that never calls a tool would otherwise
-                                    // open no progress message: the "会话已启动" receipt never
-                                    // appears, the native stream stays gated behind the missing
-                                    // message, and the full buffer (prompt echo, processing
-                                    // narration, answer) bursts out as one plain message at the
-                                    // end. The receipt carries the OpenAB Plus session link and
-                                    // the first ToolStart takes it over via `update()`. Seed it in
-                                    // both native and post+edit modes so the progress contract does
-                                    // not depend on Slack assistant-mode capabilities.
-                                    if tool_progress_enabled {
-                                        tool_progress.seed_receipt().await;
-                                    }
-                                    if native {
-                                        native_pending.push_str(&t);
-                                        // Tool-progress adapters delay the final stream until the
-                                        // progress message exists. This keeps narration emitted
-                                        // before ToolStart from placing the final reply above the
-                                        // later progress message in the thread.
-                                        tool_progress
-                                            .begin_native_stream_when_ready(
-                                                recipient.clone(),
-                                                &mut native_msg,
-                                                &mut stream_begin_failed,
-                                            )
-                                            .await;
-                                        if let Some(msg) = &native_msg {
-                                            if native_last_flush.elapsed().as_millis()
-                                                >= NATIVE_FLUSH_MS
-                                                && !native_pending.is_empty()
-                                            {
-                                                let _ = adapter
-                                                    .stream_append(msg, &native_pending)
-                                                    .await;
-                                                native_pending.clear();
-                                                native_last_flush = tokio::time::Instant::now();
-                                            }
-                                        }
-                                    } else if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(display_for(
-                                            delivery_mode,
-                                            &tool_lines,
-                                            &text_buf,
-                                            true,
-                                            reply_tool_display,
-                                        ));
-                                    }
-                                }
-                                AcpEvent::Thinking { .. } => {
-                                    if assistant_status {
-                                        let _ = adapter
-                                            .set_status(&thread_channel, "Thinking…")
-                                            .await;
-                                    } else {
-                                        reactions.set_thinking().await;
-                                    }
-                                }
-                                AcpEvent::ToolStart { id, title, .. } => {
-                                    if title.is_empty() {
-                                        continue;
-                                    }
-                                    // Live indicator: assistant status line vs emoji reaction.
-                                    if assistant_status {
-                                        let status = assistant_tool_status(
-                                            &title,
-                                            exposes_intermediate_text,
-                                        );
-                                        let _ = adapter
-                                            .set_status(&thread_channel, &status)
-                                            .await;
-                                    } else {
-                                        reactions.set_tool(&title).await;
-                                    }
-                                    // Record the tool in BOTH modes so the finalized message keeps
-                                    // a tool summary (compose_display, gated by tool_display). In
-                                    // assistant_mode the status line is transient and cleared before
-                                    // the reply, so without this the message would retain no record
-                                    // of which tools ran.
-                                    let title = sanitize_title(&title);
-                                    if let Some(slot) =
-                                        tool_lines.iter_mut().find(|e| e.id == id)
-                                    {
-                                        slot.title = title;
-                                        slot.state = ToolState::Running;
-                                    } else {
-                                        tool_lines.push(ToolEntry {
-                                            id,
-                                            title,
-                                            state: ToolState::Running,
-                                        });
-                                    }
-                                    tool_progress.update(&tool_lines).await;
-                                    if native && tool_progress_enabled {
-                                        tool_progress
-                                            .begin_native_stream_when_ready(
-                                                recipient.clone(),
-                                                &mut native_msg,
-                                                &mut stream_begin_failed,
-                                            )
-                                            .await;
-                                    }
-                                    // Post+edit live update (no-op under native streaming: buf_tx is None).
-                                    if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(display_for(
-                                            delivery_mode,
-                                            &tool_lines,
-                                            &text_buf,
-                                            true,
-                                            reply_tool_display,
-                                        ));
-                                    }
-                                }
-                                AcpEvent::ToolDone {
-                                    id, title, status, ..
-                                } => {
-                                    // The final answer block is whatever text the agent
-                                    // emits AFTER its last tool. Advancing this on every
-                                    // completion leaves it pointing just past the last
-                                    // tool; send-once delivery slices from here so the
-                                    // preceding inter-tool narration is dropped.
-                                    answer_start = text_buf.len();
-                                    // Live indicator: assistant status line vs emoji reaction.
-                                    if assistant_status {
-                                        let _ = adapter
-                                            .set_status(&thread_channel, "Thinking…")
-                                            .await;
-                                    } else {
-                                        reactions.set_thinking().await;
-                                    }
-                                    // Update the tool's state in BOTH modes (see ToolStart) so the
-                                    // finalized message's tool summary reflects completion/failure.
-                                    let new_state = if status == "completed" {
-                                        ToolState::Completed
-                                    } else {
-                                        ToolState::Failed
-                                    };
-                                    if let Some(slot) =
-                                        tool_lines.iter_mut().find(|e| e.id == id)
-                                    {
-                                        if !title.is_empty() {
-                                            slot.title = sanitize_title(&title);
-                                        }
-                                        slot.state = new_state;
-                                    } else if !title.is_empty() {
-                                        tool_lines.push(ToolEntry {
-                                            id,
-                                            title: sanitize_title(&title),
-                                            state: new_state,
-                                        });
-                                    }
-                                    tool_progress.update(&tool_lines).await;
-                                    if let Some(tx) = &buf_tx {
-                                        let _ = tx.send(display_for(
-                                            delivery_mode,
-                                            &tool_lines,
-                                            &text_buf,
-                                            true,
-                                            reply_tool_display,
-                                        ));
-                                    }
-                                }
-                                AcpEvent::ConfigUpdate { options } => {
-                                    session_pool
-                                        .record_session_config_update(&session_key, &options)
-                                        .await;
-                                    conn.replace_config_options_from_acp(options);
-                                }
-                                AcpEvent::Plan { .. } => {}
-                            }
-                        }
+                    if assistant_status {
+                        let _ = adapter.set_status(&thread_channel, "Thinking…").await;
+                    } else {
+                        reactions.set_thinking().await;
                     }
 
-                    conn.prompt_done().await;
+                    let turn = {
+                        let mut event_handler = PresentationTurnEventHandler {
+                            adapter: adapter.clone(),
+                            thread_channel: thread_channel.clone(),
+                            reactions: reactions.clone(),
+                            assistant_status,
+                            exposes_intermediate_text,
+                            tool_progress_enabled,
+                            native,
+                            recipient: recipient.clone(),
+                            delivery_mode,
+                            reply_tool_display,
+                            buf_tx: &buf_tx,
+                            text_buf: &mut text_buf,
+                            last_assistant_text: &mut last_assistant_text,
+                            tool_lines: &mut tool_lines,
+                            tool_progress: &mut tool_progress,
+                            answer_start: &mut answer_start,
+                            native_msg: &mut native_msg,
+                            stream_begin_failed: &mut stream_begin_failed,
+                            native_pending: &mut native_pending,
+                            native_last_flush: &mut native_last_flush,
+                        };
+                        drive_acp_turn(
+                        conn,
+                        &session_pool,
+                        &session_key,
+                        content_blocks,
+                        HeadlessTurnConfig {
+                            prompt_hard_timeout,
+                            liveness_check_interval,
+                        },
+                        &mut event_handler,
+                    )
+                    .await?
+                    };
+                    let response_error = turn.response_error;
+                    let turn_result = turn.turn_result;
+                    let status_failure_recorded = turn.status_failure_recorded;
 
                     // A provider can execute tools successfully and still close the
                     // turn with `end_turn` + zero output tokens. This is a delivery
@@ -2061,6 +1743,8 @@ fn sanitize_title(title: &str) -> String {
         .replace('`', "'")
 }
 
+const NATIVE_FLUSH_MS: u128 = 400;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToolState {
     Running,
@@ -2216,6 +1900,173 @@ impl ToolProgressMessage {
                 "tool progress message failed"
             ),
         }
+    }
+}
+
+/// Adapter-specific presentation for events already classified by the shared
+/// ACP turn driver. The handler owns no protocol state; it only updates the
+/// buffers and platform indicators used by the final delivery path.
+struct PresentationTurnEventHandler<'a> {
+    adapter: Arc<dyn ChatAdapter>,
+    thread_channel: ChannelRef,
+    reactions: Arc<StatusReactionController>,
+    assistant_status: bool,
+    exposes_intermediate_text: bool,
+    tool_progress_enabled: bool,
+    native: bool,
+    recipient: Option<(String, String)>,
+    delivery_mode: crate::presentation::DeliveryMode,
+    reply_tool_display: ToolDisplay,
+    buf_tx: &'a Option<tokio::sync::watch::Sender<String>>,
+    text_buf: &'a mut String,
+    last_assistant_text: &'a mut Option<String>,
+    tool_lines: &'a mut Vec<ToolEntry>,
+    tool_progress: &'a mut ToolProgressMessage,
+    answer_start: &'a mut usize,
+    native_msg: &'a mut Option<MessageRef>,
+    stream_begin_failed: &'a mut bool,
+    native_pending: &'a mut String,
+    native_last_flush: &'a mut tokio::time::Instant,
+}
+
+impl<'a> AcpTurnEventHandler for PresentationTurnEventHandler<'a> {
+    fn handle<'b>(&'b mut self, event: AcpEvent) -> Pin<Box<dyn Future<Output = ()> + Send + 'b>> {
+        Box::pin(async move {
+            match event {
+                AcpEvent::Text(text) => {
+                    self.text_buf.push_str(&text);
+                    if !text.trim().is_empty() {
+                        *self.last_assistant_text = Some(text.clone());
+                    }
+                    // Tool-progress adapters seed the session receipt on the
+                    // first text so a no-tool turn still has an ordered receipt.
+                    if self.tool_progress_enabled {
+                        self.tool_progress.seed_receipt().await;
+                    }
+                    if self.native {
+                        self.native_pending.push_str(&text);
+                        self.tool_progress
+                            .begin_native_stream_when_ready(
+                                self.recipient.clone(),
+                                self.native_msg,
+                                self.stream_begin_failed,
+                            )
+                            .await;
+                        if let Some(msg) = self.native_msg.clone() {
+                            if self.native_last_flush.elapsed().as_millis() >= NATIVE_FLUSH_MS
+                                && !self.native_pending.is_empty()
+                            {
+                                let _ = self.adapter.stream_append(&msg, self.native_pending).await;
+                                self.native_pending.clear();
+                                *self.native_last_flush = tokio::time::Instant::now();
+                            }
+                        }
+                    } else if let Some(tx) = self.buf_tx.as_ref() {
+                        let _ = tx.send(display_for(
+                            self.delivery_mode,
+                            self.tool_lines,
+                            self.text_buf,
+                            true,
+                            self.reply_tool_display,
+                        ));
+                    }
+                }
+                AcpEvent::Thinking { .. } => {
+                    if self.assistant_status {
+                        let _ = self
+                            .adapter
+                            .set_status(&self.thread_channel, "Thinking…")
+                            .await;
+                    } else {
+                        self.reactions.set_thinking().await;
+                    }
+                }
+                AcpEvent::ToolStart { id, title, .. } => {
+                    if title.is_empty() {
+                        return;
+                    }
+                    if self.assistant_status {
+                        let status = assistant_tool_status(&title, self.exposes_intermediate_text);
+                        let _ = self.adapter.set_status(&self.thread_channel, &status).await;
+                    } else {
+                        self.reactions.set_tool(&title).await;
+                    }
+
+                    let title = sanitize_title(&title);
+                    if let Some(slot) = self.tool_lines.iter_mut().find(|entry| entry.id == id) {
+                        slot.title = title;
+                        slot.state = ToolState::Running;
+                    } else {
+                        self.tool_lines.push(ToolEntry {
+                            id,
+                            title,
+                            state: ToolState::Running,
+                        });
+                    }
+                    self.tool_progress.update(self.tool_lines).await;
+                    if self.native && self.tool_progress_enabled {
+                        self.tool_progress
+                            .begin_native_stream_when_ready(
+                                self.recipient.clone(),
+                                self.native_msg,
+                                self.stream_begin_failed,
+                            )
+                            .await;
+                    }
+                    if let Some(tx) = self.buf_tx.as_ref() {
+                        let _ = tx.send(display_for(
+                            self.delivery_mode,
+                            self.tool_lines,
+                            self.text_buf,
+                            true,
+                            self.reply_tool_display,
+                        ));
+                    }
+                }
+                AcpEvent::ToolDone {
+                    id, title, status, ..
+                } => {
+                    *self.answer_start = self.text_buf.len();
+                    if self.assistant_status {
+                        let _ = self
+                            .adapter
+                            .set_status(&self.thread_channel, "Thinking…")
+                            .await;
+                    } else {
+                        self.reactions.set_thinking().await;
+                    }
+
+                    let new_state = if status == "completed" {
+                        ToolState::Completed
+                    } else {
+                        ToolState::Failed
+                    };
+                    if let Some(slot) = self.tool_lines.iter_mut().find(|entry| entry.id == id) {
+                        if !title.is_empty() {
+                            slot.title = sanitize_title(&title);
+                        }
+                        slot.state = new_state;
+                    } else if !title.is_empty() {
+                        self.tool_lines.push(ToolEntry {
+                            id,
+                            title: sanitize_title(&title),
+                            state: new_state,
+                        });
+                    }
+                    self.tool_progress.update(self.tool_lines).await;
+                    if let Some(tx) = self.buf_tx.as_ref() {
+                        let _ = tx.send(display_for(
+                            self.delivery_mode,
+                            self.tool_lines,
+                            self.text_buf,
+                            true,
+                            self.reply_tool_display,
+                        ));
+                    }
+                }
+                AcpEvent::ConfigUpdate { .. } | AcpEvent::Plan { .. } => {}
+            }
+        })
     }
 }
 
