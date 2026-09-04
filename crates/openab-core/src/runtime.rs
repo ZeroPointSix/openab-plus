@@ -4,6 +4,7 @@
 //! [`RemoteRuntime`] is a deliberate stub so ZER-872 can land the WSS path
 //! without rewiring every admin router again.
 
+use crate::acp::turn::{run_headless_turn, HeadlessTurnConfig};
 use crate::acp::SessionPool;
 use crate::agent_profile::{AgentConfigSchema, ProfileSessionOverrides};
 use crate::session_event::SessionStreamBus;
@@ -44,6 +45,14 @@ pub trait RuntimeProvider: Send + Sync {
         overrides: Option<&ProfileSessionOverrides>,
     ) -> Result<bool>;
 
+    /// Accept a text prompt and run it asynchronously through the current ACP
+    /// session. The final result is published through transcript/SSE.
+    async fn send_message(&self, session_id: &str, text: String) -> Result<()>;
+
+    /// Best-effort cancellation of the current ACP turn. Idle sessions are a
+    /// successful no-op so the control-plane operation stays idempotent.
+    async fn cancel_session(&self, session_id: &str) -> Result<()>;
+
     async fn config_schema_for_agent(&self, agent_type: &str) -> Option<AgentConfigSchema>;
 
     async fn mark_profile_deleted(&self, profile_id: &str);
@@ -53,11 +62,30 @@ pub trait RuntimeProvider: Send + Sync {
 #[derive(Clone)]
 pub struct LocalRuntime {
     pool: Arc<SessionPool>,
+    turn_config: HeadlessTurnConfig,
 }
 
 impl LocalRuntime {
     pub fn new(pool: Arc<SessionPool>) -> Self {
-        Self { pool }
+        Self::new_with_turn_config_value(pool, HeadlessTurnConfig::default())
+    }
+
+    pub fn new_with_turn_config(
+        pool: Arc<SessionPool>,
+        prompt_hard_timeout_secs: u64,
+        liveness_check_secs: u64,
+    ) -> Self {
+        Self::new_with_turn_config_value(
+            pool,
+            HeadlessTurnConfig {
+                prompt_hard_timeout: std::time::Duration::from_secs(prompt_hard_timeout_secs),
+                liveness_check_interval: std::time::Duration::from_secs(liveness_check_secs),
+            },
+        )
+    }
+
+    fn new_with_turn_config_value(pool: Arc<SessionPool>, turn_config: HeadlessTurnConfig) -> Self {
+        Self { pool, turn_config }
     }
 
     /// Escape hatch for channel adapters / tests that still need the concrete pool.
@@ -98,6 +126,62 @@ impl RuntimeProvider for LocalRuntime {
         self.pool
             .get_or_create_with_profile(thread_id, working_dir_override, profile_id, overrides)
             .await
+    }
+
+    async fn send_message(&self, session_id: &str, text: String) -> Result<()> {
+        if self.pool.session_snapshot(session_id).await.is_none() {
+            bail!("session not found");
+        }
+
+        let turn_guard = self.pool.try_acquire_turn(session_id).await?;
+        let pool = self.pool.clone();
+        let session_id = session_id.to_string();
+        let config = self.turn_config;
+        tokio::spawn(async move {
+            // Keep the lease until the terminal snapshot is published. Dropping it
+            // inside the driver would let a new turn publish `running` before this
+            // task publishes its stale `idle` state.
+            let result =
+                run_headless_turn(pool.clone(), session_id.clone(), text, config, &turn_guard)
+                    .await;
+            match result {
+                Ok(turn) if turn.response_error.is_none() && !turn.status_failure_recorded => {
+                    pool.mark_session_status(
+                        &session_id,
+                        crate::session_snapshot::SessionStatus::Idle,
+                    )
+                    .await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        session_id = %session_id,
+                        error = %error,
+                        "headless ACP turn failed"
+                    );
+                    pool.mark_session_error(&session_id, error.to_string())
+                        .await;
+                }
+            }
+        });
+        Ok(())
+    }
+
+    async fn cancel_session(&self, session_id: &str) -> Result<()> {
+        if self.pool.session_snapshot(session_id).await.is_none() {
+            bail!("session not found");
+        }
+        if let Err(error) = self.pool.cancel_session(session_id).await {
+            // Cancellation is deliberately best-effort. The snapshot still
+            // exists, so an already-dead agent must not turn an accepted
+            // control-plane cancellation into a 500 response.
+            tracing::warn!(
+                session_id,
+                error = %error,
+                "best-effort session cancellation failed"
+            );
+        }
+        Ok(())
     }
 
     async fn config_schema_for_agent(&self, agent_type: &str) -> Option<AgentConfigSchema> {
@@ -142,6 +226,14 @@ impl RuntimeProvider for RemoteRuntime {
         _profile_id: Option<&str>,
         _overrides: Option<&ProfileSessionOverrides>,
     ) -> Result<bool> {
+        bail!("remote runtime is not implemented")
+    }
+
+    async fn send_message(&self, _session_id: &str, _text: String) -> Result<()> {
+        bail!("remote runtime is not implemented")
+    }
+
+    async fn cancel_session(&self, _session_id: &str) -> Result<()> {
         bail!("remote runtime is not implemented")
     }
 

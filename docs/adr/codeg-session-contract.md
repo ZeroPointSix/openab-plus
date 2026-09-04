@@ -275,5 +275,5 @@ cargo test -p openab-gateway --test codeg_session_contract_fixture
 该测试会把 snapshot、transcript 和 SSE data 反序列化为当前公开类型，并通过
 真实 `SessionPool`、`SessionTranscriptStore` 和统一 stream replay 生成同一条
 会话轨迹，验证 fixture 的 entry revision、局部/全局 sequence 与生命周期事件
-均可由当前实现产生。它不宣称两个新增 endpoint 已在当前分支实现；后续 ZER-952
-的实现 PR 必须用同一 fixture 增加真实 HTTP 集成测试。
+均可由当前实现产生。ZER-952 的实现同时增加了真实 HTTP 集成测试覆盖两个新增
+endpoint。

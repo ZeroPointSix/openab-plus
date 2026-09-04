@@ -1,10 +1,10 @@
-use axum::extract::{Path, Query};
+use axum::extract::{rejection::JsonRejection, Path, Query};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{
     sse::{Event, KeepAlive, Sse},
     IntoResponse, Response,
 };
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{stream, StreamExt};
 use openab_core::agent_profile::ProfileSessionOverrides;
@@ -72,6 +72,28 @@ where
                 move |headers: HeaderMap, Path(session_id): Path<String>| {
                     let runtime = runtime.clone();
                     async move { get_session(headers, session_id, runtime).await }
+                }
+            }),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/messages",
+            post({
+                let runtime = runtime.clone();
+                move |headers: HeaderMap,
+                      Path(session_id): Path<String>,
+                      body: Result<Json<SendMessageRequest>, JsonRejection>| {
+                    let runtime = runtime.clone();
+                    async move { send_message(headers, session_id, body, runtime).await }
+                }
+            }),
+        )
+        .route(
+            "/api/v1/sessions/{session_id}/cancel",
+            post({
+                let runtime = runtime.clone();
+                move |headers: HeaderMap, Path(session_id): Path<String>| {
+                    let runtime = runtime.clone();
+                    async move { cancel_session(headers, session_id, runtime).await }
                 }
             }),
         )
@@ -191,6 +213,94 @@ async fn create_session(
             }
             tracing::error!(profile_id, error = %message, "admin session creation failed");
             internal_error("failed to start agent session")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendMessageRequest {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AcceptedSessionCommand {
+    accepted: bool,
+    session_id: String,
+}
+
+async fn send_message(
+    headers: HeaderMap,
+    session_id: String,
+    body: Result<Json<SendMessageRequest>, JsonRejection>,
+    runtime: AdminRuntime,
+) -> Response {
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
+    }
+
+    let Json(request) = match body {
+        Ok(body) => body,
+        Err(_) => return bad_request("text is required"),
+    };
+    let Some(text) = request
+        .text
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    else {
+        return bad_request("text is required");
+    };
+
+    if runtime.session_snapshot(&session_id).await.is_none() {
+        return session_not_found();
+    }
+
+    match runtime.send_message(&session_id, text).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(AcceptedSessionCommand {
+                accepted: true,
+                session_id,
+            }),
+        )
+            .into_response(),
+        Err(error) if error.to_string().contains("session is busy") => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "session is busy" })),
+        )
+            .into_response(),
+        Err(error) if error.to_string().contains("session not found") => session_not_found(),
+        Err(error) if error.to_string().contains("no session") => session_not_found(),
+        Err(error) => {
+            tracing::error!(session_id, error = %error, "admin message rejected");
+            internal_error("failed to start session message")
+        }
+    }
+}
+
+async fn cancel_session(headers: HeaderMap, session_id: String, runtime: AdminRuntime) -> Response {
+    if let Err(err) = authorize(&headers) {
+        return auth_error_response(err);
+    }
+    if runtime.session_snapshot(&session_id).await.is_none() {
+        return session_not_found();
+    }
+
+    match runtime.cancel_session(&session_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(AcceptedSessionCommand {
+                accepted: true,
+                session_id,
+            }),
+        )
+            .into_response(),
+        Err(error) if error.to_string().contains("session not found") => session_not_found(),
+        Err(error) if error.to_string().contains("no session") => session_not_found(),
+        Err(error) => {
+            tracing::error!(session_id, error = %error, "admin cancel rejected");
+            internal_error("failed to cancel session")
         }
     }
 }
@@ -479,6 +589,14 @@ fn auth_error_response(error: AuthError) -> Response {
 
 fn bad_request(message: &str) -> Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "error": message }))).into_response()
+}
+
+fn session_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "session not found" })),
+    )
+        .into_response()
 }
 
 fn internal_error(message: &str) -> Response {

@@ -14,16 +14,36 @@ use crate::transcript::SessionTranscriptStore;
 use crate::worktree::WorktreeConfig;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{Mutex, RwLock};
 use tracing::warn;
 
 type PoolHandle = Arc<pool::SessionPool>;
+
+/// An ownership token for one in-flight prompt on a logical session.
+///
+/// The per-connection mutex serializes access, but it cannot tell an HTTP
+/// caller that another turn is already waiting for it. This lease closes that
+/// gap and is shared by channel and control-plane turns.
+pub(crate) struct SessionTurnGuard {
+    session_id: String,
+    active_turns: Arc<StdMutex<HashSet<String>>>,
+}
+
+impl Drop for SessionTurnGuard {
+    fn drop(&mut self) {
+        let mut active_turns = self
+            .active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active_turns.remove(&self.session_id);
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct ThreadProfilePolicy {
@@ -51,6 +71,7 @@ pub struct SessionPool {
     thread_pools: RwLock<HashMap<String, String>>,
     thread_policies: RwLock<HashMap<String, ThreadProfilePolicy>>,
     thread_gates: RwLock<HashMap<String, Arc<Mutex<()>>>>,
+    active_turns: Arc<StdMutex<HashSet<String>>>,
     session_events: SessionEventBus,
     session_stream: SessionStreamBus,
     transcripts: SessionTranscriptStore,
@@ -127,6 +148,7 @@ impl SessionPool {
             thread_pools: RwLock::new(thread_pools),
             thread_policies: RwLock::new(thread_policies),
             thread_gates: RwLock::new(HashMap::new()),
+            active_turns: Arc::new(StdMutex::new(HashSet::new())),
             session_events,
             session_stream,
             transcripts,
@@ -440,6 +462,36 @@ impl SessionPool {
         false
     }
 
+    /// Atomically reserve the next prompt turn for a live session.
+    ///
+    /// `with_connection` alone would serialize two callers by making the
+    /// second caller wait for the first turn. Control-plane callers need a
+    /// conflict response instead, so they acquire this lease before spawning
+    /// their background driver. Channel turns use the same lease.
+    pub(crate) async fn try_acquire_turn(&self, thread_id: &str) -> Result<SessionTurnGuard> {
+        let pool = self
+            .existing_pool(thread_id)
+            .await
+            .ok_or_else(|| anyhow!("no session for thread {thread_id}"))?;
+        if !pool.has_live_active_connection(thread_id).await {
+            return Err(anyhow!("no session for thread {thread_id}"));
+        }
+
+        let mut active_turns = self
+            .active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !active_turns.insert(thread_id.to_string()) {
+            return Err(anyhow!("session is busy"));
+        }
+        drop(active_turns);
+
+        Ok(SessionTurnGuard {
+            session_id: thread_id.to_string(),
+            active_turns: self.active_turns.clone(),
+        })
+    }
+
     pub async fn with_connection<F, R>(&self, thread_id: &str, f: F) -> Result<R>
     where
         F: for<'a> FnOnce(
@@ -552,15 +604,29 @@ impl SessionPool {
     }
 
     pub async fn cancel_session(&self, thread_id: &str) -> Result<()> {
-        if let Some(pool) = self.existing_pool(thread_id).await {
-            return pool.cancel_session(thread_id).await;
+        if self.session_snapshot(thread_id).await.is_none() {
+            return Err(anyhow!("no session for thread {thread_id}"));
         }
-        for (_, pool) in self.pools_snapshot().await {
-            if pool.cancel_session(thread_id).await.is_ok() {
-                return Ok(());
+        if let Some(pool) = self.existing_pool(thread_id).await {
+            match pool.cancel_session(thread_id).await {
+                Ok(()) => return Ok(()),
+                // A session can be suspended or idle without a live cancel
+                // handle. The control-plane operation is intentionally
+                // idempotent in that case.
+                Err(error) if error.to_string().contains("no session") => {}
+                Err(error) => return Err(error),
             }
         }
-        Err(anyhow!("no session for thread {thread_id}"))
+        for (_, pool) in self.pools_snapshot().await {
+            match pool.cancel_session(thread_id).await {
+                Ok(()) => return Ok(()),
+                Err(error) if error.to_string().contains("no session") => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        // The snapshot is the control-plane source of truth. It may outlive a
+        // suspended process, which is still a successful no-op cancellation.
+        Ok(())
     }
 
     pub async fn reset_session(&self, thread_id: &str) -> Result<()> {
