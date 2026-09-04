@@ -7,10 +7,11 @@ on:
       - ".dockerignore"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "Dockerfile.gateway"
-      - "Dockerfile.unified"
+      - "Dockerfile"
+      - "Dockerfile.*"
       - "crates/codeg-facade/**"
       - "crates/openab-gateway/**"
+      - "scripts/check-docker-dummy-workspace.py"
       - "scripts/codeg-*-smoke.*"
   workflow_dispatch:
 
@@ -32,6 +33,9 @@ jobs:
     steps:
       - name: Check out openab-plus
         uses: actions/checkout@v6
+
+      - name: Check Docker dummy workspaces include codeg-facade
+        run: python3 scripts/check-docker-dummy-workspace.py
 
       - name: Check out pinned Codeg fork
         uses: actions/checkout@v6
