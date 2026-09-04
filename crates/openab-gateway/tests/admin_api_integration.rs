@@ -5,16 +5,77 @@
 
 mod common;
 
-use common::{spawn_admin_server, spawn_admin_server_with, AdminTestEnv};
+use anyhow::{bail, Result};
+use common::{
+    spawn_admin_server, spawn_admin_server_with, spawn_session_admin_server, AdminTestEnv,
+};
 use openab_core::acp::protocol::{ConfigOption, ConfigOptionValue};
 use openab_core::acp::SessionPool;
-use openab_core::agent_profile::AgentProfile;
+use openab_core::agent_profile::{AgentConfigSchema, AgentProfile, ProfileSessionOverrides};
 use openab_core::config::AgentConfig;
-use openab_core::session_event::SessionEventKind;
+use openab_core::runtime::{LocalRuntime, RuntimeKind, RuntimeProvider};
+use openab_core::session_event::{SessionEventKind, SessionStreamBus};
 use openab_core::session_snapshot::{SessionRuntimeMetadata, SessionSnapshot, SessionStatus};
+use openab_core::transcript::SessionTranscriptStore;
+use reqwest::Method;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
+
+struct RejectingRuntime {
+    delegate: Arc<dyn RuntimeProvider>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeProvider for RejectingRuntime {
+    fn kind(&self) -> RuntimeKind {
+        self.delegate.kind()
+    }
+
+    fn transcript_store(&self) -> SessionTranscriptStore {
+        self.delegate.transcript_store()
+    }
+
+    fn session_stream_bus(&self) -> SessionStreamBus {
+        self.delegate.session_stream_bus()
+    }
+
+    async fn list_session_snapshots(&self) -> Vec<SessionSnapshot> {
+        self.delegate.list_session_snapshots().await
+    }
+
+    async fn session_snapshot(&self, session_id: &str) -> Option<SessionSnapshot> {
+        self.delegate.session_snapshot(session_id).await
+    }
+
+    async fn get_or_create_with_profile(
+        &self,
+        thread_id: &str,
+        working_dir_override: Option<&str>,
+        profile_id: Option<&str>,
+        overrides: Option<&ProfileSessionOverrides>,
+    ) -> Result<bool> {
+        self.delegate
+            .get_or_create_with_profile(thread_id, working_dir_override, profile_id, overrides)
+            .await
+    }
+
+    async fn send_message(&self, _session_id: &str, _text: String) -> Result<()> {
+        bail!("synthetic turn start failure")
+    }
+
+    async fn cancel_session(&self, _session_id: &str) -> Result<()> {
+        bail!("synthetic cancel delivery failure")
+    }
+
+    async fn config_schema_for_agent(&self, agent_type: &str) -> Option<AgentConfigSchema> {
+        self.delegate.config_schema_for_agent(agent_type).await
+    }
+
+    async fn mark_profile_deleted(&self, profile_id: &str) {
+        self.delegate.mark_profile_deleted(profile_id).await;
+    }
+}
 
 async fn read_sse_event(
     response: &mut reqwest::Response,
@@ -34,6 +95,23 @@ async fn read_sse_event(
     }
 
     panic!("{event_name} SSE event not found");
+}
+
+async fn open_session_events(
+    client: &reqwest::Client,
+    server: &common::TestServer,
+    token: &str,
+    last_event_id: Option<&str>,
+) -> reqwest::Response {
+    let mut request = client
+        .get(format!("{}/api/v1/sessions/events", server.base_url))
+        .bearer_auth(token);
+    if let Some(last_event_id) = last_event_id {
+        request = request.header("last-event-id", last_event_id);
+    }
+    let response = request.send().await.expect("open session events stream");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response
 }
 
 fn config_option(id: &str, name: &str, current_value: &str, values: &[&str]) -> ConfigOption {
@@ -73,6 +151,16 @@ def trace(event):
 def send(message):
     print(json.dumps(message), flush=True)
 
+def update(payload):
+    send({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "fake-control-session",
+            "update": payload,
+        },
+    })
+
 for line in sys.stdin:
     request = json.loads(line)
     method = request.get("method")
@@ -103,16 +191,27 @@ for line in sys.stdin:
                 "error": {"code": -32001, "message": "fake agent failure"},
             })
         else:
-            send({
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": "fake-control-session",
-                    "update": {
-                        "sessionUpdate": "agent_message_chunk",
-                        "content": {"type": "text", "text": "control-plane reply"},
-                    },
-                },
+            update({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "checking context"},
+            })
+            update({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-1",
+                "title": "Inspect workspace",
+                "status": "running",
+                "rawInput": {"path": "Cargo.toml"},
+            })
+            update({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-1",
+                "title": "Inspect workspace",
+                "status": "completed",
+                "content": [{"type": "text", "text": "workspace inspected"}],
+            })
+            update({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "control-plane reply"},
             })
             send({
                 "jsonrpc": "2.0",
@@ -339,25 +438,62 @@ async fn sessions_list_and_detail_happy_path() {
 }
 
 #[tokio::test]
-async fn sessions_auth_rejects_missing_and_invalid_tokens() {
+async fn session_endpoints_share_admin_bearer_contract() {
     let env = AdminTestEnv::new().await;
     let server = spawn_admin_server(&env).await;
     let client = reqwest::Client::new();
 
-    let no_token = client
-        .get(format!("{}/api/v1/sessions", server.base_url))
-        .send()
-        .await
-        .expect("no token");
-    assert_eq!(no_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let endpoints = vec![
+        (Method::GET, "/api/v1/sessions", None),
+        (
+            Method::POST,
+            "/api/v1/sessions",
+            Some(json!({"profile_id": "missing"})),
+        ),
+        (Method::GET, "/api/v1/sessions/missing", None),
+        (Method::GET, "/api/v1/sessions/missing/transcript", None),
+        (Method::GET, "/api/v1/sessions/events", None),
+        (
+            Method::POST,
+            "/api/v1/sessions/missing/messages",
+            Some(json!({"text": "hello"})),
+        ),
+        (Method::POST, "/api/v1/sessions/missing/cancel", None),
+    ];
 
-    let bad_token = client
-        .get(format!("{}/api/v1/sessions", server.base_url))
-        .bearer_auth("wrong-token")
-        .send()
-        .await
-        .expect("bad token");
-    assert_eq!(bad_token.status(), reqwest::StatusCode::UNAUTHORIZED);
+    for token in [None, Some("wrong-token")] {
+        for (method, path, body) in &endpoints {
+            let mut request = client.request(method.clone(), format!("{}{path}", server.base_url));
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            let response = request.send().await.expect("request protected endpoint");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::UNAUTHORIZED,
+                "{method} {path}"
+            );
+        }
+    }
+
+    env.clear_admin_tokens();
+    for (method, path, body) in &endpoints {
+        let mut request = client
+            .request(method.clone(), format!("{}{path}", server.base_url))
+            .bearer_auth(&env.token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await.expect("request unconfigured endpoint");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "{method} {path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -429,6 +565,59 @@ async fn session_message_and_cancel_validate_auth_and_error_shapes() {
     );
 }
 
+#[tokio::test]
+async fn session_command_preaccept_failures_return_500() {
+    let env = AdminTestEnv::new().await;
+    let pool = env.pool();
+    let session_id = "admin:preaccept-error";
+    pool.seed_session_snapshot_for_test(SessionSnapshot::new(
+        session_id.into(),
+        "codex".into(),
+        "/workspace".into(),
+        Some("control-plane".into()),
+        Some("Control Plane".into()),
+        None,
+        None,
+    ))
+    .await;
+    let delegate: Arc<dyn RuntimeProvider> = Arc::new(LocalRuntime::new(pool));
+    let runtime: Arc<dyn RuntimeProvider> = Arc::new(RejectingRuntime { delegate });
+    let server = spawn_session_admin_server(runtime).await;
+    let client = reqwest::Client::new();
+    let encoded_id = urlencoding::encode(session_id);
+
+    let message = client
+        .post(format!(
+            "{}/api/v1/sessions/{encoded_id}/messages",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .json(&json!({"text": "hello"}))
+        .send()
+        .await
+        .expect("reject session message before acceptance");
+    assert_eq!(message.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        message.json::<Value>().await.expect("message error json")["error"],
+        "failed to start session turn"
+    );
+
+    let cancel = client
+        .post(format!(
+            "{}/api/v1/sessions/{encoded_id}/cancel",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("reject session cancel before acceptance");
+    assert_eq!(cancel.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        cancel.json::<Value>().await.expect("cancel error json")["error"],
+        "failed to cancel session"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn session_message_returns_202_and_publishes_transcript_and_sse() {
@@ -441,13 +630,7 @@ async fn session_message_returns_202_and_publishes_transcript_and_sse() {
     let session_id = create_control_plane_session(&env, &server, &agent_path, &log_path).await;
     let encoded_id = urlencoding::encode(&session_id);
 
-    let mut events = client
-        .get(format!("{}/api/v1/sessions/events", server.base_url))
-        .bearer_auth(&env.token)
-        .send()
-        .await
-        .expect("open session events");
-    assert_eq!(events.status(), reqwest::StatusCode::OK);
+    let mut events = open_session_events(&client, &server, &env.token, None).await;
 
     let response = client
         .post(format!(
@@ -466,7 +649,7 @@ async fn session_message_returns_202_and_publishes_transcript_and_sse() {
     assert!(accepted.get("text").is_none());
     assert!(accepted.get("content").is_none());
 
-    let (_event_id, event) = read_sse_event(&mut events, "transcript").await;
+    let (event_id, event) = read_sse_event(&mut events, "transcript").await;
     assert_eq!(event["session_id"], session_id);
     assert_eq!(event["entry"]["role"], "user");
     assert_eq!(event["entry"]["content"], "hello");
@@ -479,6 +662,44 @@ async fn session_message_returns_202_and_publishes_transcript_and_sse() {
         .iter()
         .any(|entry| entry["role"] == "user" && entry["content"] == "hello"));
     assert!(entries.iter().any(|entry| {
+        entry["role"] == "assistant"
+            && entry["content"] == "control-plane reply"
+            && entry["status"] == "completed"
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry["role"] == "assistant"
+            && entry["content"] == "checking context"
+            && entry["status"] == "thinking"
+    }));
+    assert!(entries.iter().any(|entry| {
+        entry["role"] == "tool"
+            && entry["tool_call_id"] == "tool-1"
+            && entry["status"] == "completed"
+            && entry["tool_call"]["rawInput"]["path"] == "Cargo.toml"
+            && entry["tool_result"]["content"][0]["text"] == "workspace inspected"
+    }));
+
+    let mut last_event_id = event_id.expect("transcript event id");
+    let mut replayed_entries = Vec::new();
+    for _ in 0..5 {
+        let mut replay =
+            open_session_events(&client, &server, &env.token, Some(&last_event_id)).await;
+        let (next_event_id, event) = read_sse_event(&mut replay, "transcript").await;
+        last_event_id = next_event_id.expect("replayed transcript event id");
+        replayed_entries.push(event["entry"].clone());
+    }
+    assert!(replayed_entries
+        .iter()
+        .any(|entry| { entry["content"] == "checking context" && entry["status"] == "thinking" }));
+    assert!(replayed_entries.iter().any(|entry| {
+        entry["role"] == "tool" && entry["tool_call_id"] == "tool-1" && entry["status"] == "running"
+    }));
+    assert!(replayed_entries.iter().any(|entry| {
+        entry["role"] == "tool"
+            && entry["tool_call_id"] == "tool-1"
+            && entry["status"] == "completed"
+    }));
+    assert!(replayed_entries.iter().any(|entry| {
         entry["role"] == "assistant"
             && entry["content"] == "control-plane reply"
             && entry["status"] == "completed"
@@ -523,17 +744,36 @@ async fn session_message_conflicts_cancel_is_idempotent_and_surfaces_agent_error
         "session is busy"
     );
 
+    wait_for_session_status(&client, &server, &env.token, &session_id, "running").await;
+    let transcript = client
+        .get(format!(
+            "{}/api/v1/sessions/{encoded_id}/transcript",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get transcript after conflict")
+        .json::<Value>()
+        .await
+        .expect("conflict transcript json");
+    let user_messages = transcript["entries"]
+        .as_array()
+        .expect("conflict transcript entries")
+        .iter()
+        .filter(|entry| entry["role"] == "user")
+        .filter_map(|entry| entry["content"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, vec!["block"]);
+
     let cancelled = client
         .post(&cancel_url)
         .bearer_auth(&env.token)
         .send()
         .await
         .expect("cancel blocking message");
-    assert_eq!(cancelled.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        cancelled.json::<Value>().await.expect("cancel json")["accepted"],
-        true
-    );
+    assert_eq!(cancelled.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(cancelled.bytes().await.expect("cancel body").is_empty());
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut trace = String::new();
@@ -556,7 +796,14 @@ async fn session_message_conflicts_cancel_is_idempotent_and_surfaces_agent_error
         .send()
         .await
         .expect("repeat cancel");
-    assert_eq!(cancelled_again.status(), reqwest::StatusCode::OK);
+    assert_eq!(cancelled_again.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(cancelled_again
+        .bytes()
+        .await
+        .expect("repeat cancel body")
+        .is_empty());
+
+    let mut error_events = open_session_events(&client, &server, &env.token, None).await;
 
     let error_message = client
         .post(&message_url)
@@ -566,11 +813,34 @@ async fn session_message_conflicts_cancel_is_idempotent_and_surfaces_agent_error
         .await
         .expect("start failing message");
     assert_eq!(error_message.status(), reqwest::StatusCode::ACCEPTED);
+    let (_event_id, error_event) = read_sse_event(&mut error_events, "error").await;
+    assert!(error_event.to_string().contains("fake agent failure"));
 
     let detail = wait_for_session_status(&client, &server, &env.token, &session_id, "error").await;
     assert!(detail["last_error"]
         .as_str()
         .is_some_and(|error| error.contains("fake agent failure")));
+    let transcript = client
+        .get(format!(
+            "{}/api/v1/sessions/{encoded_id}/transcript",
+            server.base_url
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .expect("get failing transcript")
+        .json::<Value>()
+        .await
+        .expect("failing transcript json");
+    assert!(transcript["entries"].as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["role"] == "system"
+                && entry["status"] == "error"
+                && entry["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("fake agent failure"))
+        })
+    }));
 
     env.pool().shutdown().await;
 }

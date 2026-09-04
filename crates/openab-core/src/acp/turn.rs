@@ -84,6 +84,7 @@ where
         Ok(value) => value,
         Err(err) => {
             conn.prompt_done().await;
+            record_error_transcript(pool, session_id, &err.to_string());
             pool.mark_session_error(session_id, err.to_string()).await;
             return Err(err);
         }
@@ -102,6 +103,7 @@ where
                     if response_error.is_none() {
                         let err = "Agent process exited unexpectedly".to_string();
                         response_error = Some(err.clone());
+                        record_error_transcript(pool, session_id, &err);
                         pool.mark_session_exited(session_id, Some(err)).await;
                         status_failure_recorded = true;
                     }
@@ -112,6 +114,7 @@ where
                 if !conn.alive() {
                     let err = "Agent process died".to_string();
                     response_error = Some(err.clone());
+                    record_error_transcript(pool, session_id, &err);
                     pool.mark_session_exited(session_id, Some(err)).await;
                     status_failure_recorded = true;
                     conn.abandon_request(request_id).await;
@@ -123,6 +126,7 @@ where
                         config.prompt_hard_timeout.as_secs(),
                     );
                     response_error = Some(err.clone());
+                    record_error_transcript(pool, session_id, &err);
                     pool.mark_session_error(session_id, err).await;
                     status_failure_recorded = true;
                     conn.abandon_request(request_id).await;
@@ -141,6 +145,7 @@ where
             if let Some(err) = notification.error.as_ref() {
                 let formatted = format_coded_error(err.code, &err.message, err.data_message());
                 response_error = Some(formatted.clone());
+                record_error_transcript(pool, session_id, &formatted);
                 pool.mark_session_error(session_id, formatted).await;
                 status_failure_recorded = true;
             }
@@ -225,6 +230,12 @@ pub(crate) fn record_prompt_transcript(
         pool.transcript_store()
             .record_user_text(session_id, content);
     }
+}
+
+fn record_error_transcript(pool: &SessionPool, session_id: &str, error: &str) {
+    let store = pool.transcript_store();
+    store.finish_assistant_turn(session_id);
+    store.record_system_text(session_id, error, "error");
 }
 
 /// Persist every classified ACP activity before presentation-specific handling.

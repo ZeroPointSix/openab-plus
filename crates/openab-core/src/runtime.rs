@@ -154,13 +154,27 @@ impl RuntimeProvider for LocalRuntime {
                 }
                 Ok(_) => {}
                 Err(error) => {
+                    let message = error.to_string();
                     tracing::error!(
                         session_id = %session_id,
-                        error = %error,
+                        error = %message,
                         "headless ACP turn failed"
                     );
-                    pool.mark_session_error(&session_id, error.to_string())
-                        .await;
+                    let already_recorded =
+                        pool.session_snapshot(&session_id)
+                            .await
+                            .is_some_and(|snapshot| {
+                                snapshot.status == crate::session_snapshot::SessionStatus::Error
+                                    && snapshot.last_error.as_deref() == Some(message.as_str())
+                            });
+                    if !already_recorded {
+                        pool.transcript_store().record_system_text(
+                            &session_id,
+                            message.clone(),
+                            "error",
+                        );
+                        pool.mark_session_error(&session_id, message).await;
+                    }
                 }
             }
         });
@@ -171,17 +185,7 @@ impl RuntimeProvider for LocalRuntime {
         if self.pool.session_snapshot(session_id).await.is_none() {
             bail!("session not found");
         }
-        if let Err(error) = self.pool.cancel_session(session_id).await {
-            // Cancellation is deliberately best-effort. The snapshot still
-            // exists, so an already-dead agent must not turn an accepted
-            // control-plane cancellation into a 500 response.
-            tracing::warn!(
-                session_id,
-                error = %error,
-                "best-effort session cancellation failed"
-            );
-        }
-        Ok(())
+        self.pool.cancel_session(session_id).await
     }
 
     async fn config_schema_for_agent(&self, agent_type: &str) -> Option<AgentConfigSchema> {

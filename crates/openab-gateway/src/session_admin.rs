@@ -274,7 +274,7 @@ async fn send_message(
         Err(error) if error.to_string().contains("no session") => session_not_found(),
         Err(error) => {
             tracing::error!(session_id, error = %error, "admin message rejected");
-            internal_error("failed to start session message")
+            internal_error("failed to start session turn")
         }
     }
 }
@@ -288,14 +288,7 @@ async fn cancel_session(headers: HeaderMap, session_id: String, runtime: AdminRu
     }
 
     match runtime.cancel_session(&session_id).await {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(AcceptedSessionCommand {
-                accepted: true,
-                session_id,
-            }),
-        )
-            .into_response(),
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) if error.to_string().contains("session not found") => session_not_found(),
         Err(error) if error.to_string().contains("no session") => session_not_found(),
         Err(error) => {
