@@ -216,16 +216,30 @@ async function main() {
     await page.locator('button[title="Send"]:visible').last().click()
     const cancelButton = page.locator('button[title="Cancel"]:visible').last()
     await cancelButton.waitFor({ state: "visible" })
-    const cancelResponse = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        new URL(response.url()).pathname ===
+    const cancelRequestPromise = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        new URL(request.url()).pathname ===
           `/api/v1/sessions/${session.session_id}/cancel`,
       { timeout: 20_000 }
     )
     await cancelButton.click()
-    assert.equal((await cancelResponse).status(), 204)
+    const cancelRequest = await cancelRequestPromise
+    assert.equal(cancelRequest.method(), "POST")
     await page.locator('button[title="Send"]:visible').last().waitFor()
+
+    // Codeg aborts the fetch lifecycle after stopping the active turn, so
+    // verify the HTTP acknowledgement independently through the same image.
+    const cancelProbe = await context.request.post(
+      `${baseUrl}/api/v1/sessions/${encodeURIComponent(session.session_id)}/cancel`,
+      {
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    )
+    assert.equal(cancelProbe.status(), 204)
 
     const sseCountBeforeOffline = sessionResponses.filter((response) =>
       response.contentType.startsWith("text/event-stream")
@@ -285,7 +299,7 @@ async function main() {
         "login with bearer token in an Authorization header",
         "session creation and prompt through same-origin unified listener",
         "live assistant and thinking plus hydrated tool rendering from ACP/SSE",
-        "cancel through the workbench",
+        "workbench cancel request and idempotent API acknowledgement",
         "SSE reconnect after an offline interval",
         "direct /workspace refresh and transcript recovery",
       ],
