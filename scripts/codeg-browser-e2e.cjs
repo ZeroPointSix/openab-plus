@@ -152,8 +152,8 @@ async function main() {
       .getByText("checking context", { exact: true })
       .last()
       .waitFor({ state: "visible", timeout: 10_000 })
-    const toolRenderedPromise = page
-      .getByText("Inspect workspace", { exact: true })
+    const liveToolGroupRenderedPromise = page
+      .locator("button.ws-msg-chip:visible")
       .last()
       .waitFor({ state: "visible", timeout: 10_000 })
 
@@ -188,7 +188,7 @@ async function main() {
     )
 
     await thinkingRenderedPromise
-    await toolRenderedPromise
+    await liveToolGroupRenderedPromise
     await page
       .getByText("control-plane reply", { exact: true })
       .last()
