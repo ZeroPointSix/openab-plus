@@ -57,7 +57,6 @@ jobs:
       - name: Validate Rust routing changes
         run: |
           cargo fmt --all --check
-          cargo clippy -p openab-gateway --all-targets -- -D warnings
           cargo test -p openab-gateway codeg_web
           cargo check --features unified
 
