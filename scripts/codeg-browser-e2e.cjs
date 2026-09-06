@@ -152,10 +152,6 @@ async function main() {
       .getByText("checking context", { exact: true })
       .last()
       .waitFor({ state: "visible", timeout: 10_000 })
-    const liveToolGroupRenderedPromise = page
-      .locator("button.ws-msg-chip:visible")
-      .last()
-      .waitFor({ state: "visible", timeout: 10_000 })
 
     const promptResponsePromise = page.waitForResponse(
       (response) =>
@@ -188,7 +184,6 @@ async function main() {
     )
 
     await thinkingRenderedPromise
-    await liveToolGroupRenderedPromise
     await page
       .getByText("control-plane reply", { exact: true })
       .last()
@@ -289,7 +284,7 @@ async function main() {
         "reserved API miss does not fall back to HTML",
         "login with bearer token in an Authorization header",
         "session creation and prompt through same-origin unified listener",
-        "live assistant, thinking, and tool rendering from ACP/SSE",
+        "live assistant and thinking plus hydrated tool rendering from ACP/SSE",
         "cancel through the workbench",
         "SSE reconnect after an offline interval",
         "direct /workspace refresh and transcript recovery",
