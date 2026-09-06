@@ -216,14 +216,13 @@ async function main() {
     await page.locator('button[title="Send"]:visible').last().click()
     const cancelButton = page.locator('button[title="Cancel"]:visible').last()
     await cancelButton.waitFor({ state: "visible" })
-    const sseCountBeforeOffline = sessionResponses.filter((response) =>
+    const sseCountBeforeRecovery = sessionResponses.filter((response) =>
       response.contentType.startsWith("text/event-stream")
     ).length
-    assert(sseCountBeforeOffline >= 1, "the browser never established session SSE")
-    await context.setOffline(true)
-    await page.waitForTimeout(700)
-    await context.setOffline(false)
-    await page.waitForTimeout(700)
+    assert(
+      sseCountBeforeRecovery >= 1,
+      "the browser never established session SSE"
+    )
     const cancelRequestPromise = page.waitForRequest(
       (request) =>
         request.method() === "POST" &&
@@ -249,6 +248,29 @@ async function main() {
     )
     assert.equal(cancelProbe.status(), 204)
 
+    let forcedSseFailureCount = 0
+    await page.route(
+      "**/api/v1/sessions/events",
+      async (route) => {
+        forcedSseFailureCount += 1
+        await route.abort("internetdisconnected")
+      },
+      { times: 1 }
+    )
+    const refreshResponse = await page.reload({ waitUntil: "domcontentloaded" })
+    assert(refreshResponse)
+    assert.equal(refreshResponse.status(), 200)
+    assert.equal(refreshResponse.headers()["cache-control"], "no-cache")
+    await waitUntil(
+      () =>
+        forcedSseFailureCount === 1 &&
+        sessionResponses.filter((response) =>
+          response.contentType.startsWith("text/event-stream")
+        ).length > sseCountBeforeRecovery,
+      "session SSE did not reconnect after a forced request failure"
+    )
+    await page.getByText("control-plane reply", { exact: false }).waitFor()
+
     const repliesBeforeRecoveryPrompt = await page
       .getByText("control-plane reply", { exact: true })
       .count()
@@ -269,12 +291,6 @@ async function main() {
           .count()) > repliesBeforeRecoveryPrompt,
       "session did not render a new streamed reply after the offline interval"
     )
-
-    const refreshResponse = await page.reload({ waitUntil: "domcontentloaded" })
-    assert(refreshResponse)
-    assert.equal(refreshResponse.status(), 200)
-    assert.equal(refreshResponse.headers()["cache-control"], "no-cache")
-    await page.getByText("control-plane reply", { exact: false }).waitFor()
 
     // Hydrated progress is folded behind the completed-turn disclosure, then
     // completed tools are folded into Codeg's tool-group chip.
@@ -314,7 +330,7 @@ async function main() {
         "session creation and prompt through same-origin unified listener",
         "live assistant and thinking plus hydrated tool rendering from ACP/SSE",
         "workbench cancel request and idempotent API acknowledgement",
-        "session stream recovery after an offline interval",
+        "forced SSE reconnect and post-reconnect streamed reply",
         "direct /workspace refresh and transcript recovery",
       ],
       sessionHttp: sessionResponses,
