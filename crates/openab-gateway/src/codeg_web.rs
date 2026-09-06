@@ -271,7 +271,12 @@ mod tests {
     async fn reserved_control_plane_paths_never_fall_back_to_html() {
         let (_root, config) = fixture();
         let app = router::<()>(config);
-        for uri in ["/api/not-real", "/api/v1/missing", "/ws/events", "/webhook/missing"] {
+        for uri in [
+            "/api/not-real",
+            "/api/v1/missing",
+            "/ws/events",
+            "/webhook/missing",
+        ] {
             let response = request(app.clone(), uri).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
         }
@@ -317,8 +322,17 @@ mod tests {
             ),
         ] {
             let response = request(app.clone(), uri).await;
-            assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), expected);
-            assert_eq!(response.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(), "nosniff");
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL).unwrap(),
+                expected
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::X_CONTENT_TYPE_OPTIONS)
+                    .unwrap(),
+                "nosniff"
+            );
         }
     }
 
@@ -327,6 +341,9 @@ mod tests {
         let missing = tempfile::tempdir().unwrap().path().join("not-present");
         let response = request(router::<()>(Config::new(missing)), "/").await;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body_text(response).await, "Codeg workbench assets are unavailable");
+        assert_eq!(
+            body_text(response).await,
+            "Codeg workbench assets are unavailable"
+        );
     }
 }
