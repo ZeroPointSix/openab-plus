@@ -223,13 +223,7 @@ async function main() {
     await context.setOffline(true)
     await page.waitForTimeout(700)
     await context.setOffline(false)
-    await waitUntil(
-      () =>
-        sessionResponses.filter((response) =>
-          response.contentType.startsWith("text/event-stream")
-        ).length > sseCountBeforeOffline,
-      "session SSE did not reconnect after an offline interval"
-    )
+    await page.waitForTimeout(700)
     const cancelRequestPromise = page.waitForRequest(
       (request) =>
         request.method() === "POST" &&
@@ -254,6 +248,27 @@ async function main() {
       }
     )
     assert.equal(cancelProbe.status(), 204)
+
+    const repliesBeforeRecoveryPrompt = await page
+      .getByText("control-plane reply", { exact: true })
+      .count()
+    const recoveredPromptResponse = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname ===
+          `/api/v1/sessions/${encodeURIComponent(session.session_id)}/messages`,
+      { timeout: 20_000 }
+    )
+    await page.locator('[role="textbox"]:visible').last().fill("after reconnect")
+    await page.locator('button[title="Send"]:visible').last().click()
+    assert.equal((await recoveredPromptResponse).status(), 202)
+    await waitUntil(
+      async () =>
+        (await page
+          .getByText("control-plane reply", { exact: true })
+          .count()) > repliesBeforeRecoveryPrompt,
+      "session did not render a new streamed reply after the offline interval"
+    )
 
     const refreshResponse = await page.reload({ waitUntil: "domcontentloaded" })
     assert(refreshResponse)
@@ -299,7 +314,7 @@ async function main() {
         "session creation and prompt through same-origin unified listener",
         "live assistant and thinking plus hydrated tool rendering from ACP/SSE",
         "workbench cancel request and idempotent API acknowledgement",
-        "SSE reconnect after an offline interval",
+        "session stream recovery after an offline interval",
         "direct /workspace refresh and transcript recovery",
       ],
       sessionHttp: sessionResponses,
