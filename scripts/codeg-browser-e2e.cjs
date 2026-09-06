@@ -148,6 +148,15 @@ async function main() {
     const composer = page.locator('[role="textbox"]:visible').last()
     await composer.waitFor({ state: "visible" })
 
+    const thinkingRenderedPromise = page
+      .getByText("checking context", { exact: true })
+      .last()
+      .waitFor({ state: "visible", timeout: 10_000 })
+    const toolRenderedPromise = page
+      .getByText("Inspect workspace", { exact: true })
+      .last()
+      .waitFor({ state: "visible", timeout: 10_000 })
+
     const promptResponsePromise = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
@@ -178,29 +187,11 @@ async function main() {
       "session creation response was not observed"
     )
 
-    const rendered = { assistant: false, thinking: false }
-    await waitUntil(async () => {
-      const body = (await page.locator("body").textContent()) || ""
-      rendered.assistant ||= body.includes("control-plane reply")
-      rendered.thinking ||= body.includes("checking context")
-      return rendered.assistant
-    }, "assistant reply was not rendered")
-    assert(rendered.thinking, "thinking stream was not rendered")
-
-    // Settled progress is first folded behind the completed-turn disclosure,
-    // then completed tools are folded into Codeg's tool-group chip.
-    const completedTurn = page
-      .getByRole("button", { name: /^(?:Finished working|Worked for)/ })
-      .last()
-    await completedTurn.waitFor({ state: "visible", timeout: 10_000 })
-    await completedTurn.click()
-    const toolGroup = page
-      .locator(".reply-fold-body button.ws-msg-chip:visible")
-      .last()
-    await toolGroup.waitFor({ state: "visible", timeout: 10_000 })
-    await toolGroup.click()
+    await thinkingRenderedPromise
+    await toolRenderedPromise
     await page
-      .getByText("workspace inspected", { exact: true })
+      .getByText("control-plane reply", { exact: true })
+      .last()
       .waitFor({ state: "visible", timeout: 10_000 })
 
     const transcript = await page.evaluate(async (sessionId) => {
@@ -261,6 +252,22 @@ async function main() {
     assert.equal(refreshResponse.status(), 200)
     assert.equal(refreshResponse.headers()["cache-control"], "no-cache")
     await page.getByText("control-plane reply", { exact: false }).waitFor()
+
+    // Hydrated progress is folded behind the completed-turn disclosure, then
+    // completed tools are folded into Codeg's tool-group chip.
+    const completedTurn = page
+      .getByRole("button", { name: /^(?:Finished working|Worked for)/ })
+      .last()
+    await completedTurn.waitFor({ state: "visible", timeout: 10_000 })
+    await completedTurn.click()
+    const toolGroup = page
+      .locator(".reply-fold-body button.ws-msg-chip:visible")
+      .last()
+    await toolGroup.waitFor({ state: "visible", timeout: 10_000 })
+    await toolGroup.click()
+    await page
+      .getByText("workspace inspected", { exact: true })
+      .waitFor({ state: "visible", timeout: 10_000 })
     await page.locator('[role="textbox"]:visible').last().waitFor()
 
     for (const origin of requestOrigins) {
