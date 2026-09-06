@@ -148,18 +148,35 @@ async function main() {
     const composer = page.locator('[role="textbox"]:visible').last()
     await composer.waitFor({ state: "visible" })
 
-    const createSession = page.waitForResponse(
+    const promptResponsePromise = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        new URL(response.url()).pathname === "/api/v1/sessions",
+        /^\/api\/v1\/sessions\/[^/]+\/messages$/.test(
+          new URL(response.url()).pathname
+        ),
       { timeout: 20_000 }
     )
     await composer.fill("exercise unified Codeg")
     await page.locator('button[title="Send"]:visible').last().click()
-    const createResponse = await createSession
-    assert.equal(createResponse.status(), 201)
-    const session = await createResponse.json()
+    const promptResponse = await promptResponsePromise
+    assert.equal(promptResponse.status(), 202)
+    const promptPath = new URL(promptResponse.url()).pathname
+    const promptMatch =
+      /^\/api\/v1\/sessions\/([^/]+)\/messages$/.exec(promptPath)
+    assert(promptMatch, `unexpected prompt response path: ${promptPath}`)
+    const session = {
+      session_id: decodeURIComponent(promptMatch[1]),
+    }
     assert.match(session.session_id, /^[A-Za-z0-9_-]+/)
+    assert(
+      sessionResponses.some(
+        (response) =>
+          response.method === "POST" &&
+          response.path === "/api/v1/sessions" &&
+          response.status === 201
+      ),
+      "session creation response was not observed"
+    )
 
     const rendered = { assistant: false, thinking: false }
     await waitUntil(async () => {
@@ -214,7 +231,7 @@ async function main() {
       { timeout: 20_000 }
     )
     await cancelButton.click()
-    assert.equal((await cancelResponse).status(), 200)
+    assert.equal((await cancelResponse).status(), 204)
     await page.locator('button[title="Send"]:visible').last().waitFor()
 
     const sseCountBeforeOffline = sessionResponses.filter((response) =>
