@@ -304,6 +304,11 @@ async function main() {
       .last()
     await toolGroup.waitFor({ state: "visible", timeout: 10_000 })
     await toolGroup.click()
+    const toolCard = page
+      .getByRole("button", { name: /Inspect workspace/ })
+      .last()
+    await toolCard.waitFor({ state: "visible", timeout: 10_000 })
+    await toolCard.click()
     await page
       .getByText("workspace inspected", { exact: true })
       .waitFor({ state: "visible", timeout: 10_000 })
