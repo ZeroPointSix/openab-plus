@@ -216,6 +216,20 @@ async function main() {
     await page.locator('button[title="Send"]:visible').last().click()
     const cancelButton = page.locator('button[title="Cancel"]:visible').last()
     await cancelButton.waitFor({ state: "visible" })
+    const sseCountBeforeOffline = sessionResponses.filter((response) =>
+      response.contentType.startsWith("text/event-stream")
+    ).length
+    assert(sseCountBeforeOffline >= 1, "the browser never established session SSE")
+    await context.setOffline(true)
+    await page.waitForTimeout(700)
+    await context.setOffline(false)
+    await waitUntil(
+      () =>
+        sessionResponses.filter((response) =>
+          response.contentType.startsWith("text/event-stream")
+        ).length > sseCountBeforeOffline,
+      "session SSE did not reconnect after an offline interval"
+    )
     const cancelRequestPromise = page.waitForRequest(
       (request) =>
         request.method() === "POST" &&
@@ -240,21 +254,6 @@ async function main() {
       }
     )
     assert.equal(cancelProbe.status(), 204)
-
-    const sseCountBeforeOffline = sessionResponses.filter((response) =>
-      response.contentType.startsWith("text/event-stream")
-    ).length
-    assert(sseCountBeforeOffline >= 1, "the browser never established session SSE")
-    await context.setOffline(true)
-    await page.waitForTimeout(700)
-    await context.setOffline(false)
-    await waitUntil(
-      () =>
-        sessionResponses.filter((response) =>
-          response.contentType.startsWith("text/event-stream")
-        ).length > sseCountBeforeOffline,
-      "session SSE did not reconnect after an offline interval"
-    )
 
     const refreshResponse = await page.reload({ waitUntil: "domcontentloaded" })
     assert(refreshResponse)
