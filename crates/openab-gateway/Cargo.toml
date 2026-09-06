@@ -1,6 +1,6 @@
 [package]
 name = "openab-gateway"
-version = "0.5.13"
+version = "0.5.14"
 edition = "2021"
 license = "MIT"
 
@@ -32,6 +32,7 @@ quick-xml = "0.37"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 parking_lot = "0.12"
 urlencoding = "2"
+percent-encoding = "2"
 
 [dev-dependencies]
 wiremock = "0.6"
@@ -40,6 +41,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures-util = "0.3"
 openab-core = { path = "../openab-core", default-features = false, features = ["test-support"] }
 async-trait = "0.1"
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["telegram", "line", "feishu", "googlechat", "wecom", "teams"]

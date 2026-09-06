@@ -13,6 +13,24 @@
 
 # Global ARG — must be declared before first FROM for use in FROM instructions
 ARG BUILDER_IMAGE=local_builder
+ARG CODEG_REVISION=29018340851d8e569a52b4bd139dcfed09efc7bd
+
+# Build the OpenAB-enabled Codeg workbench from an immutable, prepared source
+# tree. scripts/prepare-codeg-context.sh verifies the checkout and writes the
+# revision marker before Docker receives the build context.
+FROM node:22.14.0-bookworm-slim AS codeg_builder
+ARG CODEG_REVISION
+WORKDIR /codeg
+RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+COPY codeg/package.json codeg/pnpm-lock.yaml codeg/pnpm-workspace.yaml codeg/.npmrc ./
+RUN pnpm install --frozen-lockfile
+COPY codeg/ ./
+RUN test "$(cat .openab-revision)" = "${CODEG_REVISION}" \
+    && pnpm build \
+    && test -f out/index.html \
+    && test -f out/login.html \
+    && test -f out/workspace.html \
+    && cp .openab-revision out/.openab-codeg-revision
 
 # =============================================================================
 # Stage: local_builder — compile openab binary (unified mode)
@@ -38,7 +56,6 @@ RUN mkdir -p src crates/openab-core/src crates/openab-gateway/src \
     && rm -rf src crates/openab-core/src crates/openab-gateway/src
 COPY crates/ crates/
 COPY src/ src/
-COPY web/ web/
 RUN touch src/main.rs crates/openab-core/src/lib.rs crates/openab-gateway/src/lib.rs \
     && cargo build --release --features unified
 # Build openab-agent (used by native variant) — copied late to avoid cache busts
@@ -49,11 +66,17 @@ RUN cd openab-agent && { grep -q '^\[workspace\]' Cargo.toml || printf '\n[works
 # runtime injection is needed here — unlike openab-agent above.
 COPY agy-acp/ agy-acp/
 RUN cd agy-acp && cargo build --release
+COPY --from=codeg_builder /codeg/out /build/codeg-dist
+COPY --from=codeg_builder /codeg/LICENSE /build/licenses/codeg/LICENSE
 
 # =============================================================================
 # Stage: builder — resolves to either local_builder or prebuilt registry image
 # =============================================================================
 FROM ${BUILDER_IMAGE} AS builder
+ARG CODEG_REVISION
+RUN test -f /build/codeg-dist/index.html \
+    && test -f /build/licenses/codeg/LICENSE \
+    && test "$(cat /build/codeg-dist/.openab-codeg-revision)" = "${CODEG_REVISION}"
 RUN for bin in /build/target/release/openab \
               /build/openab-agent/target/release/openab-agent \
               /build/agy-acp/target/release/agy-acp; do \
@@ -64,6 +87,8 @@ RUN for bin in /build/target/release/openab \
 # Stage: base-debian — shared runtime base for debian-based agents
 # =============================================================================
 FROM debian:trixie-slim AS base-debian
+COPY --from=builder /build/codeg-dist /usr/share/openab/codeg
+COPY --from=builder /build/licenses/codeg/LICENSE /usr/share/licenses/codeg/LICENSE
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini git unzip \
     && rm -rf /var/lib/apt/lists/*
@@ -79,6 +104,8 @@ RUN useradd -m -s /bin/bash -u 1000 agent
 # Stage: base-node — shared runtime base for node-based agents
 # =============================================================================
 FROM node:22-trixie-slim AS base-node
+COPY --from=builder /build/codeg-dist /usr/share/openab/codeg
+COPY --from=builder /build/licenses/codeg/LICENSE /usr/share/licenses/codeg/LICENSE
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini bubblewrap socat unzip git \
     && rm -rf /var/lib/apt/lists/*
@@ -169,6 +196,8 @@ CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
 # Target: kimi
 # =============================================================================
 FROM node:24-trixie-slim AS kimi
+COPY --from=builder /build/codeg-dist /usr/share/openab/codeg
+COPY --from=builder /build/licenses/codeg/LICENSE /usr/share/licenses/codeg/LICENSE
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini bubblewrap socat unzip git \
     && rm -rf /var/lib/apt/lists/*
@@ -288,6 +317,8 @@ CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
 # Target: hermes
 # =============================================================================
 FROM python:3.12-slim-trixie AS hermes
+COPY --from=builder /build/codeg-dist /usr/share/openab/codeg
+COPY --from=builder /build/licenses/codeg/LICENSE /usr/share/licenses/codeg/LICENSE
 RUN useradd -m -u 1000 agent
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl procps ripgrep tini git ffmpeg unzip xz-utils \
@@ -460,6 +491,8 @@ CMD ["openab", "run", "-c", "/etc/openab/config.toml"]
 # Target: agentcore (minimal — no agent CLI bundled)
 # =============================================================================
 FROM debian:trixie-slim AS agentcore
+COPY --from=builder /build/codeg-dist /usr/share/openab/codeg
+COPY --from=builder /build/licenses/codeg/LICENSE /usr/share/licenses/codeg/LICENSE
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates tini \
     && rm -rf /var/lib/apt/lists/*

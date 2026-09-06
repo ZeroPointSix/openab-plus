@@ -1,0 +1,100 @@
+name: Codeg Unified E2E
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - '.github/workflows/codeg-unified.yml'
+      - '.dockerignore'
+      - 'Dockerfile.unified'
+      - 'Cargo.*'
+      - 'crates/openab-gateway/**'
+      - 'src/**'
+      - 'scripts/codeg-**'
+      - 'scripts/prepare-codeg-context.sh'
+  workflow_dispatch:
+
+concurrency:
+  group: codeg-unified-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CODEG_REVISION: 29018340851d8e569a52b4bd139dcfed09efc7bd
+  PLAYWRIGHT_VERSION: 1.51.1
+
+jobs:
+  codeg-unified:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prepare pinned Codeg source
+        run: ./scripts/prepare-codeg-context.sh
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.14.0
+
+      - name: Install pnpm
+        run: npm install --global pnpm@11.9.0
+
+      - name: Test and export Codeg
+        working-directory: codeg
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm test
+          pnpm build
+          test -f out/index.html
+          test -f out/login.html
+          test -f out/workspace.html
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Validate Rust routing changes
+        run: |
+          cargo fmt --all --check
+          cargo clippy -p openab-gateway --all-targets -- -D warnings
+          cargo test -p openab-gateway codeg_web
+          cargo check --features unified
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build final unified Codex image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.unified
+          target: codex
+          load: true
+          tags: openab-unified-codex:e2e
+          cache-from: type=gha,scope=codeg-unified-e2e
+          cache-to: type=gha,scope=codeg-unified-e2e,mode=max
+
+      - name: Install Chromium for browser gate
+        run: |
+          npm install --prefix /tmp/openab-codeg-playwright --no-save "playwright@${PLAYWRIGHT_VERSION}"
+          PLAYWRIGHT_BROWSERS_PATH=/tmp/ms-playwright \
+            /tmp/openab-codeg-playwright/node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Run final-image browser E2E
+        env:
+          NODE_PATH: /tmp/openab-codeg-playwright/node_modules
+          PLAYWRIGHT_BROWSERS_PATH: /tmp/ms-playwright
+        run: ./scripts/run-codeg-browser-e2e.sh
+
+      - name: Upload browser and service evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-unified-e2e
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            artifacts/codeg-e2e/codeg-workbench.png
+            artifacts/codeg-e2e/evidence.json
+            artifacts/codeg-e2e/agent.log
+            artifacts/codeg-e2e/openab.log

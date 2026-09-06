@@ -24,6 +24,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
+  CODEG_REVISION: 29018340851d8e569a52b4bd139dcfed09efc7bd
 
 jobs:
   prepare:
@@ -117,6 +118,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.branch }}
+
+      - name: Prepare pinned Codeg source
+        run: ./scripts/prepare-codeg-context.sh
 
       - uses: docker/setup-buildx-action@v3
 

@@ -1,13 +1,13 @@
 pub mod adapters;
 pub mod agent_profile_admin;
 pub mod cli_config_admin;
+pub mod codeg_web;
 pub mod config_admin;
 pub(crate) mod media;
 pub mod provider_admin;
 pub mod schema;
 pub mod session_admin;
 pub mod store;
-pub mod web_admin;
 pub mod workspace_admin;
 
 use std::collections::HashMap;
@@ -554,6 +554,12 @@ pub struct GatewayFeishuConfig {
 /// process pool, not the sidecar gateway).
 pub const STANDALONE_SESSION_ADMIN_MOUNTED: bool = false;
 
+/// Whether standalone [`serve`] mounts the Codeg workbench.
+///
+/// Codeg and the session control plane are deliberately co-located only in
+/// the unified `openab run` listener.
+pub const STANDALONE_CODEG_WEB_MOUNTED: bool = false;
+
 /// Configuration for the standalone gateway server.
 pub struct ServeConfig {
     pub listen_addr: String,
@@ -895,7 +901,6 @@ pub async fn serve(config: ServeConfig) -> anyhow::Result<()> {
     }
 
     let app = app
-        .merge(web_admin::router())
         .merge(agent_profile_admin::router(profile_service.clone()))
         .merge(provider_admin::router(
             provider_store.clone(),

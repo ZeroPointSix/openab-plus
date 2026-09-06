@@ -1177,7 +1177,6 @@ async fn main() -> anyhow::Result<()> {
             // Build axum router with platform webhook routes
             let mut app = axum::Router::new()
                 .route("/health", axum::routing::get(|| async { "ok" }))
-                .merge(openab_gateway::web_admin::router())
                 .merge(openab_gateway::session_admin::router(runtime.clone()))
                 .merge(openab_gateway::agent_profile_admin::router_with_pool(
                     profile_service.clone(),
@@ -1296,7 +1295,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            let app = app.with_state(gw_state.clone());
+            let app = app
+                .merge(openab_gateway::codeg_web::router(
+                    openab_gateway::codeg_web::Config::from_env(),
+                ))
+                .with_state(gw_state.clone());
 
             // Bridge task: receive events from adapters via event_tx, dispatch to core
             let unified_adapter: Arc<dyn adapter::ChatAdapter> = Arc::new(
