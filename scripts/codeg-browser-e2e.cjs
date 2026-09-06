@@ -187,9 +187,16 @@ async function main() {
     }, "assistant reply was not rendered")
     assert(rendered.thinking, "thinking stream was not rendered")
 
-    // Completed tools are intentionally folded into Codeg's tool-group chip.
-    // Expand that real UI surface before asserting the tool's rendered output.
-    const toolGroup = page.locator("button.ws-msg-chip:visible").last()
+    // Settled progress is first folded behind the completed-turn disclosure,
+    // then completed tools are folded into Codeg's tool-group chip.
+    const completedTurn = page
+      .getByRole("button", { name: /^(?:Finished working|Worked for)/ })
+      .last()
+    await completedTurn.waitFor({ state: "visible", timeout: 10_000 })
+    await completedTurn.click()
+    const toolGroup = page
+      .locator(".reply-fold-body button.ws-msg-chip:visible")
+      .last()
     await toolGroup.waitFor({ state: "visible", timeout: 10_000 })
     await toolGroup.click()
     await page
