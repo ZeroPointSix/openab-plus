@@ -161,16 +161,23 @@ async function main() {
     const session = await createResponse.json()
     assert.match(session.session_id, /^[A-Za-z0-9_-]+/)
 
-    const rendered = { assistant: false, thinking: false, tool: false }
+    const rendered = { assistant: false, thinking: false }
     await waitUntil(async () => {
       const body = (await page.locator("body").textContent()) || ""
       rendered.assistant ||= body.includes("control-plane reply")
       rendered.thinking ||= body.includes("checking context")
-      rendered.tool ||= body.includes("Inspect workspace")
       return rendered.assistant
     }, "assistant reply was not rendered")
     assert(rendered.thinking, "thinking stream was not rendered")
-    assert(rendered.tool, "tool stream was not rendered")
+
+    // Completed tools are intentionally folded into Codeg's tool-group chip.
+    // Expand that real UI surface before asserting the tool's rendered output.
+    const toolGroup = page.locator("button.ws-msg-chip:visible").last()
+    await toolGroup.waitFor({ state: "visible", timeout: 10_000 })
+    await toolGroup.click()
+    await page
+      .getByText("workspace inspected", { exact: true })
+      .waitFor({ state: "visible", timeout: 10_000 })
 
     const transcript = await page.evaluate(async (sessionId) => {
       const response = await fetch(
