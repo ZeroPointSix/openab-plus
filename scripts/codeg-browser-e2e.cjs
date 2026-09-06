@@ -220,7 +220,7 @@ async function main() {
       (request) =>
         request.method() === "POST" &&
         new URL(request.url()).pathname ===
-          `/api/v1/sessions/${session.session_id}/cancel`,
+          `/api/v1/sessions/${encodeURIComponent(session.session_id)}/cancel`,
       { timeout: 20_000 }
     )
     await cancelButton.click()
