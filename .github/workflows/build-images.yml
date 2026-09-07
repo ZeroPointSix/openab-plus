@@ -24,7 +24,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  CODEG_REVISION: 29018340851d8e569a52b4bd139dcfed09efc7bd
+  CODEG_REVISION: c7776dab5fdc0a5fd7375f105c7e4bb15b3217b7
 
 jobs:
   prepare:
