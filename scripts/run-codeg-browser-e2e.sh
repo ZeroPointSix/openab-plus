@@ -56,7 +56,7 @@ OPENAB_BASE_URL="$BASE_URL" \
 OPENAB_E2E_TOKEN="$TOKEN" \
 OPENAB_E2E_SCREENSHOT="$ARTIFACT_DIR/codeg-workbench.png" \
 OPENAB_E2E_EVIDENCE="$ARTIFACT_DIR/evidence.json" \
-CODEG_REVISION="29018340851d8e569a52b4bd139dcfed09efc7bd" \
+CODEG_REVISION="c7776dab5fdc0a5fd7375f105c7e4bb15b3217b7" \
 node "$REPOSITORY_ROOT/scripts/codeg-browser-e2e.cjs"
 
 grep -Fq '"method":"session/prompt","text":"exercise unified Codeg"' "$ARTIFACT_DIR/agent.log"
