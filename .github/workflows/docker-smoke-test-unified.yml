@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CODEG_REVISION: 29018340851d8e569a52b4bd139dcfed09efc7bd
+  CODEG_REVISION: f3d82482e78467aa2636d181ae7154c433cb6f94
 
 jobs:
   # Build the shared builder stage once, then test agent targets using cache
@@ -54,7 +54,7 @@ jobs:
           docker run --rm --entrypoint sh openab-builder:local -c '
             test -f /build/codeg-dist/index.html
             test -f /build/licenses/codeg/LICENSE
-            test "$(cat /build/codeg-dist/.openab-codeg-revision)" = "29018340851d8e569a52b4bd139dcfed09efc7bd"
+            test "$(cat /build/codeg-dist/.openab-codeg-revision)" = "f3d82482e78467aa2636d181ae7154c433cb6f94"
           '
 
   smoke-test-unified:
@@ -107,7 +107,7 @@ jobs:
           docker run --rm --entrypoint sh openab-unified-${{ matrix.target.name }}:test -c '
             test -f /usr/share/openab/codeg/index.html
             test -f /usr/share/licenses/codeg/LICENSE
-            test "$(cat /usr/share/openab/codeg/.openab-codeg-revision)" = "29018340851d8e569a52b4bd139dcfed09efc7bd"
+            test "$(cat /usr/share/openab/codeg/.openab-codeg-revision)" = "f3d82482e78467aa2636d181ae7154c433cb6f94"
           '
 
       - name: Verify agent CLI exists

@@ -270,6 +270,11 @@ async function main() {
       "session SSE did not reconnect after a forced request failure"
     )
     await page.getByText("control-plane reply", { exact: false }).waitFor()
+    assert.equal(
+      await page.getByText("No chats", { exact: true }).count(),
+      0,
+      "idle OpenAB session disappeared from Chat/Recent after refresh"
+    )
 
     const repliesBeforeRecoveryPrompt = await page
       .getByText("control-plane reply", { exact: true })
@@ -325,7 +330,7 @@ async function main() {
       origin: expectedOrigin,
       codegRevision:
         process.env.CODEG_REVISION ||
-        "29018340851d8e569a52b4bd139dcfed09efc7bd",
+        "f3d82482e78467aa2636d181ae7154c433cb6f94",
       sessionId: session.session_id,
       checks: [
         "Codeg static root and immutable Next.js assets",
@@ -336,7 +341,7 @@ async function main() {
         "live assistant and thinking plus hydrated tool rendering from ACP/SSE",
         "workbench cancel request and idempotent API acknowledgement",
         "forced SSE reconnect and post-reconnect streamed reply",
-        "direct /workspace refresh and transcript recovery",
+        "direct /workspace refresh, visible sidebar session, and transcript recovery",
       ],
       sessionHttp: sessionResponses,
       requestOrigins: [...requestOrigins],
