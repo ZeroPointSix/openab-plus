@@ -412,11 +412,33 @@ async fn main() -> anyhow::Result<()> {
         "config loaded"
     );
 
+    #[cfg(any(
+        feature = "telegram",
+        feature = "line",
+        feature = "feishu",
+        feature = "googlechat",
+        feature = "wecom",
+        feature = "teams",
+        feature = "acp",
+    ))]
+    let admin_http_active = admin_http_enabled();
+    #[cfg(not(any(
+        feature = "telegram",
+        feature = "line",
+        feature = "feishu",
+        feature = "googlechat",
+        feature = "wecom",
+        feature = "teams",
+        feature = "acp",
+    )))]
+    let admin_http_active = false;
+
     if cfg.discord.is_none()
         && cfg.slack.is_none()
         && cfg.gateway.is_none()
         && cfg.telegram.is_none()
         && !has_unified_platform(&cfg)
+        && !admin_http_active
     {
         anyhow::bail!(
             "no adapter configured — add [discord], [slack], [telegram], [wecom], [googlechat], or [gateway] to config, or set platform env vars (TELEGRAM_BOT_TOKEN, etc.)"
