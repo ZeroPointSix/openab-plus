@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CODEG_REVISION: f3d82482e78467aa2636d181ae7154c433cb6f94
+  CODEG_REVISION: c7776dab5fdc0a5fd7375f105c7e4bb15b3217b7
   PLAYWRIGHT_VERSION: 1.51.1
 
 jobs:

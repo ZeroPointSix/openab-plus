@@ -330,7 +330,7 @@ async function main() {
       origin: expectedOrigin,
       codegRevision:
         process.env.CODEG_REVISION ||
-        "f3d82482e78467aa2636d181ae7154c433cb6f94",
+        "c7776dab5fdc0a5fd7375f105c7e4bb15b3217b7",
       sessionId: session.session_id,
       checks: [
         "Codeg static root and immutable Next.js assets",

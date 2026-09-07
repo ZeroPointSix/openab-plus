@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly DEFAULT_CODEG_REVISION="f3d82482e78467aa2636d181ae7154c433cb6f94"
+readonly DEFAULT_CODEG_REVISION="c7776dab5fdc0a5fd7375f105c7e4bb15b3217b7"
 readonly REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CODEG_REPOSITORY="${CODEG_REPOSITORY:-https://github.com/ZeroPointSix/codeg.git}"

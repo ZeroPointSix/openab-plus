@@ -13,7 +13,7 @@
 
 # Global ARG — must be declared before first FROM for use in FROM instructions
 ARG BUILDER_IMAGE=local_builder
-ARG CODEG_REVISION=f3d82482e78467aa2636d181ae7154c433cb6f94
+ARG CODEG_REVISION=c7776dab5fdc0a5fd7375f105c7e4bb15b3217b7
 
 # Build the OpenAB-enabled Codeg workbench from an immutable, prepared source
 # tree. scripts/prepare-codeg-context.sh verifies the checkout and writes the
